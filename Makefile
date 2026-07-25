@@ -11,10 +11,6 @@
 #                      SigmaStar - INFINITY6E
 #   CROSS_COMPILE  - Cross-compiler prefix
 #
-# Optional:
-#   SIGMASTAR_SDK  - SigmaStar SDK staging dir (default: ../sigmastar-sdk),
-#                    laid out as <soc>/{include,lib}
-
 ifeq ($(filter clean distclean build,$(MAKECMDGOALS)),)
 ifndef PLATFORM
 $(error PLATFORM not set. Use: make PLATFORM=T31 CROSS_COMPILE=mipsel-linux-)
@@ -28,17 +24,14 @@ COMMON_DIR := ../raptor-common
 COMPY_DIR  := ../compy
 
 # Vendor selection — must match raptor-hal's Makefile. Ingenic parts link the
-# single IMP library; SigmaStar parts link the per-module MI libraries.
+# single IMP library; SigmaStar parts link no vendor library at all, reaching
+# MI through dlopen (see raptor-hal/src/star/i6_common.h).
 SIGMASTAR_PLATFORMS := INFINITY6E
 ifneq ($(filter $(PLATFORM),$(SIGMASTAR_PLATFORMS)),)
 VENDOR := sigmastar
 else
 VENDOR := ingenic
 endif
-
-SIGMASTAR_SDK      ?= $(CURDIR)/../sigmastar-sdk
-SDK_DIR_INFINITY6E := infinity6e
-STAR_LIB_DIR       := $(SIGMASTAR_SDK)/$(SDK_DIR_$(PLATFORM))/lib
 
 # Toolchain
 CC     := $(CROSS_COMPILE)gcc
@@ -198,39 +191,32 @@ endif
 
 # Vendor SDK libraries.
 #
-# NOTE (phase 2 decision): this direct-link set is on its way out. The MI
-# backend will reach the SDK through dlopen instead, using divinus's
-# vendored i6_*.h loaders, which removes the need for any MI .so at link
-# time. When that lands, VENDOR_LIBS for sigmastar collapses to nothing
-# (-ldl is already in LDFLAGS_HAL) and STAR_LIB_DIR goes away. Kept for now
-# so the platform keeps building until the backend switches over.
+# SigmaStar links none of them. The MI backend reaches the SDK through dlopen
+# using the vendored loaders in raptor-hal/src/star/i6_*.h, so no MI .so has
+# to exist at build time and -ldl (already in LDFLAGS_HAL below) is the whole
+# requirement. That is not just a licensing convenience: the MI stack is
+# coupled to the device's 4.9.84 kernel, so binding at runtime to the
+# libraries the device itself carries beats baking in a build-host snapshot
+# of them.
+#
+# The symbol closure worked out for the earlier direct-link approach still
+# matters, but as dlopen *ordering* rather than as -l flags. Each libmi_*.so
+# declares only libc.so.6 as NEEDED and leaves every cross-library symbol
+# undefined for the loader to satisfy from the global scope, so each
+# dependency must be dlopen'd RTLD_GLOBAL before its consumer:
+#   libcam_os_wrapper — needed by every libmi_*, which is why i6_sys.h loads
+#     it before libmi_sys
+#   libispalgo → libcus3a → libmi_isp — libmi_isp calls CUS3A_*, and libcus3a
+#     in turn calls AeInit/DoAe/AwbInit/IspLoadIqCfg. Phase 3 must load them
+#     in that order; divinus's i6c_isp.h/m6_isp.h do exactly this.
+#
+# Audio needs no extra library either. The G711*/g726_*/Iaa*/MI_AED_* symbols
+# libmi_ai leaves undefined are declared WEAK, so they resolve to NULL rather
+# than failing, and the capture path never calls them — both references take
+# raw PCM and encode in software. libmi_ao is not needed at all; nothing in
+# scope plays audio out.
 ifeq ($(VENDOR),sigmastar)
-# SigmaStar splits the MI SDK into one .so per module, and each libmi_*.so
-# declares only libc.so.6 as NEEDED — every cross-library symbol is left
-# undefined for the loader to satisfy from whatever else is in the global
-# scope. Both reference implementations sidestep this by dlopen'ing
-# libcam_os_wrapper.so first with RTLD_GLOBAL (waybeam_venc's star6e_mi.c,
-# divinus's i6_sys.h); linking directly instead means naming the full
-# closure here.
-#
-# This set is the verified transitive closure for the video path, and it
-# links with no undefined symbols at all -- it does NOT rely on the
-# --allow-shlib-undefined already in LDFLAGS_SYSROOT. Keep it that way: a
-# missing library here should be a link error, not a runtime surprise.
-# Two dependencies are non-obvious:
-#   libcus3a   - libmi_isp.so calls CUS3A_* (the customer 3A entry points)
-#   libispalgo - libcus3a.so in turn calls AeInit/DoAe/AwbInit/IspLoadIqCfg
-#
-# Audio (libmi_ai) and OSD (libmi_rgn) are absent because they belong to
-# later phases. When audio lands it needs -lmi_ai and nothing else: the
-# G711*/g726_*/Iaa*/MI_AED_* symbols it leaves undefined are declared WEAK,
-# so they resolve to NULL rather than breaking the link, and the capture
-# path (SetPubAttr/EnableChn/GetFrame/ReleaseFrame) never calls them --
-# both references take raw PCM and encode in software. libmi_ao is not
-# needed at all; nothing in scope plays audio out.
-VENDOR_LIBS := -L$(STAR_LIB_DIR) -Wl,-rpath-link,$(STAR_LIB_DIR) \
-               -lmi_sys -lmi_vif -lmi_vpe -lmi_venc -lmi_isp -lmi_sensor \
-               -lcus3a -lispalgo -lcam_os_wrapper
+VENDOR_LIBS :=
 else
 VENDOR_LIBS := -limp -lalog
 endif
