@@ -204,23 +204,26 @@ ifeq ($(VENDOR),sigmastar)
 # scope. Both reference implementations sidestep this by dlopen'ing
 # libcam_os_wrapper.so first with RTLD_GLOBAL (waybeam_venc's star6e_mi.c,
 # divinus's i6_sys.h); linking directly instead means naming the full
-# closure here, hence --allow-shlib-undefined.
+# closure here.
 #
-# This set is the verified transitive closure for the video path: its only
-# unresolved symbols are the usual optional/weak ones (__gmon_start__,
-# _ITM_*, __stack_chk_guard). Two dependencies are non-obvious:
+# This set is the verified transitive closure for the video path, and it
+# links with no undefined symbols at all -- it does NOT rely on the
+# --allow-shlib-undefined already in LDFLAGS_SYSROOT. Keep it that way: a
+# missing library here should be a link error, not a runtime surprise.
+# Two dependencies are non-obvious:
 #   libcus3a   - libmi_isp.so calls CUS3A_* (the customer 3A entry points)
 #   libispalgo - libcus3a.so in turn calls AeInit/DoAe/AwbInit/IspLoadIqCfg
 #
-# Audio (libmi_ai/libmi_ao) and OSD (libmi_rgn) are deliberately absent:
-# they belong to later phases, and the audio libraries additionally need
-# G711*/g726_*/Iaa*/MI_AED_* from vendor algorithm libraries that the
-# OpenIPC osdrv package does not ship. That gap has to be resolved before
-# the audio phase, so linking them now would only hide it.
+# Audio (libmi_ai) and OSD (libmi_rgn) are absent because they belong to
+# later phases. When audio lands it needs -lmi_ai and nothing else: the
+# G711*/g726_*/Iaa*/MI_AED_* symbols it leaves undefined are declared WEAK,
+# so they resolve to NULL rather than breaking the link, and the capture
+# path (SetPubAttr/EnableChn/GetFrame/ReleaseFrame) never calls them --
+# both references take raw PCM and encode in software. libmi_ao is not
+# needed at all; nothing in scope plays audio out.
 VENDOR_LIBS := -L$(STAR_LIB_DIR) -Wl,-rpath-link,$(STAR_LIB_DIR) \
                -lmi_sys -lmi_vif -lmi_vpe -lmi_venc -lmi_isp -lmi_sensor \
-               -lcus3a -lispalgo -lcam_os_wrapper \
-               -Wl,--allow-shlib-undefined
+               -lcus3a -lispalgo -lcam_os_wrapper
 else
 VENDOR_LIBS := -limp -lalog
 endif
