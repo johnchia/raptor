@@ -6,8 +6,14 @@
 #   make clean
 #
 # Required:
-#   PLATFORM       - Target SoC: T10, T20, T21, T23, T30, T31, T32, T33, T40, T41, A1
+#   PLATFORM       - Target SoC:
+#                      Ingenic   - T10, T20, T21, T23, T30, T31, T32, T33, T40, T41, A1
+#                      SigmaStar - INFINITY6E
 #   CROSS_COMPILE  - Cross-compiler prefix
+#
+# Optional:
+#   SIGMASTAR_SDK  - SigmaStar SDK staging dir (default: ../sigmastar-sdk),
+#                    laid out as <soc>/{include,lib}
 
 ifeq ($(filter clean distclean build,$(MAKECMDGOALS)),)
 ifndef PLATFORM
@@ -20,6 +26,19 @@ HAL_DIR    := ../raptor-hal
 IPC_DIR    := ../raptor-ipc
 COMMON_DIR := ../raptor-common
 COMPY_DIR  := ../compy
+
+# Vendor selection — must match raptor-hal's Makefile. Ingenic parts link the
+# single IMP library; SigmaStar parts link the per-module MI libraries.
+SIGMASTAR_PLATFORMS := INFINITY6E
+ifneq ($(filter $(PLATFORM),$(SIGMASTAR_PLATFORMS)),)
+VENDOR := sigmastar
+else
+VENDOR := ingenic
+endif
+
+SIGMASTAR_SDK      ?= $(CURDIR)/../sigmastar-sdk
+SDK_DIR_INFINITY6E := infinity6e
+STAR_LIB_DIR       := $(SIGMASTAR_SDK)/$(SDK_DIR_$(PLATFORM))/lib
 
 # Toolchain
 CC     := $(CROSS_COMPILE)gcc
@@ -98,8 +117,15 @@ else
 Q := @
 endif
 
-# Compy include paths (for RSD only)
-COMPY_BUILD  := $(CURDIR)/$(COMPY_DIR)/build-mips
+# Compy include paths (for RSD only).
+# The build dir is arch-suffixed because compy is a separate CMake project
+# built per target; build-standalone.sh overrides COMPY_BUILD/LIB_COMPY_FILE
+# outright, so this only sets the default for in-tree builds.
+ifeq ($(VENDOR),sigmastar)
+COMPY_BUILD  ?= $(CURDIR)/$(COMPY_DIR)/build-arm
+else
+COMPY_BUILD  ?= $(CURDIR)/$(COMPY_DIR)/build-mips
+endif
 COMPY_CFLAGS := -I$(CURDIR)/$(COMPY_DIR)/include \
                 -I$(COMPY_BUILD)/_deps/slice99-src \
                 -I$(COMPY_BUILD)/_deps/datatype99-src \
@@ -170,9 +196,38 @@ else
 LINK_STDCXX := -lstdc++
 endif
 
+# Vendor SDK libraries.
+ifeq ($(VENDOR),sigmastar)
+# SigmaStar splits the MI SDK into one .so per module, and each libmi_*.so
+# declares only libc.so.6 as NEEDED — every cross-library symbol is left
+# undefined for the loader to satisfy from whatever else is in the global
+# scope. Both reference implementations sidestep this by dlopen'ing
+# libcam_os_wrapper.so first with RTLD_GLOBAL (waybeam_venc's star6e_mi.c,
+# divinus's i6_sys.h); linking directly instead means naming the full
+# closure here, hence --allow-shlib-undefined.
+#
+# This set is the verified transitive closure for the video path: its only
+# unresolved symbols are the usual optional/weak ones (__gmon_start__,
+# _ITM_*, __stack_chk_guard). Two dependencies are non-obvious:
+#   libcus3a   - libmi_isp.so calls CUS3A_* (the customer 3A entry points)
+#   libispalgo - libcus3a.so in turn calls AeInit/DoAe/AwbInit/IspLoadIqCfg
+#
+# Audio (libmi_ai/libmi_ao) and OSD (libmi_rgn) are deliberately absent:
+# they belong to later phases, and the audio libraries additionally need
+# G711*/g726_*/Iaa*/MI_AED_* from vendor algorithm libraries that the
+# OpenIPC osdrv package does not ship. That gap has to be resolved before
+# the audio phase, so linking them now would only hide it.
+VENDOR_LIBS := -L$(STAR_LIB_DIR) -Wl,-rpath-link,$(STAR_LIB_DIR) \
+               -lmi_sys -lmi_vif -lmi_vpe -lmi_venc -lmi_isp -lmi_sensor \
+               -lcus3a -lispalgo -lcam_os_wrapper \
+               -Wl,--allow-shlib-undefined
+else
+VENDOR_LIBS := -limp -lalog
+endif
+
 # System libs for HAL-linked daemons
-# Shim must come BEFORE Ingenic SDK libs — symbols must be resolved first.
-LDFLAGS_HAL := $(LDFLAGS_SYSROOT) $(SHIM_LIB) -limp -lalog -lpthread -lrt -lm -ldl -latomic
+# Shim must come BEFORE the vendor SDK libs — symbols must be resolved first.
+LDFLAGS_HAL := $(LDFLAGS_SYSROOT) $(SHIM_LIB) $(VENDOR_LIBS) -lpthread -lrt -lm -ldl -latomic
 
 # IVS detection libs
 ifeq ($(IVS_DETECT),1)
@@ -185,8 +240,10 @@ endif
 endif
 LDFLAGS     := $(LDFLAGS_SYSROOT) -lpthread -lrt -latomic
 
-# MIPS page size: Ingenic SoCs use 4KB pages but the toolchain defaults to
-# 64KB max-page-size. Mismatched alignment causes SIGBUS on musl/uclibc.
+# Page size: Ingenic SoCs use 4KB pages but the MIPS toolchain defaults to
+# 64KB max-page-size, and mismatched alignment causes SIGBUS on musl/uclibc.
+# ARM targets are 4KB too and default to a larger max-page-size, so the same
+# value is correct there and additionally avoids the segment padding.
 LDFLAGS_HAL += -Wl,-z,max-page-size=0x1000 -Wl,--gc-sections -Wl,--as-needed -Wl,-rpath,/usr/lib $(if $(DEBUG),,-flto)
 LDFLAGS     += -Wl,-z,max-page-size=0x1000 -Wl,--gc-sections -Wl,--as-needed -Wl,-rpath,/usr/lib $(if $(DEBUG),,-flto)
 # rpath-link for local builds (finding .so at link time)
