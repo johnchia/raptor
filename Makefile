@@ -197,6 +197,13 @@ LINK_STDCXX := -lstdc++
 endif
 
 # Vendor SDK libraries.
+#
+# NOTE (phase 2 decision): this direct-link set is on its way out. The MI
+# backend will reach the SDK through dlopen instead, using divinus's
+# vendored i6_*.h loaders, which removes the need for any MI .so at link
+# time. When that lands, VENDOR_LIBS for sigmastar collapses to nothing
+# (-ldl is already in LDFLAGS_HAL) and STAR_LIB_DIR goes away. Kept for now
+# so the platform keeps building until the backend switches over.
 ifeq ($(VENDOR),sigmastar)
 # SigmaStar splits the MI SDK into one .so per module, and each libmi_*.so
 # declares only libc.so.6 as NEEDED — every cross-library symbol is left
