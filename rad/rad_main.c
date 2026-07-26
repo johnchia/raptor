@@ -117,6 +117,15 @@
 #define RAD_RESYNC_LOG_INTERVAL_US 10000000
 
 /*
+ * Largest sequence gap treated as real capture loss (one second of periods).
+ * The SDK's sequence field is whatever the vendor library chose to put there,
+ * so beyond a second a "gap" is likelier a wrap or an unimplemented field than
+ * lost audio, and acting on it would throw the published timeline. Genuine
+ * long stalls are still covered by the clock resync.
+ */
+#define RAD_SEQ_GAP_MAX_PERIODS 50
+
+/*
  * Give the capture loop scheduling priority over the rest of the pipeline.
  * Affects the calling thread only, so the AO and control paths stay normal.
  */
@@ -1626,6 +1635,61 @@ int main(int argc, char **argv)
 		 */
 		blocking_read = drain_unsupported || drain_run >= RAD_DRAIN_BURST_MAX;
 
+		/*
+		 * Account for periods the SDK dropped before this one.
+		 *
+		 * Board measurement: MI drops a single period roughly every two
+		 * seconds (15 per 30s, every gap exactly one period) while rad
+		 * sits 99% idle and never waits more than 37ms for a fetch. So
+		 * this is loss inside the SDK, not rad being late, and rad
+		 * cannot prevent it. What rad can do is tell the truth about it.
+		 *
+		 * It did not: the synthetic clock advanced one period per
+		 * *delivered* frame, so missing audio was spliced out and the
+		 * timeline still claimed continuity. That is worse than a
+		 * declared gap. The published clock falls behind wall time by
+		 * one period per loss -- 300ms per 30s at the measured rate --
+		 * and every stage downstream smears it rather than showing it:
+		 * the slew below only nudges 1ms at a time above a 20ms band,
+		 * and rsd only snaps its RTP cadence for gaps wider than four
+		 * frames. A single lost period is under both thresholds, so the
+		 * client gets a continuous timeline that runs slow, and its
+		 * jitter buffer eventually underruns -- a couple hundred ms of
+		 * silence, periodically, which is the reported symptom.
+		 *
+		 * Advancing by what went missing keeps the timeline locked to
+		 * real time and makes each loss a correctly sized hole. It also
+		 * stops the slew fighting a deficit that was never drift.
+		 */
+		int64_t lost_periods = 0;
+		if (have_seq) {
+			int64_t delta = (int64_t)(uint32_t)(frame.seq - last_seq);
+
+			if (delta > 1 && delta <= RAD_SEQ_GAP_MAX_PERIODS) {
+				lost_periods = delta - 1;
+				seq_lost += lost_periods;
+				seq_gaps++;
+			} else if (delta != 1) {
+				/*
+				 * Stuck at zero, wrapped, or never implemented
+				 * by this vendor library -- and beyond a second
+				 * a "gap" is likelier a bad field than real
+				 * loss. Not evidence of anything, so it must
+				 * not be allowed to move the clock; the resync
+				 * below still covers a genuine long stall.
+				 */
+				seq_odd++;
+			}
+		}
+		last_seq = frame.seq;
+		have_seq = true;
+		if (mi_ts_prev && frame.timestamp > mi_ts_prev &&
+		    frame.timestamp - mi_ts_prev < 1000000) {
+			mi_ts_total_us += frame.timestamp - mi_ts_prev;
+			mi_ts_count++;
+		}
+		mi_ts_prev = frame.timestamp;
+
 		int samples = frame.length / 2;
 		int max_samples = ctrl_ctx.sample_rate / 50; /* 20ms */
 		if (samples > max_samples)
@@ -1635,6 +1699,7 @@ int main(int argc, char **argv)
 		 * SDK audio timestamps use a different clock than the encoder
 		 * on some SoCs (T31), causing A-V sync drift. Synthetic
 		 * timestamps share the encoder's clock source. */
+		synth_audio_ts += lost_periods * period_us;
 		int64_t ts = synth_audio_ts;
 		synth_audio_ts += (int64_t)samples * 1000000 / ctrl_ctx.sample_rate;
 
@@ -1655,27 +1720,6 @@ int main(int argc, char **argv)
 		 * +5000ppm test clock; ungated tracks true rate). */
 		int64_t now_us = rss_timestamp_us();
 		work_start_us = now_us;
-
-		/* See the seq/timestamp comment above the declarations. */
-		if (have_seq) {
-			int64_t delta = (int64_t)(uint32_t)(frame.seq - last_seq);
-
-			if (delta > 1 && delta < 1000) {
-				seq_lost += delta - 1;
-				seq_gaps++;
-			} else if (delta != 1) {
-				seq_odd++;
-			}
-		}
-		last_seq = frame.seq;
-		have_seq = true;
-		if (mi_ts_prev && frame.timestamp > mi_ts_prev &&
-		    frame.timestamp - mi_ts_prev < 1000000) {
-			mi_ts_total_us += frame.timestamp - mi_ts_prev;
-			mi_ts_count++;
-		}
-		mi_ts_prev = frame.timestamp;
-
 		int64_t read_gap = now_us - last_read_us;
 		bool first_read = last_read_us == 0;
 		last_read_us = now_us;
