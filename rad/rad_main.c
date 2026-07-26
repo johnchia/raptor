@@ -99,6 +99,14 @@
 #define RAD_READ_GAP_WARN_US 100000
 
 /*
+ * How many periods to take back-to-back before waiting again. A cap only so
+ * that the control socket still gets serviced and a misbehaving device cannot
+ * hold the loop indefinitely; the SDK queue is 16 periods, so this drains any
+ * real backlog in one pass.
+ */
+#define RAD_DRAIN_BURST_MAX 32
+
+/*
  * Give the capture loop scheduling priority over the rest of the pipeline.
  * Affects the calling thread only, so the AO and control paths stay normal.
  */
@@ -1416,6 +1424,16 @@ int main(int argc, char **argv)
 	 * queue depth and priority are the levers.
 	 */
 	int64_t max_read_gap_us = 0;
+	/* Never reset. A 30s window that clears itself will miss a rare stall
+	 * unless you happen to read the report for the window it landed in --
+	 * which is exactly how a 17-minute-apart loss hid behind a steady
+	 * "worst read gap 38ms". */
+	int64_t max_read_gap_ever_us = 0;
+	/* Backlog draining state: see the long comment at the fetch below. */
+	bool blocking_read = true;
+	bool drain_unsupported = false;
+	uint64_t drained_periods = 0;
+	int drain_run = 0;
 
 	while (*dctx.running) {
 		/* Check control socket (non-blocking) */
@@ -1439,9 +1457,15 @@ int main(int argc, char **argv)
 
 		rss_audio_frame_t frame;
 		int64_t read_call_us = rss_timestamp_us();
-		ret = RSS_HAL_CALL(ops, audio_read_frame, hal_ctx, ai_dev, 0, &frame, true);
+		ret = RSS_HAL_CALL(ops, audio_read_frame, hal_ctx, ai_dev, 0, &frame,
+				   blocking_read);
 		if (ret != RSS_OK) {
 			if (ret == RSS_ERR_TIMEOUT) {
+				if (!blocking_read) {
+					/* Queue drained; wait for the next period. */
+					blocking_read = true;
+					continue;
+				}
 				/* A blocking read that did not block would spin,
 				 * and at SCHED_FIFO on one core that wedges the
 				 * board. See RAD_TIMEOUT_FLOOR_US. */
@@ -1449,10 +1473,57 @@ int main(int argc, char **argv)
 					usleep(RAD_TIMEOUT_YIELD_US);
 				continue;
 			}
+			/* Any other failure from a drain attempt just means stop
+			 * draining -- the platform may not implement a
+			 * non-blocking fetch, and that must degrade to the old
+			 * one-period-per-iteration behaviour rather than to an
+			 * error every 10ms. */
+			if (!blocking_read) {
+				blocking_read = true;
+				if (!drain_unsupported) {
+					drain_unsupported = true;
+					RSS_WARN("audio: non-blocking fetch returned %d; backlog "
+						 "draining unavailable on this platform",
+						 ret);
+				}
+				continue;
+			}
 			RSS_WARN("audio_read_frame failed: %d", ret);
 			usleep(10000);
 			continue;
 		}
+
+		if (blocking_read) {
+			drain_run = 0;
+		} else {
+			drained_periods++;
+			drain_run++;
+		}
+		/*
+		 * Having got one period, try to take the next without waiting.
+		 *
+		 * This is what stops the SDK's queue from filling. The loop can
+		 * only ever consume one period per iteration and each iteration
+		 * costs about one period of wall time, so there was no way to
+		 * catch up: any surplus -- loop overhead slightly over the
+		 * period, or an ADC clock a few hundred ppm fast -- accumulated
+		 * permanently until the queue overflowed, MI discarded the
+		 * backlog ("Buffer(s) is lost due to slow fetching", with the
+		 * writer index exactly one past the reader, i.e. a full ring),
+		 * and it started again.
+		 *
+		 * Board evidence that this, and not a stall, was the mechanism:
+		 * with a 4-period queue the loss landed at buf index 13505
+		 * (4.5 min) and with a 16-period queue at 50865 (17 min) -- a
+		 * 4x deeper queue bought 3.8x the time, while the worst gap
+		 * between reads stayed at 38ms against a 20ms period. Deepening
+		 * the queue diluted it; draining removes it.
+		 *
+		 * Publishing faster than real time puts the synthetic clock
+		 * ahead of the wall clock, which the slew above already expects
+		 * and tolerates to 1s.
+		 */
+		blocking_read = drain_run >= RAD_DRAIN_BURST_MAX;
 
 		int samples = frame.length / 2;
 		int max_samples = ctrl_ctx.sample_rate / 50; /* 20ms */
@@ -1487,6 +1558,8 @@ int main(int argc, char **argv)
 		last_read_us = now_us;
 		if (!first_read && read_gap > max_read_gap_us)
 			max_read_gap_us = read_gap;
+		if (!first_read && read_gap > max_read_gap_ever_us)
+			max_read_gap_ever_us = read_gap;
 		bool live_paced = read_gap >= 15000 && read_gap <= 150000;
 		int64_t clk_err = now_us - synth_audio_ts;
 		if (clk_err > RAD_SYNTH_RESYNC_BEHIND_US || clk_err < -RAD_SYNTH_RESYNC_AHEAD_US) {
@@ -1524,14 +1597,20 @@ int main(int argc, char **argv)
 			 * seeing without turning debug logging on. The routine line
 			 * stays periodic housekeeping and logs at trace. */
 			if (max_read_gap_us >= RAD_READ_GAP_WARN_US)
-				RSS_WARN("audio frames: %llu, worst read gap %lldms -- capture "
-					 "loop is being preempted past the SDK's queue",
+				RSS_WARN("audio frames: %llu, worst read gap %lldms (peak "
+					 "%lldms), drained %llu -- capture loop is being "
+					 "preempted past the SDK's queue",
 					 (unsigned long long)frame_count,
-					 (long long)(max_read_gap_us / 1000));
+					 (long long)(max_read_gap_us / 1000),
+					 (long long)(max_read_gap_ever_us / 1000),
+					 (unsigned long long)drained_periods);
 			else
-				RSS_TRACE("audio frames: %llu, worst read gap %lldms",
+				RSS_TRACE("audio frames: %llu, worst read gap %lldms (peak "
+					  "%lldms), drained %llu",
 					  (unsigned long long)frame_count,
-					  (long long)(max_read_gap_us / 1000));
+					  (long long)(max_read_gap_us / 1000),
+					  (long long)(max_read_gap_ever_us / 1000),
+					  (unsigned long long)drained_periods);
 			max_read_gap_us = 0;
 			last_stats = now;
 		}
