@@ -23,12 +23,22 @@
 #define RSD_BUF_SIZE	     4096
 #define RSD_IDLE_TIMEOUT_SEC 60 /* disconnect idle clients (slowloris protection) */
 
-/* RTCP Sender Report cadence (RFC 3550 recommends ~5 s).  The first SR
- * goes out ~1 s after PLAY so NVRs (ffmpeg/Frigate/go2rtc) get their
- * NTP<->RTP anchor inside their probe window; afterwards the periodic
- * SRs let them re-anchor A/V sync against clock drift. */
+/* RTCP Sender Report cadence (RFC 3550 recommends ~5 s).  The periodic SRs
+ * let NVRs (ffmpeg/Frigate/go2rtc) re-anchor A/V sync against clock drift.
+ *
+ * The first SR is what gives a client the NTP<->RTP anchor it needs to relate
+ * the audio timeline to the video one, and until it has that anchor for both
+ * streams a client has nothing to sync against -- which is the reported
+ * "1-2 s of no audio at stream start" on Frigate. FIRST_US used to hold it
+ * back a full second for no benefit: the earlier the anchor arrives, the
+ * sooner audio can be placed. 0 means the first SR rides out with the first
+ * RTP packet of each stream (last_rtcp is backdated a full interval at PLAY,
+ * so the very first packet satisfies the interval test), where the transport's
+ * last_rtp_timestamp is already valid because the SR check runs after the
+ * send. RFC 3550's randomized first interval exists to keep many senders from
+ * synchronising; it has no bearing on one camera with a handful of viewers. */
 #define RSD_SR_INTERVAL_US 5000000
-#define RSD_SR_FIRST_US	   1000000
+#define RSD_SR_FIRST_US	   0
 
 /* Audio codec IDs (matches RAD ring codec field) */
 #define RSD_CODEC_PCMU 0

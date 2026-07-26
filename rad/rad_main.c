@@ -20,6 +20,8 @@
 #include <errno.h>
 
 #include <pthread.h>
+#include <sched.h>
+#include <sys/resource.h>
 #include <sys/select.h>
 
 #include <raptor_hal.h>
@@ -51,6 +53,91 @@
 #define RAD_SYNTH_RESYNC_AHEAD_US  1000000
 #define RAD_SYNTH_NUDGE_BAND_US	   20000
 #define RAD_SYNTH_NUDGE_US	   1000
+
+/*
+ * Capture-loop scheduling.
+ *
+ * The AI loop has a hard deadline: the SoC hands back one period every 20ms
+ * and overwrites periods rad has not collected, so being late costs recorded
+ * audio, not just latency. Left at SCHED_OTHER it competes on equal terms
+ * with video encoding, the ISP's userspace work and RTSP delivery, and on a
+ * single-core Cortex-A7 it loses -- observed on the board as MI's "Buffer(s)
+ * is lost due to slow fetching" together with rad's own "+151ms" resync.
+ *
+ * SCHED_FIFO at a low priority is the fix that matches the shape of the work:
+ * the loop wakes 50 times a second, runs for a millisecond or two, and blocks
+ * again, so it cannot meaningfully starve anything, while any RT thread the
+ * vendor libraries run above this priority still wins. Deliberately low
+ * rather than aggressive.
+ *
+ * Set rt_priority = 0 to leave scheduling alone.
+ *
+ * A SCHED_FIFO loop must be structurally incapable of spinning, because on
+ * one core that is an unrecoverable hang rather than a slowdown -- see the
+ * timeout guard in the loop, which is what makes this priority safe to
+ * default on.
+ */
+#define RAD_RT_PRIORITY_DEFAULT 10
+#define RAD_NICE_FALLBACK	(-10)
+
+/*
+ * A blocking read that returns "no data" faster than this did not block, so
+ * something is answering immediately and the loop would spin. Yield for a
+ * fraction of a period instead: long enough that a wedged device cannot
+ * monopolise the core, short enough to be invisible when the device is
+ * merely idle at startup.
+ */
+#define RAD_TIMEOUT_FLOOR_US 2000
+#define RAD_TIMEOUT_YIELD_US 2000
+
+/*
+ * Inter-read gap worth reporting without debug logging on. The backend's
+ * output-port queue is what actually decides when lateness turns into lost
+ * samples, and rad cannot see its depth from here, so this is a plain "much
+ * longer than a period" figure rather than a threshold derived from it.
+ */
+#define RAD_READ_GAP_WARN_US 100000
+
+/*
+ * Give the capture loop scheduling priority over the rest of the pipeline.
+ * Affects the calling thread only, so the AO and control paths stay normal.
+ */
+static void rad_set_capture_priority(rss_config_t *cfg)
+{
+	int prio = rss_config_get_int(cfg, "audio", "rt_priority", RAD_RT_PRIORITY_DEFAULT);
+	int lo, hi, err;
+
+	if (prio <= 0) {
+		RSS_INFO("capture loop: default scheduling (rt_priority=%d)", prio);
+		return;
+	}
+
+	lo = sched_get_priority_min(SCHED_FIFO);
+	hi = sched_get_priority_max(SCHED_FIFO);
+	if (hi > 0 && prio > hi)
+		prio = hi;
+	if (lo > 0 && prio < lo)
+		prio = lo;
+
+	struct sched_param sp = {.sched_priority = prio};
+	/* pthread_setschedparam reports through its return value, not errno. */
+	err = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+	if (err == 0) {
+		RSS_INFO("capture loop: SCHED_FIFO %d", prio);
+		return;
+	}
+
+	/* Without CAP_SYS_NICE there is no RT, but CFS weight is still worth
+	 * having -- it does not bound latency, it just makes preemption by the
+	 * encoder much less likely. */
+	if (setpriority(PRIO_PROCESS, 0, RAD_NICE_FALLBACK) == 0)
+		RSS_WARN("capture loop: SCHED_FIFO %d refused (%d); running at nice %d", prio, err,
+			 RAD_NICE_FALLBACK);
+	else
+		RSS_WARN("capture loop: no priority available (SCHED_FIFO %d, nice %d both refused) "
+			 "-- audio may drop periods under load",
+			 prio, RAD_NICE_FALLBACK);
+}
 
 /* ── AO thread context (needed by ctrl handler for ao-enable/ao-disable) ── */
 
@@ -1316,8 +1403,19 @@ int main(int argc, char **argv)
 		.synth_audio_ts = &synth_audio_ts,
 	};
 
+	rad_set_capture_priority(dctx.cfg);
+
 	uint64_t frame_count = 0;
 	int64_t last_stats = rss_timestamp_us();
+	/*
+	 * Worst gap between successful reads in the current report window.
+	 * This is the measurement that separates the two ways audio goes
+	 * missing: if MI reports lost buffers while this stays near the 20ms
+	 * period, the loss happened inside the SDK and no amount of scheduling
+	 * priority here will help; if it is large, rad was preempted and the
+	 * queue depth and priority are the levers.
+	 */
+	int64_t max_read_gap_us = 0;
 
 	while (*dctx.running) {
 		/* Check control socket (non-blocking) */
@@ -1340,10 +1438,17 @@ int main(int argc, char **argv)
 		}
 
 		rss_audio_frame_t frame;
+		int64_t read_call_us = rss_timestamp_us();
 		ret = RSS_HAL_CALL(ops, audio_read_frame, hal_ctx, ai_dev, 0, &frame, true);
 		if (ret != RSS_OK) {
-			if (ret == RSS_ERR_TIMEOUT)
+			if (ret == RSS_ERR_TIMEOUT) {
+				/* A blocking read that did not block would spin,
+				 * and at SCHED_FIFO on one core that wedges the
+				 * board. See RAD_TIMEOUT_FLOOR_US. */
+				if (rss_timestamp_us() - read_call_us < RAD_TIMEOUT_FLOOR_US)
+					usleep(RAD_TIMEOUT_YIELD_US);
 				continue;
+			}
 			RSS_WARN("audio_read_frame failed: %d", ret);
 			usleep(10000);
 			continue;
@@ -1378,13 +1483,18 @@ int main(int argc, char **argv)
 		 * +5000ppm test clock; ungated tracks true rate). */
 		int64_t now_us = rss_timestamp_us();
 		int64_t read_gap = now_us - last_read_us;
+		bool first_read = last_read_us == 0;
 		last_read_us = now_us;
+		if (!first_read && read_gap > max_read_gap_us)
+			max_read_gap_us = read_gap;
 		bool live_paced = read_gap >= 15000 && read_gap <= 150000;
 		int64_t clk_err = now_us - synth_audio_ts;
 		if (clk_err > RAD_SYNTH_RESYNC_BEHIND_US || clk_err < -RAD_SYNTH_RESYNC_AHEAD_US) {
 			if (live_paced) {
-				RSS_WARN("audio clock resync %+lldms (lost samples or stall)",
-					 (long long)(clk_err / 1000));
+				RSS_WARN("audio clock resync %+lldms (lost samples or stall; "
+					 "worst read gap this window %lldms)",
+					 (long long)(clk_err / 1000),
+					 (long long)(max_read_gap_us / 1000));
 				synth_audio_ts += clk_err;
 			}
 		} else if (clk_err > RAD_SYNTH_NUDGE_BAND_US) {
@@ -1409,7 +1519,20 @@ int main(int argc, char **argv)
 
 		int64_t now = rss_timestamp_us();
 		if (now - last_stats >= 30000000) {
-			RSS_TRACE("audio frames: %llu", (unsigned long long)frame_count);
+			/* Past the output-port queue MI starts discarding periods
+			 * instead of queueing them, so a gap that large is worth
+			 * seeing without turning debug logging on. The routine line
+			 * stays periodic housekeeping and logs at trace. */
+			if (max_read_gap_us >= RAD_READ_GAP_WARN_US)
+				RSS_WARN("audio frames: %llu, worst read gap %lldms -- capture "
+					 "loop is being preempted past the SDK's queue",
+					 (unsigned long long)frame_count,
+					 (long long)(max_read_gap_us / 1000));
+			else
+				RSS_TRACE("audio frames: %llu, worst read gap %lldms",
+					  (unsigned long long)frame_count,
+					  (long long)(max_read_gap_us / 1000));
+			max_read_gap_us = 0;
 			last_stats = now;
 		}
 	}
