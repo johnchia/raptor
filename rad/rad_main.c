@@ -1429,9 +1429,13 @@ int main(int argc, char **argv)
 	 * which is exactly how a 17-minute-apart loss hid behind a steady
 	 * "worst read gap 38ms". */
 	int64_t max_read_gap_ever_us = 0;
-	/* Backlog draining state: see the long comment at the fetch below. */
+	/* Backlog draining state: see the long comment at the fetch below.
+	 * Switchable because it depends on a vendor behaviour (a non-blocking
+	 * fetch reporting "empty" without side effects) that took a bad build to
+	 * pin down, so leave a way to turn it off on the board rather than in a
+	 * rebuild. */
 	bool blocking_read = true;
-	bool drain_unsupported = false;
+	bool drain_unsupported = !rss_config_get_bool(dctx.cfg, "audio", "drain_backlog", true);
 	uint64_t drained_periods = 0;
 	int drain_run = 0;
 
@@ -1481,9 +1485,13 @@ int main(int argc, char **argv)
 			if (!blocking_read) {
 				blocking_read = true;
 				if (!drain_unsupported) {
+					/* Latches. Logging once while continuing to
+					 * do the thing is not a fallback -- that
+					 * bug shipped, and on this platform the
+					 * failing poll was destructive. */
 					drain_unsupported = true;
 					RSS_WARN("audio: non-blocking fetch returned %d; backlog "
-						 "draining unavailable on this platform",
+						 "draining disabled for this run",
 						 ret);
 				}
 				continue;
@@ -1523,7 +1531,7 @@ int main(int argc, char **argv)
 		 * ahead of the wall clock, which the slew above already expects
 		 * and tolerates to 1s.
 		 */
-		blocking_read = drain_run >= RAD_DRAIN_BURST_MAX;
+		blocking_read = drain_unsupported || drain_run >= RAD_DRAIN_BURST_MAX;
 
 		int samples = frame.length / 2;
 		int max_samples = ctrl_ctx.sample_rate / 50; /* 20ms */
