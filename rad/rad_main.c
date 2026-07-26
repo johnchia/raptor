@@ -126,6 +126,20 @@
 #define RAD_SEQ_GAP_MAX_PERIODS 50
 
 /*
+ * Capture loss worth warning about, as a fraction of the periods in the
+ * window: 1/200 is 0.5%, or about 7 periods in 30s.
+ *
+ * Not "any loss at all". Board steady state on Infinity6E is ~3 lost periods
+ * per 30s -- 60ms in 30s, one 20ms hole every ten seconds, inaudible, outside
+ * rad's control and unchanged over a quarter hour of streaming. Warning on
+ * that means warning every 30s forever, which trains everyone to ignore the
+ * line. For scale, the same board measured ~15 per 30s when run in the
+ * foreground on a console (MI writes two lines per lost period from inside
+ * MI_AI_GetFrame, on this thread), and that is worth seeing.
+ */
+#define RAD_SEQ_LOSS_WARN_RATIO 200
+
+/*
  * Give the capture loop scheduling priority over the rest of the pipeline.
  * Affects the calling thread only, so the AO and control paths stay normal.
  */
@@ -1814,7 +1828,8 @@ int main(int argc, char **argv)
 			 * The routine line is periodic housekeeping and logs at
 			 * trace; only the fault case is worth a run's attention.
 			 */
-			if (seq_lost > 0 || max_read_gap_us >= RAD_READ_GAP_WARN_US)
+			if (seq_lost > expected / RAD_SEQ_LOSS_WARN_RATIO ||
+			    max_read_gap_us >= RAD_READ_GAP_WARN_US)
 				RSS_WARN("%s -- periods lost against the %lldms capture period",
 					 stats, (long long)(period_us / 1000));
 			else
