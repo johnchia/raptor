@@ -270,6 +270,25 @@ static void load_sensor_from_section(rss_config_t *cfg, const char *section,
 	 * name, so this stays empty unless the file lives somewhere unusual. */
 	rss_strlcpy(sensor->iq_file, rss_config_get_str(cfg, section, "iq_file", ""),
 		    sizeof(sensor->iq_file));
+
+	/* Orientation is read here, out of the [image] section rather than this
+	 * one, because some backends have to know it before the sensor starts:
+	 * where orientation is a sensor register the driver latches it during
+	 * bring-up, so a value that only arrives later via isp_set_hflip cannot
+	 * decide how the first frame comes out. Section 3c still applies the
+	 * same keys through the ops, which is what backends that can change
+	 * orientation freely act on, and what a runtime change goes through. */
+	{
+		char img_sect[32];
+		const char *img = "image";
+
+		if (proc_idx > 0) {
+			snprintf(img_sect, sizeof(img_sect), "sensor%d_image", proc_idx);
+			img = img_sect;
+		}
+		sensor->hflip = rss_config_get_int(cfg, img, "hflip", 0) ? 1 : 0;
+		sensor->vflip = rss_config_get_int(cfg, img, "vflip", 0) ? 1 : 0;
+	}
 }
 
 /* FS channel base for a given sensor index (hardware mapping) */
