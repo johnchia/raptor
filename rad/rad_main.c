@@ -1483,12 +1483,48 @@ int main(int argc, char **argv)
 	int64_t period_us = sample_rate > 0
 				    ? (int64_t)audio_cfg.samples_per_frame * 1000000 / sample_rate
 				    : 0;
-	int64_t read_total_us = 0;
 	int64_t encode_total_us = 0;
 	int64_t encode_max_us = 0;
 	uint64_t window_frames = 0;
 	int64_t resync_last_log_us = 0;
 	uint32_t resync_count = 0;
+	/*
+	 * Work, as opposed to waiting. A blocking fetch spends the rest of the
+	 * period parked in the SDK, so counting the fetch as busy time reports
+	 * ~100% on a loop that is almost entirely idle -- which is exactly what
+	 * the first version of this did, and it was useless. Measure instead
+	 * from the fetch returning to the next fetch starting: encode, publish,
+	 * release, stats, control socket. That number against the period is
+	 * what says whether there is headroom.
+	 */
+	int64_t work_total_us = 0;
+	int64_t work_start_us = 0;
+	/*
+	 * The SDK's own sequence number and timestamp, which the HAL already
+	 * fills in from MI and rad has been discarding.
+	 *
+	 * These settle a question wall-clock arithmetic cannot. "Frames short
+	 * of what 30s at a 20ms period should yield" conflates two different
+	 * things: periods MI really dropped, and an AI sample clock that is not
+	 * exactly nominal. A 1% shortfall looks identical either way and means
+	 * completely different things -- one is lost audio, the other is
+	 * arithmetic. Sequence gaps count dropped periods with no assumption
+	 * about the clock; the mean timestamp delta measures the clock itself.
+	 *
+	 * Both fields are whatever the vendor library chose to put there, so
+	 * treat them as suspect: only a delta of 1 is "normal", a plausible
+	 * forward jump is loss, and anything else (stuck at zero, wrapped,
+	 * never implemented) is counted separately rather than reported as
+	 * loss.
+	 */
+	uint32_t last_seq = 0;
+	bool have_seq = false;
+	int64_t seq_lost = 0;
+	uint32_t seq_gaps = 0;
+	uint32_t seq_odd = 0;
+	int64_t mi_ts_prev = 0;
+	int64_t mi_ts_total_us = 0;
+	uint64_t mi_ts_count = 0;
 
 	while (*dctx.running) {
 		/* Check control socket (non-blocking) */
@@ -1512,6 +1548,12 @@ int main(int argc, char **argv)
 
 		rss_audio_frame_t frame;
 		int64_t read_call_us = rss_timestamp_us();
+		if (work_start_us) {
+			/* Consumed, so a fetch that times out before the next
+			 * successful one does not get its yield counted twice. */
+			work_total_us += read_call_us - work_start_us;
+			work_start_us = 0;
+		}
 		ret = RSS_HAL_CALL(ops, audio_read_frame, hal_ctx, ai_dev, 0, &frame,
 				   blocking_read);
 		if (ret != RSS_OK) {
@@ -1612,7 +1654,28 @@ int main(int argc, char **argv)
 		 * skews the long-run rate (measured -1000ppm under a
 		 * +5000ppm test clock; ungated tracks true rate). */
 		int64_t now_us = rss_timestamp_us();
-		read_total_us += now_us - read_call_us;
+		work_start_us = now_us;
+
+		/* See the seq/timestamp comment above the declarations. */
+		if (have_seq) {
+			int64_t delta = (int64_t)(uint32_t)(frame.seq - last_seq);
+
+			if (delta > 1 && delta < 1000) {
+				seq_lost += delta - 1;
+				seq_gaps++;
+			} else if (delta != 1) {
+				seq_odd++;
+			}
+		}
+		last_seq = frame.seq;
+		have_seq = true;
+		if (mi_ts_prev && frame.timestamp > mi_ts_prev &&
+		    frame.timestamp - mi_ts_prev < 1000000) {
+			mi_ts_total_us += frame.timestamp - mi_ts_prev;
+			mi_ts_count++;
+		}
+		mi_ts_prev = frame.timestamp;
+
 		int64_t read_gap = now_us - last_read_us;
 		bool first_read = last_read_us == 0;
 		last_read_us = now_us;
@@ -1677,45 +1740,52 @@ int main(int argc, char **argv)
 			 * is the only number here that is unambiguously audio
 			 * loss; the rest explain it. */
 			int64_t missed = expected - (int64_t)window_frames;
-			int64_t busy_pct =
-				win_us > 0 ? (read_total_us + encode_total_us) * 100 / win_us : 0;
-			char stats[256];
+			int64_t work_pct = win_us > 0 ? work_total_us * 100 / win_us : 0;
+			int64_t mi_period_us =
+				mi_ts_count ? mi_ts_total_us / (int64_t)mi_ts_count : 0;
+			char stats[288];
 
 			if (missed < 0)
 				missed = 0;
 			snprintf(stats, sizeof(stats),
-				 "audio frames: %llu (missed %lld of %lld this window), worst "
-				 "read gap %lldms (peak %lldms), encode peak %lldms, loop %lld%% "
-				 "busy, drained %llu",
+				 "audio frames: %llu (wall-short %lld/%lld, MI seq lost %lld in "
+				 "%u gap(s), %u odd), gap %lldms (peak %lldms), MI period %lldus, "
+				 "encode peak %lldms, work %lld%%, drained %llu",
 				 (unsigned long long)frame_count, (long long)missed,
-				 (long long)expected, (long long)(max_read_gap_us / 1000),
-				 (long long)(max_read_gap_ever_us / 1000),
-				 (long long)(encode_max_us / 1000), (long long)busy_pct,
+				 (long long)expected, (long long)seq_lost, seq_gaps, seq_odd,
+				 (long long)(max_read_gap_us / 1000),
+				 (long long)(max_read_gap_ever_us / 1000), (long long)mi_period_us,
+				 (long long)(encode_max_us / 1000), (long long)work_pct,
 				 (unsigned long long)drained_periods);
 
 			/*
-			 * Two different faults, and these numbers separate them.
-			 * A large read gap with nothing missed is preemption the
-			 * SDK queue absorbed -- priority and queue depth are the
-			 * levers. Missed periods with an encode peak near the
-			 * period is the loop not fitting in real time, which no
-			 * amount of queue or priority fixes: the work has to
-			 * move off this thread or get cheaper.
+			 * Warn on sequence loss, not on the wall shortfall. The
+			 * shortfall is only evidence once the sequence numbers
+			 * agree that periods really went missing -- otherwise it
+			 * is an AI sample clock that is not exactly nominal, and
+			 * "MI period" against the expected period says so
+			 * directly. Getting these the wrong way round costs a
+			 * build chasing a loss that never happened.
 			 *
 			 * The routine line is periodic housekeeping and logs at
 			 * trace; only the fault case is worth a run's attention.
 			 */
-			if (missed > expected / 100 || max_read_gap_us >= RAD_READ_GAP_WARN_US)
-				RSS_WARN("%s -- not keeping up with the %lldms capture period",
+			if (seq_lost > 0 || max_read_gap_us >= RAD_READ_GAP_WARN_US)
+				RSS_WARN("%s -- periods lost against the %lldms capture period",
 					 stats, (long long)(period_us / 1000));
 			else
 				RSS_TRACE("%s", stats);
 
 			max_read_gap_us = 0;
 			window_frames = 0;
-			read_total_us = 0;
+			work_total_us = 0;
 			encode_total_us = 0;
 			encode_max_us = 0;
+			seq_lost = 0;
+			seq_gaps = 0;
+			seq_odd = 0;
+			mi_ts_total_us = 0;
+			mi_ts_count = 0;
 			last_stats = now;
 		}
 	}
