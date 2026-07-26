@@ -264,6 +264,12 @@ static void load_sensor_from_section(rss_config_t *cfg, const char *section,
 	sensor->width = (uint16_t)rss_config_get_int(cfg, section, "width", 0);
 	sensor->height = (uint16_t)rss_config_get_int(cfg, section, "height", 0);
 	sensor->fps = (uint32_t)rss_config_get_int(cfg, section, "fps", 0);
+
+	/* Optional ISP tuning binary. Only a backend whose ISP is driven by a
+	 * tuning file reads this, and it derives the usual path from the sensor
+	 * name, so this stays empty unless the file lives somewhere unusual. */
+	rss_strlcpy(sensor->iq_file, rss_config_get_str(cfg, section, "iq_file", ""),
+		    sizeof(sensor->iq_file));
 }
 
 /* FS channel base for a given sensor index (hardware mapping) */
