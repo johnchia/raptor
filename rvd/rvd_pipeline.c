@@ -255,6 +255,15 @@ static void load_sensor_from_section(rss_config_t *cfg, const char *section,
 	if (vin < 0)
 		vin = 0;
 	sensor->vin_type = (rss_sensor_vin_t)vin;
+
+	/* Optional sensor mode request. Zero means native, and Ingenic backends
+	 * ignore these entirely — the mode there is a property of the loaded
+	 * driver. Backends that enumerate modes at runtime use them to select
+	 * one; see rss_sensor_config_t. No procfs fallback: these express what
+	 * the operator wants, not what the driver reports. */
+	sensor->width = (uint16_t)rss_config_get_int(cfg, section, "width", 0);
+	sensor->height = (uint16_t)rss_config_get_int(cfg, section, "height", 0);
+	sensor->fps = (uint32_t)rss_config_get_int(cfg, section, "fps", 0);
 }
 
 /* FS channel base for a given sensor index (hardware mapping) */
@@ -403,15 +412,40 @@ int rvd_pipeline_init(rvd_state_t *st)
 	}
 	st->sensor_count = multi_cfg.sensor_count;
 
+	/* Ask the HAL to name the sensor when neither config nor procfs did.
+	 * Valid before init, and the only pre-init op — see raptor_hal.h. On a
+	 * platform where the SDK binds the sensor at driver-load time this is the
+	 * authoritative source, and /proc/jz/sensor does not exist at all. */
+	const rss_hal_caps_t *sensor_caps =
+		st->ops->get_caps ? st->ops->get_caps(st->hal_ctx) : NULL;
+	bool sensor_self_describing = sensor_caps && sensor_caps->has_sensor_detect;
+
+	if (!multi_cfg.sensors[0].name[0] && sensor_self_describing) {
+		char detected[sizeof(multi_cfg.sensors[0].name)];
+
+		if (RSS_HAL_CALL(st->ops, sensor_detect, st->hal_ctx, detected,
+				 sizeof(detected)) == RSS_OK &&
+		    detected[0]) {
+			rss_strlcpy(multi_cfg.sensors[0].name, detected,
+				    sizeof(multi_cfg.sensors[0].name));
+			RSS_INFO("sensor detected by HAL: %s", multi_cfg.sensors[0].name);
+		}
+	}
+
 	/* Validate primary sensor */
 	if (!multi_cfg.sensors[0].name[0]) {
-		RSS_FATAL("sensor name not in config and not in /proc/jz/sensor/sensor0/name");
+		RSS_FATAL("sensor name not in config, not in /proc/jz/sensor/sensor0/name, "
+			  "and not detected by the HAL");
 		rss_hal_destroy(st->hal_ctx);
 		st->hal_ctx = NULL;
 		return RSS_ERR;
 	}
 
-	if (multi_cfg.sensors[0].i2c_addr == 0) {
+	/* An I2C address is only meaningful where the daemon is what tells the
+	 * SDK how to reach the sensor. Where the HAL detects it, the SDK already
+	 * owns that bus and an address here would be ignored, so requiring one
+	 * would be demanding configuration that cannot matter. */
+	if (multi_cfg.sensors[0].i2c_addr == 0 && !sensor_self_describing) {
 		RSS_FATAL("i2c_addr not in config and not in /proc/jz/sensor/sensor0/i2c_addr");
 		rss_hal_destroy(st->hal_ctx);
 		st->hal_ctx = NULL;
@@ -613,14 +647,31 @@ int rvd_pipeline_init(rvd_state_t *st)
 		RSS_HAL_CALL(st->ops, isp_set_custom_mode_n, st->hal_ctx, s, 0);
 	}
 
-	/* ── 3d. Read actual sensor resolution from /proc ── */
+	/* ── 3d. Determine the actual sensor resolution ──
+	 *
+	 * Order matters: procfs first (Ingenic's own registry), then the HAL, then
+	 * config. The HAL query beats config because config only *requests* a mode
+	 * — a backend that enumerates sensor modes may have fallen back to native
+	 * when the request matched nothing, and this is the answer after that
+	 * negotiation rather than before it. */
 	int sensor_w = 0, sensor_h = 0;
+	const char *sensor_res_src = "/proc/jz/sensor";
 	{
 		sensor_w = read_sensor_proc_int(0, "width", 10, 0);
 		sensor_h = read_sensor_proc_int(0, "height", 10, 0);
 	}
+	if (sensor_w <= 0 || sensor_h <= 0) {
+		uint32_t hal_w = 0, hal_h = 0;
+		if (RSS_HAL_CALL(st->ops, isp_get_sensor_attr, st->hal_ctx, &hal_w, &hal_h) ==
+			    RSS_OK &&
+		    hal_w > 0 && hal_h > 0) {
+			sensor_w = (int)hal_w;
+			sensor_h = (int)hal_h;
+			sensor_res_src = "HAL";
+		}
+	}
 	if (sensor_w > 0 && sensor_h > 0) {
-		RSS_INFO("sensor resolution: %dx%d", sensor_w, sensor_h);
+		RSS_INFO("sensor resolution: %dx%d (from %s)", sensor_w, sensor_h, sensor_res_src);
 	} else {
 		/* T40/T41: /proc/jz/sensor doesn't exist — use stream0 config as reference */
 		int cfg_w = rss_config_get_int(cfg, "stream0", "width", 0);
