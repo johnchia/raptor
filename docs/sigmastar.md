@@ -152,6 +152,20 @@ Every symptom that looked like a separate bug was this one:
 - **auto white balance wrong under artificial light** — the symptom `19170e8`
   was written to fix by removing the 3A handoff, which was treating the wrong
   cause
+- **`ae_comp`, and other `[image]` knobs, appearing not to work** — they are
+  flushed *after* the tuning load, so the tear-down reverted them with it, and
+  an AE already pinned against both its ceilings cannot act on a change of
+  target luma anyway. They were written off as a vendor quirk for two days
+
+The first and last of those are both **board-verified fixed, 2026-07-27**, on a
+build whose repair fired once during bring-up: colour is correct under
+artificial light, and ISP adjustments take effect. Two consequences. The
+`RSS_ISP_3A_HANDOFF` hatch that existed to A/B the two 3A sequences once the
+tear-down was dealt with has served its purpose and is **gone**, along with the
+`MI_ISP_CUS3A_Enable` and `MI_ISP_DisableUserspace3A` bindings — which were
+loaded as *hard requirements*, so a board whose `libmi_isp.so` lacked either
+failed ISP init over symbols nothing called. And a knob that does not work on a
+pinned control loop is evidence about the loop, not the knob.
 
 What performs the tear-down is **not identified, and deliberately not chased
 further**. The shape is known: CUS3A re-auto-starts when a VPE channel's last
