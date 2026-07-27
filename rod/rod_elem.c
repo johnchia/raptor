@@ -211,6 +211,19 @@ void create_elem_shm(rod_state_t *st, rod_element_t *e, int s)
 		return;
 	}
 
+	/*
+	 * A region larger than the frame cannot be composited, and nothing
+	 * above this point bounded one: text and receipt sizes come from
+	 * max_chars/max_lines times the font metrics, so a large font size on
+	 * a small sub-stream silently produced exactly that. Clipped text is
+	 * the mild failure; handing the HAL a region bigger than the canvas is
+	 * the one that is hard to read back from a log.
+	 */
+	if (st->stream_w[s] > 0 && w > (uint32_t)st->stream_w[s])
+		w = (uint32_t)st->stream_w[s];
+	if (st->stream_h[s] > 0 && h > (uint32_t)st->stream_h[s])
+		h = (uint32_t)st->stream_h[s];
+
 	w = (w + 1) & ~1u;
 	h = (h + 1) & ~1u;
 

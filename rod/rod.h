@@ -162,6 +162,25 @@ typedef struct {
 	char ip6[46];
 	int64_t ip_refresh_ts;
 
+	/*
+	 * Monitor variables (%ae_luma%, %total_gain%, %soc_temp%). Cached
+	 * because expansion runs inside the render tick: two of them in one
+	 * template must not mean two rvd round trips, and the temperature
+	 * read pokes PMSAR registers in the kernel on every open.
+	 *
+	 * Zero means "no reading", which is the same contract ric relies on
+	 * -- rvd zeroes the exposure struct when the HAL has no readback or
+	 * the ISP is not tuned yet, and a live AE never reports exactly 0.
+	 */
+	uint32_t exp_ae_luma;
+	uint32_t exp_total_gain;
+	int64_t exp_refresh_ts;
+	bool exp_reachable; /* last get-exposure round trip succeeded */
+
+	int soc_temp;
+	bool soc_temp_valid;
+	int64_t soc_temp_refresh_ts;
+
 	bool detect_enabled;
 	bool paused;
 	int64_t tick_interval;
