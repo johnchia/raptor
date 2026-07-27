@@ -124,9 +124,44 @@ render `--` rather than `0`.
 **not** this platform's scale:
 
 - `total_gain` is x1024 fixed point — sensor × ISP gain, 1024 = 1.0x. The
-  default `night_gain = 80000` is about 78x.
+  inherited `night_gain = 80000` is about 78x.
 - `ae_luma` is the mean of the AE grid's Y lane, 0–255 per cell — a different
   measurement from Ingenic's `GetAeLuma`.
+
+### The AE's gain ceiling, and why the inherited threshold never fired
+
+MI takes its AE gain limits in the same x1024 units, and it treats the tuning
+file's published ceiling as authoritative: a higher one is validated away and
+MI quietly keeps its own. `gc4653.bin` on the bring-up board publishes a
+**sensor-gain ceiling of 8192 (8x)**, so `total_gain` plateaus there in full
+dark. A `night_gain` of 80000 is therefore never crossed and auto night mode
+never fires, whatever the light does — the threshold has to sit *under* the
+ceiling. waybeam hit the identical wall from the other direction, and recorded
+the same number: "isp.gainMax above the bin ceiling never stuck (found with
+gainMax=32000 vs bin 8192)" (`maruko_cus3a.c`).
+
+`rvd` now logs the real limits once, right after the tuning load and before any
+config knob touches them, which is the line to calibrate against:
+
+```
+isp: AE tuning limits (x1024): sensor gain 1024..8192, isp gain 1024..1024,
+     shutter 30..40000 us -- so total_gain tops out at 8192
+```
+
+Two consequences worth knowing:
+
+- **`max_again` / `max_dgain` are x1024 here, not Ingenic gain codes**, and rvd
+  applies its Ingenic defaults (160 and 80) whether or not the config mentions
+  the keys. Passed through unscaled those are ceilings of 0.16x and 0.08x —
+  below unity, so not ceilings at all, and `maxIspGain = 80` in particular pins
+  digital gain at its floor and removes the only headroom above the sensor's
+  own ceiling. The backend now refuses any ceiling below unity, logs it once
+  naming the unit mismatch, and leaves the tuning's calibrated value in charge;
+  a ceiling above the tuning's is clamped to it, because an unexplained limit
+  that did not take is much harder to spot than one that says it was clamped.
+- **8x is narrow enough that `ae_luma` still matters.** The AE runs out of gain
+  while there is usable light left, so luma starts falling before the plateau —
+  `night_luma` is a working second trigger here, not just a backstop.
 
 Daylight reference from the bring-up board: `total_gain` 1026 (1.00x, full
 headroom), `exposure_us` 9689, `ae_luma` 45.
