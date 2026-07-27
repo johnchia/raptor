@@ -153,21 +153,28 @@ Every symptom that looked like a separate bug was this one:
   was written to fix by removing the 3A handoff, which was treating the wrong
   cause
 
-What performs the tear-down is **not yet identified**. The shape is known:
-CUS3A re-auto-starts when a VPE channel's last output port goes down, and rvd
-tunes on the *first* framesource enable — before the sub-stream, the OSD attach
-and the encoder start. divinus loads at the end of `sdk_init` once its encoder
-thread is running (`media.c:827`) and is fine on the same board and bin. Tuning
-before the pipeline has finished being built is the leading explanation, and it
-also explains why AWB appeared to break "randomly": it depends on how the port
-enables interleave.
+What performs the tear-down is **not identified, and deliberately not chased
+further**. The shape is known: CUS3A re-auto-starts when a VPE channel's last
+output port goes down, and rvd tunes on the *first* framesource enable — before
+the sub-stream, the OSD attach and the encoder start. divinus loads at the end
+of `sdk_init` once its encoder thread is running (`media.c:827`) and is fine on
+the same board and bin. Tuning before the pipeline has finished being built is
+the leading explanation, and it also explains why AWB appeared to break
+"randomly": it depends on how the port enables interleave.
 
-`hal_isp.c` therefore **detects and repairs** rather than assuming: the tuning's
-own limits are snapshotted before anything can overwrite them, so a later
-mismatch is positive evidence the ISP reverted, and the bin is reloaded. Driven
-from `star_isp_tune_when_ready` — i.e. from the pipeline being built, which is
-when the tear-down happens — with the exposure-poll path as a backstop. Bounded
-at five attempts, because a reload that does not stick must not loop, and the
+Naming the exact step would mean bisecting vendor library behaviour that no
+documentation describes, over board runs, and the answer would be worth only
+this SDK build: any *other* step MI resets the ISP from — on another board, or
+another vendor release — puts the tuning straight back where it started.
+Detecting the state covers all of them, including the ones nobody has hit yet.
+So the repair below is the answer here, not a placeholder for one.
+
+`hal_isp.c` therefore **detects and repairs**: the tuning's own limits are
+snapshotted before anything can overwrite them, so a later mismatch is positive
+evidence the ISP reverted, and the bin is reloaded. Driven from
+`star_isp_tune_when_ready` — i.e. from the pipeline being built, which is when
+the tear-down happens — with the exposure-poll path as a backstop. Bounded at
+five attempts, because a reload that does not stick must not loop, and the
 attempt count is diagnostic: one means a single startup event, repeated means
 something is doing it continuously.
 
@@ -176,8 +183,20 @@ isp: AE is on sensor gain ..8192 but the tuning has ..131072 -- the ISP was
      reset after the load; reloading /etc/sensors/gc4653.bin (attempt 1)
 ```
 
-On the bring-up board that fires exactly once. **This is a repair, not a fix.**
-The fix is to tune where nothing later tears it down.
+On the bring-up board that fires exactly once, right after the AE grid probe.
+
+Two details that took a wrong turn to get right. A ceiling this config states is
+*also* a legitimate reading, so the check accepts either it or the tuning's own
+value as proof the tuning is in effect — the first version bailed out whenever
+`max_again` was set, which quietly made that key a switch for turning the repair
+off. And a reload replaces the ISP's state with the binary's, so the config
+knobs go back on afterwards (`star_isp_flush_pending`), exactly as after the
+first load.
+
+The one blind spot: a `max_again` equal to the untuned default, 8192 here. A
+reset then reads as the config being honoured. Left alone rather than
+special-cased, because on this board the tuning's own ceiling is the one worth
+having and the config says to leave `max_again` unset.
 
 ### The gain-limit units, and the ceiling that is not one
 
@@ -197,28 +216,41 @@ The fix is to tune where nothing later tears it down.
   gainMax=32000 vs bin 8192)" (`maruko_cus3a.c`). Note their 8192 is *their*
   board's bin, not this one's — the coincidence with the untuned default here
   cost several hours of misdiagnosis.
-- **CUS3A also narrows the window while it runs**, so a ceiling the config
-  states is re-asserted every couple of seconds. With nothing configured its
-  window is left alone.
+- **A ceiling the config states is re-asserted** every couple of seconds, since
+  a tuning reload restores the binary's own values and would otherwise drop it.
+  With nothing configured the AE's window is left alone — fighting an algorithm
+  over numbers nobody asked for is how you get an AE that oscillates.
+- **Neither key is worth setting on this board.** 128x is the widest it has, and
+  anything set here only narrows it.
 
-### Calibrating `night_gain` after all that
+### `night_gain` is pinned, not calibrated
 
-`night_gain` must sit under what the AE can actually reach, which is what the
-startup limits line reports. The value currently in
-`config/raptor-ssc30kq.conf` was chosen against the *untuned* 8x ceiling and
-is **too low** now that tuning stays in effect; it needs redoing from a real
-dusk reading.
+`night_gain` ships at **122880 (120x)**, near the top of what the AE can reach,
+which the startup limits line reports as `total_gain tops out at 131072`.
+
+Pinned rather than calibrated on purpose: "the AE has run out of gain" needs no
+calibration and does not drift with the scene, the lens or the season, whereas a
+dusk-reading threshold is only right for the dusk it was read at. The filter then
+switches when the AE has spent everything and still cannot reach target — the
+latest sensible moment, keeping colour as long as colour is possible. The cost is
+that the last of the evening is a noisy colour picture at 120x; lower it (65536,
+one stop) to switch earlier and get clean monochrome sooner.
+
+Not `131072` itself, because the test is `total_gain > night_gain` and the AE
+parks *exactly* on its ceiling in the dark: the ceiling as a threshold is a
+trigger that never fires. The 120x value leaves slack for an AE that stops just
+short.
 
 Daylight reference from the bring-up board: `total_gain` 1026 (1.00x, full
 headroom), `exposure_us` 9689, `ae_luma` 45.
 
-Set thresholds from a dusk reading, and note that **`ae_luma` is a post-AE
-measurement**: holding it near target is the AE's whole job, so it stays around
-45 in a lit room and a dim one alike and only falls once the AE has spent its
-shutter and gain. `night_luma` is a darkness backstop; `night_gain` is the
-threshold that tracks failing light. Both are readable live via
-`raptorctl ric status`, or on the picture — see the `[osd.uptime]` element in
-`config/raptor-ssc30kq.conf`.
+`night_luma` stays a backstop for the case gain alone cannot cover — a bright
+light in frame, where the AE holds gain low while the rest of the picture is
+black. Note that **`ae_luma` is a post-AE measurement**: holding it near target
+is the AE's whole job, so it sits around 45 in a lit room and a dim one alike and
+only falls once the AE has spent its shutter and gain. Both values are readable
+live via `raptorctl ric status`, or on the picture — see the `[osd.uptime]`
+element in `config/raptor-ssc30kq.conf`.
 
 ## Building
 
