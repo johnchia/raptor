@@ -46,7 +46,7 @@ static void load_config(ric_state_t *st)
 	c->ir940_explicit = rss_config_get_str(cfg, "ircut", "ir940", NULL) != NULL;
 	c->ir940_enabled = rss_config_get_bool(cfg, "ircut", "ir940", false);
 
-	/* Trigger mode: "luma" (default), "gain" (legacy), "adc", "photo" */
+	/* Trigger mode: "luma" (default), "gain" (legacy), "adc", "photo", "gpio" */
 	const char *trigger = rss_config_get_str(cfg, "ircut", "trigger", "luma");
 	if (strcmp(trigger, "gain") == 0)
 		c->trigger = RIC_TRIGGER_GAIN;
@@ -54,6 +54,8 @@ static void load_config(ric_state_t *st)
 		c->trigger = RIC_TRIGGER_ADC;
 	else if (strcmp(trigger, "photo") == 0)
 		c->trigger = RIC_TRIGGER_PHOTO;
+	else if (strcmp(trigger, "gpio") == 0)
+		c->trigger = RIC_TRIGGER_GPIO;
 	else
 		c->trigger = RIC_TRIGGER_LUMA;
 
@@ -66,6 +68,12 @@ static void load_config(ric_state_t *st)
 	c->adc_channel = rss_config_get_int(cfg, "ircut", "adc_channel", 0);
 	c->adc_night = rss_config_get_int(cfg, "ircut", "adc_night", 200);
 	c->adc_day = rss_config_get_int(cfg, "ircut", "adc_day", 600);
+
+	/* Digital photosensor (trigger=gpio) */
+	c->gpio_photosensor = rss_config_get_int(cfg, "ircut", "gpio_photosensor", -1);
+	c->photosensor_night_level = rss_config_get_int(cfg, "ircut", "photosensor_night_level", 1)
+					    ? 1
+					    : 0;
 
 	/* Photo trigger thresholds (high ev = dark on Ingenic) */
 	c->photo.ev_night = (uint32_t)rss_config_get_int(cfg, "ircut", "photo_ev_night", 50000);
@@ -297,10 +305,11 @@ static int ric_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 			return rss_ctrl_resp_error(resp_buf, resp_buf_size, "alloc");
 		cJSON_AddStringToObject(r, "status", "ok");
 		cJSON_AddStringToObject(r, "trigger",
-					c->trigger == RIC_TRIGGER_LUMA	 ? "luma"
-					: c->trigger == RIC_TRIGGER_GAIN ? "gain"
-					: c->trigger == RIC_TRIGGER_ADC	 ? "adc"
-									 : "photo");
+					c->trigger == RIC_TRIGGER_LUMA	  ? "luma"
+					: c->trigger == RIC_TRIGGER_GAIN  ? "gain"
+					: c->trigger == RIC_TRIGGER_ADC	  ? "adc"
+					: c->trigger == RIC_TRIGGER_PHOTO ? "photo"
+									  : "gpio");
 		cJSON_AddNumberToObject(r, "night_luma", c->night_luma);
 		cJSON_AddNumberToObject(r, "night_gain", c->night_gain);
 		cJSON_AddNumberToObject(r, "day_gain_pct", c->day_gain_pct);
@@ -411,6 +420,14 @@ int main(int argc, char **argv)
 	/* Init GPIOs */
 	ric_gpio_init(&st);
 
+	/* A photosensor trigger with no pin cannot answer anything; the
+	 * luma trigger at least degrades to gain-only. */
+	if (st.settings.trigger == RIC_TRIGGER_GPIO && st.settings.gpio_photosensor < 0) {
+		RSS_WARN("trigger=gpio needs gpio_photosensor, which is unset -- "
+			 "falling back to the luma trigger");
+		st.settings.trigger = RIC_TRIGGER_LUMA;
+	}
+
 	/* Init ADC if trigger=adc; fall back to luma on failure */
 	if (st.settings.trigger == RIC_TRIGGER_ADC) {
 		if (ric_adc_start(&st)) {
@@ -456,7 +473,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	static const char *trigger_names[] = {"luma", "gain", "adc", "photo"};
+	static const char *trigger_names[] = {"luma", "gain", "adc", "photo", "gpio"};
 	RSS_INFO("ric running (mode=%s, trigger=%s, gpio_ircut=%d, gpio_ircut2=%d, gpio_irled=%d, "
 		 "gpio_irled2=%d)",
 		 st.settings.opmode == RIC_AUTO
@@ -472,6 +489,9 @@ int main(int argc, char **argv)
 			  st.settings.photo.ev_night, st.settings.photo.ev_deep,
 			  st.settings.photo.ev_day, st.settings.photo.rgain_rec,
 			  st.settings.photo.bgain_rec);
+	} else if (st.settings.trigger == RIC_TRIGGER_GPIO) {
+		RSS_DEBUG("  gpio: photosensor=%d, level %d means dark",
+			  st.settings.gpio_photosensor, st.settings.photosensor_night_level);
 	} else if (st.settings.trigger == RIC_TRIGGER_LUMA) {
 		RSS_DEBUG("  luma: night_luma=%d night_gain=%d day_gain_pct=%d",
 			  st.settings.night_luma, st.settings.night_gain, st.settings.day_gain_pct);
