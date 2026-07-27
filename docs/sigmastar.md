@@ -128,40 +128,86 @@ render `--` rather than `0`.
 - `ae_luma` is the mean of the AE grid's Y lane, 0–255 per cell — a different
   measurement from Ingenic's `GetAeLuma`.
 
-### The AE's gain ceiling, and why the inherited threshold never fired
+### Something tears the tuning down after it loads
 
-MI takes its AE gain limits in the same x1024 units, and it treats the tuning
-file's published ceiling as authoritative: a higher one is validated away and
-MI quietly keeps its own. `gc4653.bin` on the bring-up board publishes a
-**sensor-gain ceiling of 8192 (8x)**, so `total_gain` plateaus there in full
-dark. A `night_gain` of 80000 is therefore never crossed and auto night mode
-never fires, whatever the light does — the threshold has to sit *under* the
-ceiling. waybeam hit the identical wall from the other direction, and recorded
-the same number: "isp.gainMax above the bin ceiling never stuck (found with
-gainMax=32000 vs bin 8192)" (`maruko_cus3a.c`).
+**Read this before believing any AE number from this platform.**
+`sensor gain 1024..8192` with `shutter ..14000` are the limits the ISP reports
+with **no tuning file loaded at all** — established on the board by watching a
+deliberately failed load report exactly those figures. They are also where the
+AE sat permanently, for a whole night, on a board whose tuning had loaded
+successfully.
 
-`rvd` now logs the real limits once, right after the tuning load and before any
-config knob touches them, which is the line to calibrate against:
+So the api bin lands and is then discarded. That it lands is not in doubt: two
+different bins produce two different limit sets (`24576/100000` and
+`131072/50000`), read back from the AE moments after the load. It simply does
+not stay.
+
+Every symptom that looked like a separate bug was this one:
+
+- a night picture that was black apart from bright spots
+- `total_gain` frozen at 8192 with the AE reporting `boundary=1`
+- AE limits widened underneath the AE being ignored, then reverted
+- an OEM `_night.bin` that forces monochrome under divinus doing nothing here
+- deleting `gc4653.bin` changing nothing
+- **auto white balance wrong under artificial light** — the symptom `19170e8`
+  was written to fix by removing the 3A handoff, which was treating the wrong
+  cause
+
+What performs the tear-down is **not yet identified**. The shape is known:
+CUS3A re-auto-starts when a VPE channel's last output port goes down, and rvd
+tunes on the *first* framesource enable — before the sub-stream, the OSD attach
+and the encoder start. divinus loads at the end of `sdk_init` once its encoder
+thread is running (`media.c:827`) and is fine on the same board and bin. Tuning
+before the pipeline has finished being built is the leading explanation, and it
+also explains why AWB appeared to break "randomly": it depends on how the port
+enables interleave.
+
+`hal_isp.c` therefore **detects and repairs** rather than assuming: the tuning's
+own limits are snapshotted before anything can overwrite them, so a later
+mismatch is positive evidence the ISP reverted, and the bin is reloaded. Driven
+from `star_isp_tune_when_ready` — i.e. from the pipeline being built, which is
+when the tear-down happens — with the exposure-poll path as a backstop. Bounded
+at five attempts, because a reload that does not stick must not loop, and the
+attempt count is diagnostic: one means a single startup event, repeated means
+something is doing it continuously.
 
 ```
-isp: AE tuning limits (x1024): sensor gain 1024..8192, isp gain 1024..1024,
-     shutter 30..40000 us -- so total_gain tops out at 8192
+isp: AE is on sensor gain ..8192 but the tuning has ..131072 -- the ISP was
+     reset after the load; reloading /etc/sensors/gc4653.bin (attempt 1)
 ```
 
-Two consequences worth knowing:
+On the bring-up board that fires exactly once. **This is a repair, not a fix.**
+The fix is to tune where nothing later tears it down.
 
-- **`max_again` / `max_dgain` are x1024 here, not Ingenic gain codes**, and rvd
-  applies its Ingenic defaults (160 and 80) whether or not the config mentions
-  the keys. Passed through unscaled those are ceilings of 0.16x and 0.08x —
-  below unity, so not ceilings at all, and `maxIspGain = 80` in particular pins
-  digital gain at its floor and removes the only headroom above the sensor's
-  own ceiling. The backend now refuses any ceiling below unity, logs it once
-  naming the unit mismatch, and leaves the tuning's calibrated value in charge;
-  a ceiling above the tuning's is clamped to it, because an unexplained limit
-  that did not take is much harder to spot than one that says it was clamped.
-- **8x is narrow enough that `ae_luma` still matters.** The AE runs out of gain
-  while there is usable light left, so luma starts falling before the plateau —
-  `night_luma` is a working second trigger here, not just a backstop.
+### The gain-limit units, and the ceiling that is not one
+
+- **`max_again` / `max_dgain` are x1024 here, not Ingenic gain codes** (the
+  vendor's own constant for a 32x cap is 32768), and rvd applies its Ingenic
+  defaults — 160 and 80 — whether or not the config mentions the keys. Passed
+  through unscaled those are ceilings of 0.16x and 0.08x: below unity, so not
+  ceilings at all. The backend refuses any ceiling below unity, logs it once
+  naming the unit mismatch, and leaves the tuning's value in charge.
+- **The tuning's published ceiling is generous on this board** — `1024..131072`
+  (128x) sensor gain, and `1024..1024` ISP gain, meaning no digital gain
+  whatsoever. `max_dgain` is therefore inert here.
+- **MI keeps its own ceiling when a higher one is written**, so a requested
+  ceiling above the tuning's is clamped to it — an unexplained limit that did
+  not take is much harder to spot than one that says it was clamped. waybeam hit
+  this too: "isp.gainMax above the bin ceiling never stuck (found with
+  gainMax=32000 vs bin 8192)" (`maruko_cus3a.c`). Note their 8192 is *their*
+  board's bin, not this one's — the coincidence with the untuned default here
+  cost several hours of misdiagnosis.
+- **CUS3A also narrows the window while it runs**, so a ceiling the config
+  states is re-asserted every couple of seconds. With nothing configured its
+  window is left alone.
+
+### Calibrating `night_gain` after all that
+
+`night_gain` must sit under what the AE can actually reach, which is what the
+startup limits line reports. The value currently in
+`config/raptor-ssc30kq.conf` was chosen against the *untuned* 8x ceiling and
+is **too low** now that tuning stays in effect; it needs redoing from a real
+dusk reading.
 
 Daylight reference from the bring-up board: `total_gain` 1026 (1.00x, full
 headroom), `exposure_us` 9689, `ae_luma` 45.
