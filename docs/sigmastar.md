@@ -135,11 +135,20 @@ Three consequences worth knowing:
   stage, so it does get the burnt-in overlay. Closing this means
   attaching the paired group's regions to the snapshot port as well;
   it is a known difference, not an oversight.
-- **Port budget.** `STAR_VPE_PORT_NUM` is 4 and a snapshot costs one, so
-  two video streams plus two snapshots is exactly the board's capacity.
-  Beyond that the register warns and the stream loses snapshots rather
-  than failing — a board that cannot spare a port should lose its
-  snapshots, not its video. Every such exit says so in the log.
+- **Port budget, and what happens past it.** `STAR_VPE_PORT_NUM` is 4 and
+  a snapshot costs one, so two video streams plus two snapshots wants
+  every port — with no margin, and 4 is an upper bound inferred from a
+  reference's defensive teardown loop rather than a count of ports this
+  silicon accepts `MI_VPE_SetPortMode` on. A JPEG channel that cannot get
+  a port of its own therefore falls back to sharing its paired video
+  stream's port. The vendor discourages that (see the Note quoted above),
+  so it is the fallback and not the design, and it gives up the pacing —
+  but the alternative is no snapshots, and the cost of finding out is one
+  error line from MI. The log says which path each channel took:
+  `snapshot channel attached on VPE port N` versus `snapshot channel
+  sharing chn M's VPE port N`. If both fail the stream loses snapshots
+  rather than failing, since a board that cannot feed its JPEG channel
+  should lose snapshots, not video.
 
 ## Derived ABI, and the evidence for it
 
