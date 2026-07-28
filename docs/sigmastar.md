@@ -61,6 +61,9 @@ These are decisions, not gaps. Each returns `RSS_ERR_NOTSUP` through
 Nothing below is known broken. It is unverified, which is not the same thing.
 
 - **MJPEG.** Never exercised.
+- **JPEG snapshots on their own VPE port.** The bind is new (2026-07-28,
+  see below) and has not run on hardware yet. `logread | grep 'bind: VPE
+  port'` must show four binds, not two.
 - **`trigger = adc`** (photoresistor via SAR). The bring-up board has no
   photoresistor, and `CONFIG_MS_SAR` is off in its kernel, so there is no
   device to open either. The code path is inherited, not new.
@@ -71,6 +74,66 @@ Nothing below is known broken. It is unverified, which is not the same thing.
   platform does not report; `ric` warns once and falls back to the luma
   trigger.
 - **The AE statistics lane order.** See below.
+
+## JPEG snapshots need a VPE port of their own
+
+rvd models a JPEG stream the way IMP does: it skips the bind chain
+(`if (!s->is_jpeg)`, `rvd_pipeline.c`) and instead registers the JPEG
+encoder channel into its paired video stream's encoder *group*, which is
+already bound to the framesource. On Ingenic that is a real attachment —
+`IMP_Encoder_RegisterChn` — and frames reach both registered channels.
+
+MI has no encoder groups, so `hal_enc_register_channel` used to be a
+validity check and nothing more, and the JPEG channel was left connected
+to nothing at all. `MI_VENC_CreateChn` ran, `MI_VENC_StartRecvPic` ran,
+and no VPE port was ever bound to it, so `enc_poll` timed out forever —
+silently, because rvd treats a JPEG poll timeout as the expected "sensor
+idle" case. `/snap` returned `No snapshot available yet` with a healthy
+ring and a working H.264 stream. Fixed 2026-07-28.
+
+The confirmation is one line, and it is worth keeping as the check:
+
+```
+# logread | grep 'bind: VPE port'
+```
+
+A pipeline with two video streams and JPEG on both must show **four**
+binds. Two means the JPEG channels are floating.
+
+Each JPEG channel now gets its own VPE output port, cloned from the
+geometry of the port feeding its paired video stream. Sharing the video
+stream's port would have been fewer lines, and the vendor rules it out
+twice:
+
+- `MI_SYS_BindChnPort2`'s Note: *"The source and destination ports must
+  not have been previously bound"* — the source, not just the pair.
+- MI_SYS §1.4.1 on the module structure: VPE *"has one InputPort and
+  multiple OutputPorts ... Vpe shares the same data source, but must have
+  different output formats of different specifications."* One output port
+  per consumer is the model, not an optimisation of it.
+
+The dedicated port is also what paces the channel. `MI_SYS_BindChnPort2`
+takes separate source and destination frame rates, so the snapshot port
+is bound at the JPEG stream's fps against a source running at the
+sensor's, and MI drops the other 29 of every 30 frames in hardware. That
+matters because `INFINITY6E`'s caps block does not set `.jpeg_pulse`, so
+rvd's duty-cycling — the thing that stops an Ingenic JPEG channel
+encoding at full rate and discarding almost all of it — is off here. On a
+shared port nothing would pace the channel at all.
+
+Two consequences worth knowing:
+
+- **Snapshots carry no OSD.** `MI_RGN_AttachToChn` attaches a region to a
+  *VPE port*, and the snapshot port is not the one rvd's overlays were
+  attached to. On Ingenic the JPEG channel rides the group after the OSD
+  stage, so it does get the burnt-in overlay. Closing this means
+  attaching the paired group's regions to the snapshot port as well;
+  it is a known difference, not an oversight.
+- **Port budget.** `STAR_VPE_PORT_NUM` is 4 and a snapshot costs one, so
+  two video streams plus two snapshots is exactly the board's capacity.
+  Beyond that the register warns and the stream loses snapshots rather
+  than failing — a board that cannot spare a port should lose its
+  snapshots, not its video. Every such exit says so in the log.
 
 ## Derived ABI, and the evidence for it
 
