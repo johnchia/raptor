@@ -160,7 +160,7 @@ recorded in `i6_vif.h`:
   payload length is hardcoded to 56 — four bytes of device id plus those 52.
   `i6_vif_dev` was **48**, missing the vendor's trailing `u32MultiDevMap`, so
   every call passed a word of `star_vif_bringup`'s own stack frame to the driver
-  as a device bitmap. Now declared, asserted at 52, and set to 1.
+  as a device bitmap. Now declared, asserted at 52, and set to 1 — board-tested.
 - **`MI_VIF_SetChnPortAttr`** copies 32 with a 40-byte payload, and
   `i6_vif_port` was already 32. Asserted so it stays that way.
 
