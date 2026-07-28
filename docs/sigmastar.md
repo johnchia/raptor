@@ -23,6 +23,7 @@ got to them.
 | Day/night | IR-cut filter switching from the ISP's own AE |
 | Exposure readback | `isp_get_exposure` — shutter, gain, AE scene luma |
 | JPEG snapshots | `/snap`, each JPEG channel on its own VPE port — see below |
+| MJPEG | `/mjpeg`, off the same JPEG channel — rate-capped, see below |
 
 ## Deliberately absent
 
@@ -61,8 +62,6 @@ These are decisions, not gaps. Each returns `RSS_ERR_NOTSUP` through
 
 Nothing below is known broken. It is unverified, which is not the same thing.
 
-- **MJPEG.** Never exercised. (JPEG *snapshots* are verified — see the table
-  above — but `/mjpeg`'s continuous path is not.)
 - **`trigger = adc`** (photoresistor via SAR). The bring-up board has no
   photoresistor, and `CONFIG_MS_SAR` is off in its kernel, so there is no
   device to open either. The code path is inherited, not new.
@@ -121,8 +120,15 @@ rvd's duty-cycling — the thing that stops an Ingenic JPEG channel
 encoding at full rate and discarding almost all of it — is off here. On a
 shared port nothing would pace the channel at all.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
+- **`/mjpeg`'s frame rate is the bind's frame rate.** The same channel
+  serves both `/snap` and `/mjpeg`, and the bind's destination rate comes
+  from the JPEG stream's fps — `jpeg_fps` in the stream's section, or
+  `[jpeg] fps`, **defaulting to 1**. So MJPEG runs at 1 fps out of the box
+  here, and raising it is a config change, not a code one. It costs VPE →
+  VENC work at the new rate, which is exactly the cost the default avoids
+  for a `/snap`-only camera.
 - **Snapshots carry no OSD.** `MI_RGN_AttachToChn` attaches a region to a
   *VPE port*, and the snapshot port is not the one rvd's overlays were
   attached to. On Ingenic the JPEG channel rides the group after the OSD
