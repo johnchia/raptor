@@ -22,6 +22,7 @@ got to them.
 | OSD | Text and image overlays through `rod` → SHM → `MI_RGN` |
 | Day/night | IR-cut filter switching from the ISP's own AE |
 | Exposure readback | `isp_get_exposure` — shutter, gain, AE scene luma |
+| JPEG snapshots | `/snap`, each JPEG channel on its own VPE port — see below |
 
 ## Deliberately absent
 
@@ -60,10 +61,8 @@ These are decisions, not gaps. Each returns `RSS_ERR_NOTSUP` through
 
 Nothing below is known broken. It is unverified, which is not the same thing.
 
-- **MJPEG.** Never exercised.
-- **JPEG snapshots on their own VPE port.** The bind is new (2026-07-28,
-  see below) and has not run on hardware yet. `logread | grep 'bind: VPE
-  port'` must show four binds, not two.
+- **MJPEG.** Never exercised. (JPEG *snapshots* are verified — see the table
+  above — but `/mjpeg`'s continuous path is not.)
 - **`trigger = adc`** (photoresistor via SAR). The bring-up board has no
   photoresistor, and `CONFIG_MS_SAR` is off in its kernel, so there is no
   device to open either. The code path is inherited, not new.
@@ -89,9 +88,10 @@ to nothing at all. `MI_VENC_CreateChn` ran, `MI_VENC_StartRecvPic` ran,
 and no VPE port was ever bound to it, so `enc_poll` timed out forever —
 silently, because rvd treats a JPEG poll timeout as the expected "sensor
 idle" case. `/snap` returned `No snapshot available yet` with a healthy
-ring and a working H.264 stream. Fixed 2026-07-28.
+ring and a working H.264 stream. Fixed and board-tested 2026-07-28.
 
-The confirmation is one line, and it is worth keeping as the check:
+The confirmation is one line, and it is worth keeping as the check — it is
+also how the diagnosis was confirmed before any code changed:
 
 ```
 # logread | grep 'bind: VPE port'
