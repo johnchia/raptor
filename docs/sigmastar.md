@@ -74,9 +74,9 @@ Nothing below is known broken. It is unverified, which is not the same thing.
 
 ## Derived ABI, and the evidence for it
 
-Two structures are not in any header and were derived by disassembling the
-board's own `libmi_isp.so`. Both are recorded in `i6_isp.h` with the
-disassembly quoted.
+Several structures are not in any header and were derived by disassembling the
+board's own vendor libraries. Each is recorded next to its declaration with the
+disassembly quoted. Two came out of `libmi_isp.so` and are in `i6_isp.h`:
 
 - **`MI_ISP_CUS3A_GetAeStatus`** declares a **65-byte** payload (`movs r3,#65`,
   command `0x2e05`). The widely-copied waybeam definition is a 48-byte struct
@@ -88,6 +88,36 @@ disassembly quoted.
   per channel fixes the cell width at four bytes, which rules out waybeam's
   `short r, g, b, y` (that needs 92160) — so their `avgY` log line averages two
   cells per sample.
+
+The same technique settled a live bug in `libmi_vif.so`, fixed 2026-07-28 and
+recorded in `i6_vif.h`:
+
+- **`MI_VIF_SetDevAttr`** copies **52 bytes** out of the pointer it is given
+  (three 16-byte block copies plus a trailing word) and sends an ioctl whose
+  payload length is hardcoded to 56 — four bytes of device id plus those 52.
+  `i6_vif_dev` was **48**, missing the vendor's trailing `u32MultiDevMap`, so
+  every call passed a word of `star_vif_bringup`'s own stack frame to the driver
+  as a device bitmap. Now declared, asserted at 52, and set to 1.
+- **`MI_VIF_SetChnPortAttr`** copies 32 with a 40-byte payload, and
+  `i6_vif_port` was already 32. Asserted so it stays that way.
+
+That bug is a good argument for these asserts existing at all. The bad read is
+deterministic for a given binary, so it hid for months: OpenIPC's stack layout
+happened to leave `1` in that word, which is exactly what the driver wants.
+Rebuilding the same source under a Buildroot that defaults to
+`-fstack-protector-strong` reordered the locals and left a fragment of the
+sensor-name string there instead — `multidevmap 909402983`, which is
+`0x36346367`, the bytes `gc46`. VIF then never synced: dmesg looped on
+`_MI_VIF_EnqueueOutputTaskDev: layout type 2, bindmode 4 not sync err` and no
+stream was ever produced, while the identical source built without hardening
+streamed fine. Matching the vendor's copy size is the fix; matching one
+compiler's stack layout is not.
+
+Two red herrings from chasing that one, worth not repeating: the
+`MI_VIF_IMPL_SetDevAttr ... not support` suffix is benign — a streaming camera
+prints it too, and only the `multidevmap` value on that line differs — and
+`Unhandled fault: external abort` lines on a thingino rootfs come from its
+`/usr/sbin/soc` helper doing Ingenic `devmem` reads, nothing to do with raptor.
 
 Where the sizes could not settle a question, the code refuses to guess. The
 eight spare bytes could lead or trail, so `star_ae_luma` matches the grid
