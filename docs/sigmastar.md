@@ -205,11 +205,25 @@ a reading and moves the IR-cut filter. A board run settled it: the probe logged
 `AE grid 32x32, cells at offset 8`, so the eight bytes lead and are the grid
 dimensions themselves. 128×90 is the payload maximum, not the live grid.
 
-**Still open:** the lane order within a cell is waybeam's word only. That run
-returned `r=46 g=46 b=44 y=46` — consistent with `r,g,b,y`, but far too neutral
-a scene to tell the lanes apart. A single log line from a strongly coloured
-scene would settle it. Nothing depends on it: the lane used behaves like luma
-and matches what `raptorctl ric status` reports.
+**Still open:** the lane order within a cell is waybeam's word only, and it
+takes a genuinely coloured scene to close. A soak run returned
+`r=40 g=36 b=24 y=36` and the check called it confirmed; it should not have.
+All six orders predict a luma within the 12-count tolerance of that `y`, and
+the r/g swap fits it marginally better than `r,g,b` does.
+
+Spread between the lanes is necessary but nowhere near sufficient. What
+separates two orders is the BT.601 weight difference across the lanes they
+exchange, so an r/g swap moves the prediction by only `0.288 × |r − g|` — four
+counts of difference move it by one. The check now scores all six orders and
+confirms only when the assumed one fits and no rival does; otherwise it says so
+once and keeps waiting.
+
+To settle it, point the camera at a saturated colour filling much of the frame.
+Roughly `r=200 g=100 b=30` confirms with the nearest rival 16 counts out; a
+merely tinted scene will not, and the log says which it got.
+
+Nothing depends on the answer: `star_ae_lanes_identified` gates only the log
+line, never the returned luma, which is read from the Y lane regardless.
 
 ## Zero means "not available"
 
