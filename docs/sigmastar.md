@@ -99,26 +99,48 @@ also how the diagnosis was confirmed before any code changed:
 A pipeline with two video streams and JPEG on both must show **four**
 binds. Two means the JPEG channels are floating.
 
-Each JPEG channel now gets its own VPE output port, cloned from the
-geometry of the port feeding its paired video stream. Sharing the video
-stream's port would have been fewer lines, and the vendor rules it out
-twice:
+A JPEG channel gets its own VPE output port **only when it would not have
+to scale**, and otherwise shares the port feeding its paired video stream.
+The vendor's model favours a port per consumer:
 
 - `MI_SYS_BindChnPort2`'s Note: *"The source and destination ports must
   not have been previously bound"* — the source, not just the pair.
 - MI_SYS §1.4.1 on the module structure: VPE *"has one InputPort and
   multiple OutputPorts ... Vpe shares the same data source, but must have
-  different output formats of different specifications."* One output port
-  per consumer is the model, not an optimisation of it.
+  different output formats of different specifications."*
 
-The dedicated port is also what paces the channel. `MI_SYS_BindChnPort2`
-takes separate source and destination frame rates, so the snapshot port
-is bound at the JPEG stream's fps against a source running at the
-sensor's, and MI drops the other 29 of every 30 frames in hardware. That
-matters because `INFINITY6E`'s caps block does not set `.jpeg_pulse`, so
-rvd's duty-cycling — the thing that stops an Ingenic JPEG channel
-encoding at full rate and discarding almost all of it — is off here. On a
-shared port nothing would pace the channel at all.
+The silicon does not cooperate. A port brought up after rvd's own are
+configured emits at the **VPE channel's input size** whatever
+`MI_VPE_SetPortMode` is told, and reports success either way. Neither
+`MI_VPE_SetPortCrop` nor a `MI_VPE_GetPortMode` readback changes that —
+the crop came back reading a rectangle it was never passed, and the getter
+left the port it was asked about with no geometry at all. Both are
+unbound now; see the rule at the end of this section.
+
+So a full-resolution snapshot stream clones a port (its request already
+*is* the input size) and a scaled one shares. On the SSC30KQ that means
+stream 0's snapshots ride a dedicated port 2 and stream 1's ride port 1
+alongside its video. Board-measured: `/snap?stream=0` returns 2560x1440,
+`/snap?stream=1` returns 640x360, both correct.
+
+Sharing turned out to be fine. **MI accepts a second bind on an
+already-bound source port** despite the Note above, and the shared bind
+honours its own destination rate — stream 1's MJPEG measures ~0.8 fps
+against a 1 fps target, stream 0's ~1.0.
+
+The bind is what paces the channel, dedicated port or shared.
+`MI_SYS_BindChnPort2` takes separate source and destination frame rates,
+so the snapshot bind asks for the JPEG stream's fps against a source
+running at the sensor's, and MI drops the rest in hardware. That matters
+because `INFINITY6E`'s caps block does not set `.jpeg_pulse`, so rvd's
+duty-cycling — the thing that stops an Ingenic JPEG channel encoding at
+full rate and discarding almost all of it — is off here.
+
+**Both rates must be real.** `srcFps` is the rate the port actually emits,
+which is the sensor's, not the rate the stream asked for. Passing the
+stream's own rate as both makes the bind a pass-through: a 5 fps stream on
+a 30 fps sensor was delivering 24.9 fps measured over RTSP until `srcFps`
+was corrected to the sensor rate.
 
 Three consequences worth knowing:
 
@@ -135,20 +157,24 @@ Three consequences worth knowing:
   stage, so it does get the burnt-in overlay. Closing this means
   attaching the paired group's regions to the snapshot port as well;
   it is a known difference, not an oversight.
-- **Port budget, and what happens past it.** `STAR_VPE_PORT_NUM` is 4 and
-  a snapshot costs one, so two video streams plus two snapshots wants
-  every port — with no margin, and 4 is an upper bound inferred from a
-  reference's defensive teardown loop rather than a count of ports this
-  silicon accepts `MI_VPE_SetPortMode` on. A JPEG channel that cannot get
-  a port of its own therefore falls back to sharing its paired video
-  stream's port. The vendor discourages that (see the Note quoted above),
-  so it is the fallback and not the design, and it gives up the pacing —
-  but the alternative is no snapshots, and the cost of finding out is one
-  error line from MI. The log says which path each channel took:
-  `snapshot channel attached on VPE port N` versus `snapshot channel
-  sharing chn M's VPE port N`. If both fail the stream loses snapshots
-  rather than failing, since a board that cannot feed its JPEG channel
-  should lose snapshots, not video.
+- **Port budget.** `STAR_VPE_PORT_NUM` is 4 and a dedicated snapshot port
+  costs one, so two video streams plus two full-resolution snapshots wants
+  every port. All four do work — that was checked on the board, and the
+  earlier claim that this was a port-exhaustion problem was wrong. What
+  runs out first in practice is not ports but usable geometry, per above.
+  The log says which path each channel took: `snapshot channel attached on
+  VPE port N`, `not cloning port N -- WxH is not the VPE input size`, or
+  `snapshot channel sharing chn M's VPE port N`. If every path fails the
+  stream loses snapshots rather than failing, since a board that cannot
+  feed its JPEG channel should lose snapshots, not video.
+- **Nothing on a working path may depend on an MI struct layout this port
+  has not verified.** `i6_vpe_port` and friends are reconstructed from
+  references, not vendor headers. Passing data *in* is fine when the effect
+  is observable; a getter that fills a buffer whose true size is a guess
+  writes past the caller's frame. `MI_VPE_GetPortMode`, added only as a log
+  aid, left the port it was asked about at pixel format MAX and geometry
+  0x0 and killed a working snapshot port. Both it and `MI_VPE_SetPortCrop`
+  are deliberately not bound in `i6_vpe.h`.
 
 ## Derived ABI, and the evidence for it
 
