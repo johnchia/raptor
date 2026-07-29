@@ -205,24 +205,33 @@ a reading and moves the IR-cut filter. A board run settled it: the probe logged
 `AE grid 32x32, cells at offset 8`, so the eight bytes lead and are the grid
 dimensions themselves. 128×90 is the payload maximum, not the live grid.
 
-**Still open:** the lane order within a cell is waybeam's word only, and it
-takes a genuinely coloured scene to close. A soak run returned
-`r=40 g=36 b=24 y=36` and the check called it confirmed; it should not have.
-All six orders predict a luma within the 12-count tolerance of that `y`, and
-the r/g swap fits it marginally better than `r,g,b` does.
+**Still open:** the lane order within a cell is waybeam's word only, and two
+things make it harder to close than it looks.
 
 Spread between the lanes is necessary but nowhere near sufficient. What
 separates two orders is the BT.601 weight difference across the lanes they
-exchange, so an r/g swap moves the prediction by only `0.288 × |r − g|` — four
-counts of difference move it by one. The check now scores all six orders and
-confirms only when the assumed one fits and no rival does; otherwise it says so
-once and keeps waiting.
+exchange, so an r/g swap moves the prediction by only `0.288 x |r - g|`. A soak
+run returned `r=40 g=36 b=24 y=36` and the check called it confirmed; it should
+not have — all six orders fit that `y` within tolerance, and the r/g swap fits
+marginally better than `r,g,b`.
 
-To settle it, point the camera at a saturated colour filling much of the frame.
-Roughly `r=200 g=100 b=30` confirms with the nearest rival 16 counts out; a
-merely tinted scene will not, and the log says which it got.
+And the frame mean cannot supply the colour anyway, because **AWB is built to
+remove it**. Put a saturated blue object in front of the camera and the mean
+comes back `r=55 g=38 b=43` — red highest, blue corrected away. Waiting for a
+colourful mean is waiting for the thing AWB exists to prevent.
 
-Nothing depends on the answer: `star_ae_lanes_identified` gates only the log
+So the check scores the cells, not the mean. AWB neutralises the average over
+the frame; it does not make every cell grey, and a 32x32 grid gives a thousand
+of them. Summing each order's error against lane 3 across all cells turns a
+per-cell difference too small to see into a total that separates, and
+confirmation requires the winner to lead by a margin *per scored cell* so that a
+lead built from integer rounding does not count.
+
+Modelled against an AWB-corrected blue object — frame mean `r=108 g=107 b=108`,
+fully neutral — the correct order still wins by 4 counts per cell. A flat grey
+wall and a uniform frame stay ambiguous, which is the right answer for both.
+
+Nothing depends on the outcome: `star_ae_lanes_identified` gates only the log
 line, never the returned luma, which is read from the Y lane regardless.
 
 ## Zero means "not available"
