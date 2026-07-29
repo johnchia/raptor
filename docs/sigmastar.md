@@ -22,8 +22,9 @@ got to them.
 | OSD | Text and image overlays through `rod` → SHM → `MI_RGN` |
 | Day/night | IR-cut filter switching from the ISP's own AE |
 | Exposure readback | `isp_get_exposure` — shutter, gain, AE scene luma |
-| JPEG snapshots | `/snap`, each JPEG channel on its own VPE port — see below |
+| JPEG snapshots | `/snap`, dedicated VPE port where geometry allows, else shared — see below |
 | MJPEG | `/mjpeg`, off the same JPEG channel — rate-capped, see below |
+| AE statistics | Grid placement and the `r,g,b,y` lane order, both confirmed from cell data |
 
 ## Deliberately absent
 
@@ -71,7 +72,6 @@ Nothing below is known broken. It is unverified, which is not the same thing.
 - **`trigger = photo`** (photometric state machine). Needs `ev`, which this
   platform does not report; `ric` warns once and falls back to the luma
   trigger.
-- **The AE statistics lane order.** See below.
 
 ## JPEG snapshots need a VPE port of their own
 
@@ -231,31 +231,41 @@ a reading and moves the IR-cut filter. A board run settled it: the probe logged
 `AE grid 32x32, cells at offset 8`, so the eight bytes lead and are the grid
 dimensions themselves. 128×90 is the payload maximum, not the live grid.
 
-**Still open:** the lane order within a cell is waybeam's word only, and two
-things make it harder to close than it looks.
+**Settled on the board.** The lane order is `r,g,b,y`, confirmed 2026-07-29:
 
-Spread between the lanes is necessary but nowhere near sufficient. What
+```
+isp: AE lanes over 1022 cells: r,g,b,y is off luma by 0/cell,
+     the nearest other order by 3/cell -- the order is confirmed
+```
+
+Zero counts per cell across 1022 cells means lane 3 is the BT.601 sum of the
+first three to within integer rounding, everywhere in the frame; no other
+assignment of r, g and b to those lanes does that. It took two corrections to
+get an answer worth trusting, both worth keeping.
+
+**Spread between the lanes is necessary but nowhere near sufficient.** What
 separates two orders is the BT.601 weight difference across the lanes they
-exchange, so an r/g swap moves the prediction by only `0.288 x |r - g|`. A soak
-run returned `r=40 g=36 b=24 y=36` and the check called it confirmed; it should
-not have — all six orders fit that `y` within tolerance, and the r/g swap fits
-marginally better than `r,g,b`.
+exchange, so an r/g swap moves the prediction by only `0.288 x |r - g|`. An
+earlier soak run returned `r=40 g=36 b=24 y=36` and the check called it
+confirmed; it should not have — all six orders fit that `y` within tolerance,
+and the r/g swap fitted marginally better than `r,g,b`.
 
-And the frame mean cannot supply the colour anyway, because **AWB is built to
-remove it**. Put a saturated blue object in front of the camera and the mean
+**And the frame mean cannot supply the colour anyway, because AWB is built to
+remove it.** Put a saturated blue object in front of the camera and the mean
 comes back `r=55 g=38 b=43` — red highest, blue corrected away. Waiting for a
-colourful mean is waiting for the thing AWB exists to prevent.
+colourful mean is waiting for the thing AWB exists to prevent, so that check
+could never have passed however the scene was arranged.
 
-So the check scores the cells, not the mean. AWB neutralises the average over
-the frame; it does not make every cell grey, and a 32x32 grid gives a thousand
-of them. Summing each order's error against lane 3 across all cells turns a
-per-cell difference too small to see into a total that separates, and
-confirmation requires the winner to lead by a margin *per scored cell* so that a
-lead built from integer rounding does not count.
+The check therefore scores the cells, not the mean. AWB neutralises the average
+over the frame; it does not make every cell grey, and a 32x32 grid gives a
+thousand of them. Summing each order's error against lane 3 across all cells
+turns a per-cell difference too small to see into a total that separates, and
+confirmation requires the winner to lead by a margin *per scored cell* so a lead
+built from integer rounding does not count.
 
-Modelled against an AWB-corrected blue object — frame mean `r=108 g=107 b=108`,
-fully neutral — the correct order still wins by 4 counts per cell. A flat grey
-wall and a uniform frame stay ambiguous, which is the right answer for both.
+The general form is worth carrying to any other statistic this backend infers:
+**AE and AWB are closed loops driving frame statistics toward a setpoint, so
+anything inferred from a frame mean is measuring the loop, not the scene.**
 
 Nothing depends on the outcome: `star_ae_lanes_identified` gates only the log
 line, never the returned luma, which is read from the Y lane regardless.
