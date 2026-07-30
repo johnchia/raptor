@@ -404,6 +404,49 @@ having and the config says to leave `max_again` unset.
 - **Neither key is worth setting on this board.** 128x is the widest it has, and
   anything set here only narrows it.
 
+### `ae_comp`: the neutral is the tuning's, not the midpoint
+
+MI's `MI_ISP_AE_SetEVComp` takes 0..200. **What means "no compensation" is not
+documented and is not the midpoint.** waybeam's table gives the range and the
+offset and says nothing about unity (`star6e_iq.c:248`), and there is no vendor
+doc for the ISP module.
+
+Assuming 100 cost a wrong default. Every board ran with EVComp *written* to 100,
+because raptor's neutral 128 mapped there and rvd applies the whole `[image]`
+block whether or not the keys appear in the config. On this board the tuning's
+own value sits far below 100, so the default brightened the picture, and the
+whole 0..127 half of raptor's scale was spent climbing back down to where the
+tuning already was — there was no usable negative compensation at all. The
+symptom reported from the board was exactly that: the default too bright, and
+`ae_comp = 0` looking neutral.
+
+The fix is not a better constant, which would only be right for one tuning
+binary. The backend reads the field once after each tuning load and adopts
+whatever the binary left there as the value raptor's 128 maps to
+(`unity_from_tuning` in `hal_isp.c`). Neutral then writes it back unchanged, and
+the reachable range in each direction is reported once:
+
+```
+isp: ae_comp baseline from the tuning is MI 20/200 -- raptor 128 maps here,
+so 0..127 darkens by up to 20 and 129..255 brightens by up to 180
+```
+
+The read has to be armed by each load and consumed by the first fetch, because
+every later fetch sees a value of *ours*. That includes the reload the
+tear-down above forces: a baseline kept across it would leave the scale centred
+on a number no longer in the field for the rest of the run.
+
+Two general points, both of which cost time here:
+
+- **An `IQ_FLAT` knob has no auto mode**, so raptor's neutral has to be *made*
+  inert. The `IQ_AUTOMAN` knobs get this for free — 128 restores auto and leaves
+  the manual field alone — and it is tempting to assume the same of the rest.
+  `raptor-ssc30kq.conf` documented `ae_comp` as one of them and it never was.
+- **A midpoint is not a unity.** `saturation` was already the counter-example in
+  this table (0..127 with unity at 32, not 64); EVComp is the second, and the one
+  where the wrong guess is invisible because it shifts the picture rather than
+  failing.
+
 ### `night_gain` is pinned, not calibrated
 
 `night_gain` ships at **122880 (120x)**, near the top of what the AE can reach,
