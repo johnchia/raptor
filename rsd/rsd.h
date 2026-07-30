@@ -29,9 +29,9 @@
  * The first SR is what gives a client the NTP<->RTP anchor it needs to relate
  * the audio timeline to the video one, and until it has that anchor for both
  * streams a client has nothing to sync against -- which is the reported
- * "1-2 s of no audio at stream start" on Frigate. FIRST_US used to hold it
- * back a full second for no benefit: the earlier the anchor arrives, the
- * sooner audio can be placed. 0 means the first SR rides out with the first
+ * "1-2 s of no audio at stream start" on Frigate. Holding the first SR back
+ * buys nothing: the earlier the anchor arrives, the sooner audio can be
+ * placed. 0 means the first SR rides out with the first
  * RTP packet of each stream (last_rtcp is backdated a full interval at PLAY,
  * so the very first packet satisfies the interval test), where the transport's
  * last_rtp_timestamp is already valid because the SR check runs after the

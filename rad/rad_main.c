@@ -1466,12 +1466,11 @@ int main(int argc, char **argv)
 	 * Backlog draining state: see the long comment at the fetch below.
 	 *
 	 * Off by default, because on the one platform where it has been
-	 * measured it does not work and is not free. Board evidence
-	 * (Infinity6E, 2026-07-26): 1497 frames with a 36ms worst read gap
-	 * reported "drained 0" -- not one non-blocking fetch ever returned a
-	 * period. An earlier build proved why: it polled continuously while MI
-	 * was logging "Buffer(s) is lost due to slow fetching", i.e. while the
-	 * queue was provably FULL, and every poll still answered "no buffer".
+	 * measured it does not work and is not free. On Infinity6E, 1497 frames
+	 * with a 36ms worst read gap reported "drained 0" -- not one
+	 * non-blocking fetch ever returned a period. Polling continuously while
+	 * MI logs "Buffer(s) is lost due to slow fetching", i.e. while the
+	 * queue is provably FULL, still answers "no buffer" every time.
 	 * MI_AI_GetFrame with s32MilliSec == 0 does not consult the queue.
 	 *
 	 * That makes the drain worse than a no-op here: every period pays an
@@ -1514,9 +1513,9 @@ int main(int argc, char **argv)
 	/*
 	 * Work, as opposed to waiting. A blocking fetch spends the rest of the
 	 * period parked in the SDK, so counting the fetch as busy time reports
-	 * ~100% on a loop that is almost entirely idle -- which is exactly what
-	 * the first version of this did, and it was useless. Measure instead
-	 * from the fetch returning to the next fetch starting: encode, publish,
+	 * ~100% on a loop that is almost entirely idle, which is useless.
+	 * Measure instead from the fetch returning to the next fetch starting:
+	 * encode, publish,
 	 * release, stats, control socket. That number against the period is
 	 * what says whether there is headroom.
 	 */
