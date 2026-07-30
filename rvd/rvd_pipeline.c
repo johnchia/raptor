@@ -594,6 +594,7 @@ int rvd_pipeline_init(rvd_state_t *st)
 		int temper = rss_config_get_int(cfg, img, "temper", 128);
 		int hue = rss_config_get_int(cfg, img, "hue", 128);
 		int ae_comp = rss_config_get_int(cfg, img, "ae_comp", 128);
+		int ae_target = rss_config_get_int(cfg, img, "ae_target", 128);
 		int max_again = rss_config_get_int(cfg, img, "max_again", 160);
 		int max_dgain = rss_config_get_int(cfg, img, "max_dgain", 80);
 		/* 0 leaves the tuning's own shutter ceiling in charge, which is
@@ -617,6 +618,7 @@ int rvd_pipeline_init(rvd_state_t *st)
 		RSS_HAL_CALL(st->ops, isp_set_temper_strength, st->hal_ctx, temper);
 		RSS_HAL_CALL(st->ops, isp_set_hue, st->hal_ctx, hue);
 		RSS_HAL_CALL(st->ops, isp_set_ae_comp, st->hal_ctx, ae_comp);
+		RSS_HAL_CALL(st->ops, isp_set_ae_target, st->hal_ctx, ae_target);
 		RSS_HAL_CALL(st->ops, isp_set_max_again, st->hal_ctx, max_again);
 		RSS_HAL_CALL(st->ops, isp_set_max_dgain, st->hal_ctx, max_dgain);
 		if (max_exposure_us > 0)
@@ -636,7 +638,8 @@ int rvd_pipeline_init(rvd_state_t *st)
 		RSS_DEBUG("isp tuning: brightness=%d contrast=%d saturation=%d "
 			  "sharpness=%d",
 			  brightness, contrast, saturation, sharpness);
-		RSS_DEBUG("  sinter=%d temper=%d hue=%d ae_comp=%d", sinter, temper, hue, ae_comp);
+		RSS_DEBUG("  sinter=%d temper=%d hue=%d ae_comp=%d ae_target=%d", sinter, temper,
+			  hue, ae_comp, ae_target);
 		RSS_DEBUG("  max_again=%d max_dgain=%d max_exposure_us=%d dpc=%d drc=%d", max_again,
 			  max_dgain, max_exposure_us, dpc, drc);
 		RSS_DEBUG("  highlight=%d backlight=%d defog=%d", highlight, backlight, defog);

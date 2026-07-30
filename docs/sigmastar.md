@@ -72,6 +72,11 @@ Nothing below is known broken. It is unverified, which is not the same thing.
 - **`trigger = photo`** (photometric state machine). Needs `ev`, which this
   platform does not report; `ric` warns once and falls back to the luma
   trigger.
+- **`ae_target`**. The AE target curve's layout is reconstructed from one board
+  dump — see below for the evidence and for the checks that make a wrong
+  reading decline instead of write. What is unverified is the effect: whether
+  scaling the curve moves the exposure by the amount asked for, and whether the
+  AE stays stable at the ends of the range.
 
 ## JPEG snapshots need a VPE port of their own
 
@@ -436,6 +441,12 @@ every later fetch sees a value of *ours*. That includes the reload the
 tear-down above forces: a baseline kept across it would leave the scale centred
 on a number no longer in the field for the rest of the run.
 
+**The board's baseline reads back 0**, which is the floor of the range. So EV
+compensation here can only ever brighten: raising it demonstrably does, and
+there is nothing underneath. The fix above still matters — 128 no longer
+brightens by default — but the knob cannot darken, and no scaling changes that.
+Use `ae_target` below.
+
 Two general points, both of which cost time here:
 
 - **An `IQ_FLAT` knob has no auto mode**, so raptor's neutral has to be *made*
@@ -446,6 +457,65 @@ Two general points, both of which cost time here:
   this table (0..127 with unity at 32, not 64); EVComp is the second, and the one
   where the wrong guess is invisible because it shifts the picture rather than
   failing.
+
+### `ae_target`, and the AE target curve
+
+`MI_ISP_AE_SetTarget` is the AE's aim, and it is the knob that lowers exposure
+here. From the vendor wrappers' own disassembly: command **0x1407** with a
+**132-byte** payload, against `SetEVComp`'s 0x1403 and 8.
+
+It is not a scalar. The payload read off the board is a 16-point curve of
+target luma against scene light level:
+
+```
+count  16
+target 350 350 350 350 350 360 365 385 400 420 455 465 480 450 400 400
+light  -88152 -71768 -55384 -39000 -22616 -6232 10152 26536 42920 59304
+       78888 92072 108456 130000 160000 170000
+```
+
+```c
+struct { uint32_t count; uint32_t target[16]; int32_t light[16]; };  /* 132 bytes */
+```
+
+`1 + 16 + 16` words is 132 exactly — and that 132 is the size the vendor
+wrapper moves into its API descriptor, not a reconstruction. Three independent
+things agree with the reading:
+
+- the light axis is **strictly increasing**, and mostly spaced by exactly
+  16384, so it is a fixed-point log scale;
+- the target array is **not** monotonic — it climbs to 480 and falls back to
+  400, which is what an AE curve does to protect highlights in a bright scene;
+- 350..480 in eighths is 43.75..60, which brackets the `ae_luma` this board
+  reports in daylight.
+
+**Neither axis's unit is identified, and `ae_target` does not need it.** It
+applies raptor's 0..255 as a *proportion* of the calibrated curve — 128
+unchanged, 64 half, 255 nearly double — and a ratio is the same operation
+whatever the units are. That is the reason it is a proportion rather than an
+absolute target, and it is worth preserving: an absolute knob here would be
+guessing at a unit.
+
+Two properties that make it safe to leave in a config:
+
+- **The scale is always applied to the tuning's curve**, snapshotted on each
+  load, never to the last value written. So repeating a setting does not
+  compound, and 128 always restores the calibration exactly.
+- **The layout is checked on every read, not trusted.** The count must address
+  the arrays, every target must be in a plausible range, and the light axis
+  must strictly increase. That last one is the load-bearing check: an axis has
+  to increase and the target curve provably does not (the first five entries
+  are all 350), so the two arrays cannot be swapped without it failing. A
+  payload that does not check out declines rather than writing — this is a
+  reconstructed layout feeding the loop that decides every exposure, and
+  `MI_VPE_GetPortMode` is the precedent for what a wrong one costs.
+
+Only the target array is written; the count and the light axis are the
+tuning's calibration and are preserved by read-modify-write.
+
+Note what this is *not*: `[image] brightness` also darkens, but it is a
+post-ISP luma adjustment, so it dims an already-correct exposure and leaves
+clipped highlights clipped. `ae_target` moves the exposure itself.
 
 ### `night_gain` is pinned, not calibrated
 
