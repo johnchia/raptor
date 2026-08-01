@@ -28,9 +28,10 @@ case "$platform" in
     t41|T41) PLATFORM=T41 ;;
     a1|A1)   PLATFORM=A1 ;;
     infinity6e|INFINITY6E|ssc30kq|SSC30KQ) PLATFORM=INFINITY6E ;;
+    infinity6b0|INFINITY6B0|ssc333|SSC333|ssc335|SSC335|ssc337|SSC337) PLATFORM=INFINITY6B0 ;;
     *)
         echo "Usage: $0 <platform> <br_output> [target...]"
-        echo "Platforms: t10 t20 t21 t23 t30 t31 t32 t33 t40 t41 a1 infinity6e"
+        echo "Platforms: t10 t20 t21 t23 t30 t31 t32 t33 t40 t41 a1 infinity6e infinity6b0"
         echo ""
         echo "  <br_output> is the buildroot output directory containing"
         echo "  host/ with the cross-compiler and sysroot."
@@ -38,11 +39,11 @@ case "$platform" in
         ;;
 esac
 
-# Everything above is Ingenic and mipsel; Infinity6E is SigmaStar and ARM.
-# That splits both the sysroot tuple and the compiler prefix, so neither can
-# stay hardcoded below.
+# Everything above is Ingenic and mipsel; the Infinity6 families are SigmaStar
+# and ARM. That splits both the sysroot tuple and the compiler prefix, so
+# neither can stay hardcoded below.
 case "$PLATFORM" in
-    INFINITY6E)
+    INFINITY6E|INFINITY6B0)
         SYSROOT_TUPLES="arm-buildroot-linux-gnueabihf arm-openipc-linux-gnueabihf \
                         arm-thingino-linux-gnueabihf arm-buildroot-linux-musleabihf"
         # OpenIPC's Buildroot installs arm-openipc-*-gcc against an
