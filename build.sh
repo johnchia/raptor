@@ -43,7 +43,7 @@ esac
 # and ARM. That splits both the sysroot tuple and the compiler prefix, so
 # neither can stay hardcoded below.
 case "$PLATFORM" in
-    INFINITY6E|INFINITY6B0)
+    INFINITY6E)
         SYSROOT_TUPLES="arm-buildroot-linux-gnueabihf arm-openipc-linux-gnueabihf \
                         arm-thingino-linux-gnueabihf arm-buildroot-linux-musleabihf"
         # OpenIPC's Buildroot installs arm-openipc-*-gcc against an
@@ -51,6 +51,22 @@ case "$PLATFORM" in
         # same string and the prefix has to be looked for separately.
         CROSS_CANDIDATES="arm-openipc-linux-gnueabihf- arm-buildroot-linux-gnueabihf- \
                           arm-linux-gnueabihf-"
+        CROSS_GLOB="arm"
+        ;;
+    INFINITY6B0)
+        # musl, not glibc, and the distinction is fatal rather than cosmetic:
+        # there is no glibc anywhere in an Infinity6B0 image, so a
+        # gnueabihf-linked daemon does not reach its entry point. The families
+        # split this way because the vendor blobs do -- Infinity6E's
+        # libmi_sys.so declares NEEDED libc.so.6, while Infinity6B0's declare
+        # no libc at all and resolve plain POSIX out of the loading process.
+        #
+        # Only standalone builds can get this wrong. Through Buildroot the
+        # toolchain comes from the camera defconfig, which already knows.
+        SYSROOT_TUPLES="arm-buildroot-linux-musleabihf arm-openipc-linux-musleabihf \
+                        arm-thingino-linux-musleabihf"
+        CROSS_CANDIDATES="arm-openipc-linux-musleabihf- arm-buildroot-linux-musleabihf- \
+                          arm-linux-musleabihf-"
         CROSS_GLOB="arm"
         ;;
     *)
