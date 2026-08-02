@@ -183,8 +183,9 @@ Supported platforms: `t10`, `t20`, `t21`, `t23`, `t30`, `t31`, `t32`, `t33`, `t4
 This script is Ingenic-only, and by design: it bootstraps a thingino mipsel
 toolchain release and an Ingenic SDK version map, neither of which has a
 SigmaStar counterpart. For `infinity6e`, build against an existing Buildroot
-output with `./build.sh infinity6e /path/to/openipc-firmware/output`, or build
-the whole image, which packages raptor itself.
+output with `./build.sh infinity6e /path/to/buildroot/output`, or build the
+whole image, which packages raptor itself. Which output, and the overrides that
+tree may need, are in `docs/sigmastar.md`.
 
 First run downloads the toolchain and all dependencies automatically.
 Output binaries go to `build/`. Options: `--no-tls`, `--no-aac`,

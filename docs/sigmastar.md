@@ -555,11 +555,51 @@ vendor SDK or a built image rather than a URL.
 
 ```sh
 # Against an existing Buildroot output
-./build.sh infinity6e /path/to/openipc-firmware/output
+BR=/path/to/buildroot/output/<board>
+S=$BR/host/arm-buildroot-linux-gnueabihf/sysroot
+./build.sh infinity6e "$BR" <targets> MP3=0 \
+    LIB_COMPY="$S/usr/lib/libcompy.a" \
+    LIB_COMPY_FILE="$S/usr/lib/libcompy.a" \
+    COMPY_CFLAGS="-I$S/usr/include -DCOMPY_HAS_TLS"
 
 # Or build the whole image, which packages raptor itself
 make BOARD=ssc30kq_raptor RAPTOR_SRCDIR=/path/to/raptor-repos
 ```
+
+`build.sh` ends in `exec make … "$@"`, which is why trailing `VAR=value`
+arguments arrive as command-line overrides.
+
+Point it at the output that built the image **the board is running**, not at
+whichever Buildroot tree is nearest. `build.sh` locates a sysroot by path shape
+and tests only that a library is *present* — never its version, never the
+options it was built with — so a mismatched tree gets a long way before
+anything complains. Four of the twelve daemons are sensitive, in ascending
+order of how long the mistake survives:
+
+- **`rac` fails to compile**, on `mp3dec.h`. `build.sh` passes `MP3=1`
+  unconditionally, and minimp3 is a separate package that a given config need
+  not have enabled. Pass `MP3=0` when the sysroot lacks it.
+- **`rwd` fails to compile**, on `MBEDTLS_PRIVATE` and
+  `chosen_dtls_srtp_profile` in `rwd_dtls.c`. Its DTLS-SRTP code is written to
+  the mbedTLS 3.x API, which 2.x does not have; there is no build flag for this
+  and no version to pass. The sysroot has to carry mbedTLS 3.
+- **`rsd` fails to link**, on `Compy_TlsContext_new` and the rest of the
+  `compy_tls_*` set, when the sysroot's `libcompy.a` was built without `TLS=1`.
+  The in-tree default `COMPY_BUILD` (`../compy/build-arm`) commonly has the same
+  gap, which is what the three overrides above are for: they aim every compy
+  variable at a copy known to carry TLS. `COMPY_CFLAGS` is a `:=` assignment
+  that the makefile appends `-DCOMPY_HAS_TLS` to under `TLS=1`; overriding it
+  from the command line replaces that append along with everything else, so the
+  override has to carry the define itself.
+- **`rhd` builds clean and fails on the board.** TLS is auto-detected from
+  `libmbedtls.so` merely existing, with no version check, so a sysroot holding
+  mbedTLS 2.25 yields an `rhd` needing `libmbedtls.so.13` while the board ships
+  3.6.6 as `libmbedtls.so.21`. Nothing catches this until the loader does.
+  `readelf -d` against the board's `/usr/lib` is the check.
+
+Objects in the daemon directories outlive a change of flags and make will not
+notice, so a link can fail on a symbol the current flags do define. Remove a
+target's objects before a build that changes any of the above.
 
 Host-side logic tests for the backend live in `raptor-hal/tests` (`make -C
 tests test`): they `#include` the real translation units and stub MI through
