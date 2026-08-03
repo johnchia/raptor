@@ -265,12 +265,6 @@ static void load_sensor_from_section(rss_config_t *cfg, const char *section,
 	sensor->height = (uint16_t)rss_config_get_int(cfg, section, "height", 0);
 	sensor->fps = (uint32_t)rss_config_get_int(cfg, section, "fps", 0);
 
-	/* Optional ISP tuning binary. Only a backend whose ISP is driven by a
-	 * tuning file reads this, and it derives the usual path from the sensor
-	 * name, so this stays empty unless the file lives somewhere unusual. */
-	rss_strlcpy(sensor->iq_file, rss_config_get_str(cfg, section, "iq_file", ""),
-		    sizeof(sensor->iq_file));
-
 	/* Orientation is read here, out of the [image] section rather than this
 	 * one, because some backends have to know it before the sensor starts:
 	 * where orientation is a sensor register the driver latches it during
@@ -468,40 +462,27 @@ int rvd_pipeline_init(rvd_state_t *st)
 	}
 	st->sensor_count = multi_cfg.sensor_count;
 
-	/* Ask the HAL to name the sensor when neither config nor procfs did.
-	 * Valid before init, and the only pre-init op — see raptor_hal.h. On a
-	 * platform where the SDK binds the sensor at driver-load time this is the
-	 * authoritative source, and /proc/jz/sensor does not exist at all. */
+	/*
+	 * Both checks below exist to catch a daemon that cannot reach its
+	 * sensor. Where the SDK binds the sensor as its driver loads and
+	 * addresses it by index, the HAL resolves the sensor's identity itself
+	 * and neither value is reachable configuration -- an address in
+	 * particular is never read -- so requiring them would refuse to start a
+	 * camera that is fully able to.
+	 */
 	const rss_hal_caps_t *sensor_caps =
 		st->ops->get_caps ? st->ops->get_caps(st->hal_ctx) : NULL;
-	bool sensor_self_describing = sensor_caps && sensor_caps->has_sensor_detect;
-
-	if (!multi_cfg.sensors[0].name[0] && sensor_self_describing) {
-		char detected[sizeof(multi_cfg.sensors[0].name)];
-
-		if (RSS_HAL_CALL(st->ops, sensor_detect, st->hal_ctx, detected,
-				 sizeof(detected)) == RSS_OK &&
-		    detected[0]) {
-			rss_strlcpy(multi_cfg.sensors[0].name, detected,
-				    sizeof(multi_cfg.sensors[0].name));
-			RSS_INFO("sensor detected by HAL: %s", multi_cfg.sensors[0].name);
-		}
-	}
+	bool sdk_owns_sensor = sensor_caps && sensor_caps->sdk_owns_sensor;
 
 	/* Validate primary sensor */
-	if (!multi_cfg.sensors[0].name[0]) {
-		RSS_FATAL("sensor name not in config, not in /proc/jz/sensor/sensor0/name, "
-			  "and not detected by the HAL");
+	if (!multi_cfg.sensors[0].name[0] && !sdk_owns_sensor) {
+		RSS_FATAL("sensor name not in config and not in /proc/jz/sensor/sensor0/name");
 		rss_hal_destroy(st->hal_ctx);
 		st->hal_ctx = NULL;
 		return RSS_ERR;
 	}
 
-	/* An I2C address is only meaningful where the daemon is what tells the
-	 * SDK how to reach the sensor. Where the HAL detects it, the SDK already
-	 * owns that bus and an address here would be ignored, so requiring one
-	 * would be demanding configuration that cannot matter. */
-	if (multi_cfg.sensors[0].i2c_addr == 0 && !sensor_self_describing) {
+	if (multi_cfg.sensors[0].i2c_addr == 0 && !sdk_owns_sensor) {
 		RSS_FATAL("i2c_addr not in config and not in /proc/jz/sensor/sensor0/i2c_addr");
 		rss_hal_destroy(st->hal_ctx);
 		st->hal_ctx = NULL;
