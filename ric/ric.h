@@ -202,10 +202,6 @@ typedef struct {
 	/* One-shot diagnostics: a missing signal is worth saying once, and
 	 * saying every poll instead is how a log stops being read. */
 	bool no_exposure_warned;
-
-	/* One-shot diagnostics: a missing signal is worth saying once, and
-	 * saying every poll instead is how a log stops being read. */
-	bool no_exposure_warned;
 	bool photosensor_warned;
 
 	/* Control */
