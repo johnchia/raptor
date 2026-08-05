@@ -20,8 +20,6 @@
 #include <errno.h>
 
 #include <pthread.h>
-#include <sched.h>
-#include <sys/resource.h>
 #include <sys/select.h>
 
 #include <raptor_hal.h>
@@ -53,132 +51,6 @@
 #define RAD_SYNTH_RESYNC_AHEAD_US  1000000
 #define RAD_SYNTH_NUDGE_BAND_US	   20000
 #define RAD_SYNTH_NUDGE_US	   1000
-
-/*
- * Capture-loop scheduling.
- *
- * The AI loop has a hard deadline: the SoC hands back one period every 20ms
- * and overwrites periods rad has not collected, so being late costs recorded
- * audio, not just latency. Left at SCHED_OTHER it competes on equal terms
- * with video encoding, the ISP's userspace work and RTSP delivery, and on a
- * single-core Cortex-A7 it loses -- observed on the board as MI's "Buffer(s)
- * is lost due to slow fetching" together with rad's own "+151ms" resync.
- *
- * SCHED_FIFO at a low priority is the fix that matches the shape of the work:
- * the loop wakes 50 times a second, runs for a millisecond or two, and blocks
- * again, so it cannot meaningfully starve anything, while any RT thread the
- * vendor libraries run above this priority still wins. Deliberately low
- * rather than aggressive.
- *
- * Set rt_priority = 0 to leave scheduling alone.
- *
- * A SCHED_FIFO loop must be structurally incapable of spinning, because on
- * one core that is an unrecoverable hang rather than a slowdown -- see the
- * timeout guard in the loop, which is what makes this priority safe to
- * default on.
- */
-#define RAD_RT_PRIORITY_DEFAULT 10
-#define RAD_NICE_FALLBACK	(-10)
-
-/*
- * A blocking read that returns "no data" faster than this did not block, so
- * something is answering immediately and the loop would spin. Yield for a
- * fraction of a period instead: long enough that a wedged device cannot
- * monopolise the core, short enough to be invisible when the device is
- * merely idle at startup.
- */
-#define RAD_TIMEOUT_FLOOR_US 2000
-#define RAD_TIMEOUT_YIELD_US 2000
-
-/*
- * Inter-read gap worth reporting without debug logging on. The backend's
- * output-port queue is what actually decides when lateness turns into lost
- * samples, and rad cannot see its depth from here, so this is a plain "much
- * longer than a period" figure rather than a threshold derived from it.
- */
-#define RAD_READ_GAP_WARN_US 100000
-
-/*
- * How many periods to take back-to-back before waiting again. A cap only so
- * that the control socket still gets serviced and a misbehaving device cannot
- * hold the loop indefinitely; the SDK queue is 16 periods, so this drains any
- * real backlog in one pass.
- */
-#define RAD_DRAIN_BURST_MAX 32
-
-/*
- * Rate limit for the clock-resync warning.
- *
- * A loop that cannot keep up resyncs about once a second, and at that point
- * the warning stops being diagnosis and becomes part of the fault: writing a
- * line to a serial console costs milliseconds, spent inside the 20ms period
- * the message is complaining about. Count them and report the count.
- */
-#define RAD_RESYNC_LOG_INTERVAL_US 10000000
-
-/*
- * Largest sequence gap treated as real capture loss (one second of periods).
- * The SDK's sequence field is whatever the vendor library chose to put there,
- * so beyond a second a "gap" is likelier a wrap or an unimplemented field than
- * lost audio, and acting on it would throw the published timeline. Genuine
- * long stalls are still covered by the clock resync.
- */
-#define RAD_SEQ_GAP_MAX_PERIODS 50
-
-/*
- * Capture loss worth warning about, as a fraction of the periods in the
- * window: 1/200 is 0.5%, or about 7 periods in 30s.
- *
- * Not "any loss at all". Board steady state on Infinity6E is ~3 lost periods
- * per 30s -- 60ms in 30s, one 20ms hole every ten seconds, inaudible, outside
- * rad's control and unchanged over a quarter hour of streaming. Warning on
- * that means warning every 30s forever, which trains everyone to ignore the
- * line. For scale, the same board measured ~15 per 30s when run in the
- * foreground on a console (MI writes two lines per lost period from inside
- * MI_AI_GetFrame, on this thread), and that is worth seeing.
- */
-#define RAD_SEQ_LOSS_WARN_RATIO 200
-
-/*
- * Give the capture loop scheduling priority over the rest of the pipeline.
- * Affects the calling thread only, so the AO and control paths stay normal.
- */
-static void rad_set_capture_priority(rss_config_t *cfg)
-{
-	int prio = rss_config_get_int(cfg, "audio", "rt_priority", RAD_RT_PRIORITY_DEFAULT);
-	int lo, hi, err;
-
-	if (prio <= 0) {
-		RSS_INFO("capture loop: default scheduling (rt_priority=%d)", prio);
-		return;
-	}
-
-	lo = sched_get_priority_min(SCHED_FIFO);
-	hi = sched_get_priority_max(SCHED_FIFO);
-	if (hi > 0 && prio > hi)
-		prio = hi;
-	if (lo > 0 && prio < lo)
-		prio = lo;
-
-	struct sched_param sp = {.sched_priority = prio};
-	/* pthread_setschedparam reports through its return value, not errno. */
-	err = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
-	if (err == 0) {
-		RSS_INFO("capture loop: SCHED_FIFO %d", prio);
-		return;
-	}
-
-	/* Without CAP_SYS_NICE there is no RT, but CFS weight is still worth
-	 * having -- it does not bound latency, it just makes preemption by the
-	 * encoder much less likely. */
-	if (setpriority(PRIO_PROCESS, 0, RAD_NICE_FALLBACK) == 0)
-		RSS_WARN("capture loop: SCHED_FIFO %d refused (%d); running at nice %d", prio, err,
-			 RAD_NICE_FALLBACK);
-	else
-		RSS_WARN("capture loop: no priority available (SCHED_FIFO %d, nice %d both refused) "
-			 "-- audio may drop periods under load",
-			 prio, RAD_NICE_FALLBACK);
-}
 
 /* ── AO thread context (needed by ctrl handler for ao-enable/ao-disable) ── */
 
@@ -1444,108 +1316,8 @@ int main(int argc, char **argv)
 		.synth_audio_ts = &synth_audio_ts,
 	};
 
-	rad_set_capture_priority(dctx.cfg);
-
 	uint64_t frame_count = 0;
 	int64_t last_stats = rss_timestamp_us();
-	/*
-	 * Worst gap between successful reads in the current report window.
-	 * This is the measurement that separates the two ways audio goes
-	 * missing: if MI reports lost buffers while this stays near the 20ms
-	 * period, the loss happened inside the SDK and no amount of scheduling
-	 * priority here will help; if it is large, rad was preempted and the
-	 * queue depth and priority are the levers.
-	 */
-	int64_t max_read_gap_us = 0;
-	/* Never reset. A 30s window that clears itself will miss a rare stall
-	 * unless you happen to read the report for the window it landed in --
-	 * which is exactly how a 17-minute-apart loss hid behind a steady
-	 * "worst read gap 38ms". */
-	int64_t max_read_gap_ever_us = 0;
-	/*
-	 * Backlog draining state: see the long comment at the fetch below.
-	 *
-	 * Off by default, because on the one platform where it has been
-	 * measured it does not work and is not free. On Infinity6E, 1497 frames
-	 * with a 36ms worst read gap reported "drained 0" -- not one
-	 * non-blocking fetch ever returned a period. Polling continuously while
-	 * MI logs "Buffer(s) is lost due to slow fetching", i.e. while the
-	 * queue is provably FULL, still answers "no buffer" every time.
-	 * MI_AI_GetFrame with s32MilliSec == 0 does not consult the queue.
-	 *
-	 * That makes the drain worse than a no-op here: every period pays an
-	 * extra loop iteration and a failed ioctl, in the one loop that has no
-	 * headroom to spare. Left in and switchable rather than deleted because
-	 * the mechanism is right for a platform whose non-blocking fetch works
-	 * -- but it must be measured there before being turned on, and
-	 * "drained" in the stats line is the measurement.
-	 */
-	bool blocking_read = true;
-	bool drain_unsupported = !rss_config_get_bool(dctx.cfg, "audio", "drain_backlog", false);
-	uint64_t drained_periods = 0;
-	int drain_run = 0;
-	/*
-	 * Where the iteration budget goes.
-	 *
-	 * The loop has one period to fetch, encode and publish, and on a
-	 * single-core A7 a software AAC encode is a large fraction of 20ms --
-	 * so "audio drops out" and "the encoder does not fit in the period"
-	 * are the same question, and the read gap alone cannot tell them
-	 * apart. A late read looks identical whether rad was preempted or rad
-	 * was busy encoding.
-	 *
-	 * The peak matters more than the mean: faac batches internally and
-	 * emits one frame per ~3.2 chunks, so the whole cost lands on every
-	 * third iteration and an average divides it away.
-	 *
-	 * frames-got against frames-expected is the summary number. Anything
-	 * short of the capture rate is audio the SoC recorded and rad never
-	 * collected, whatever the gap histogram says.
-	 */
-	int64_t period_us = sample_rate > 0
-				    ? (int64_t)audio_cfg.samples_per_frame * 1000000 / sample_rate
-				    : 0;
-	int64_t encode_max_us = 0;
-	uint64_t window_frames = 0;
-	int64_t resync_last_log_us = 0;
-	uint32_t resync_count = 0;
-	/*
-	 * Work, as opposed to waiting. A blocking fetch spends the rest of the
-	 * period parked in the SDK, so counting the fetch as busy time reports
-	 * ~100% on a loop that is almost entirely idle, which is useless.
-	 * Measure instead from the fetch returning to the next fetch starting:
-	 * encode, publish,
-	 * release, stats, control socket. That number against the period is
-	 * what says whether there is headroom.
-	 */
-	int64_t work_total_us = 0;
-	int64_t work_start_us = 0;
-	/*
-	 * The SDK's own sequence number and timestamp, which the HAL already
-	 * fills in from MI and rad has been discarding.
-	 *
-	 * These settle a question wall-clock arithmetic cannot. "Frames short
-	 * of what 30s at a 20ms period should yield" conflates two different
-	 * things: periods MI really dropped, and an AI sample clock that is not
-	 * exactly nominal. A 1% shortfall looks identical either way and means
-	 * completely different things -- one is lost audio, the other is
-	 * arithmetic. Sequence gaps count dropped periods with no assumption
-	 * about the clock; the mean timestamp delta measures the clock itself.
-	 *
-	 * Both fields are whatever the vendor library chose to put there, so
-	 * treat them as suspect: only a delta of 1 is "normal", a plausible
-	 * forward jump is loss, and anything else (stuck at zero, wrapped,
-	 * never implemented) is counted separately rather than reported as
-	 * loss.
-	 */
-	uint32_t last_seq = 0;
-	bool have_seq = false;
-	int64_t seq_lost = 0;
-	uint32_t seq_gaps = 0;
-	uint32_t seq_odd = 0;
-	int64_t mi_ts_prev = 0;
-	int64_t mi_ts_total_us = 0;
-	uint64_t mi_ts_count = 0;
 
 	while (*dctx.running) {
 		/* Check control socket (non-blocking) */
@@ -1568,139 +1340,14 @@ int main(int argc, char **argv)
 		}
 
 		rss_audio_frame_t frame;
-		int64_t read_call_us = rss_timestamp_us();
-		if (work_start_us) {
-			/* Consumed, so a fetch that times out before the next
-			 * successful one does not get its yield counted twice. */
-			work_total_us += read_call_us - work_start_us;
-			work_start_us = 0;
-		}
-		ret = RSS_HAL_CALL(ops, audio_read_frame, hal_ctx, ai_dev, 0, &frame,
-				   blocking_read);
+		ret = RSS_HAL_CALL(ops, audio_read_frame, hal_ctx, ai_dev, 0, &frame, true);
 		if (ret != RSS_OK) {
-			if (ret == RSS_ERR_TIMEOUT) {
-				if (!blocking_read) {
-					/* Queue drained; wait for the next period. */
-					blocking_read = true;
-					continue;
-				}
-				/* A blocking read that did not block would spin,
-				 * and at SCHED_FIFO on one core that wedges the
-				 * board. See RAD_TIMEOUT_FLOOR_US. */
-				if (rss_timestamp_us() - read_call_us < RAD_TIMEOUT_FLOOR_US)
-					usleep(RAD_TIMEOUT_YIELD_US);
+			if (ret == RSS_ERR_TIMEOUT)
 				continue;
-			}
-			/* Any other failure from a drain attempt just means stop
-			 * draining -- the platform may not implement a
-			 * non-blocking fetch, and that must degrade to the old
-			 * one-period-per-iteration behaviour rather than to an
-			 * error every 10ms. */
-			if (!blocking_read) {
-				blocking_read = true;
-				if (!drain_unsupported) {
-					/* Latches. Logging once while continuing to
-					 * do the thing is not a fallback -- that
-					 * bug shipped, and on this platform the
-					 * failing poll was destructive. */
-					drain_unsupported = true;
-					RSS_WARN("audio: non-blocking fetch returned %d; backlog "
-						 "draining disabled for this run",
-						 ret);
-				}
-				continue;
-			}
 			RSS_WARN("audio_read_frame failed: %d", ret);
 			usleep(10000);
 			continue;
 		}
-
-		if (blocking_read) {
-			drain_run = 0;
-		} else {
-			drained_periods++;
-			drain_run++;
-		}
-		/*
-		 * Having got one period, try to take the next without waiting.
-		 *
-		 * This is what stops the SDK's queue from filling. The loop can
-		 * only ever consume one period per iteration and each iteration
-		 * costs about one period of wall time, so there was no way to
-		 * catch up: any surplus -- loop overhead slightly over the
-		 * period, or an ADC clock a few hundred ppm fast -- accumulated
-		 * permanently until the queue overflowed, MI discarded the
-		 * backlog ("Buffer(s) is lost due to slow fetching", with the
-		 * writer index exactly one past the reader, i.e. a full ring),
-		 * and it started again.
-		 *
-		 * Board evidence that this, and not a stall, was the mechanism:
-		 * with a 4-period queue the loss landed at buf index 13505
-		 * (4.5 min) and with a 16-period queue at 50865 (17 min) -- a
-		 * 4x deeper queue bought 3.8x the time, while the worst gap
-		 * between reads stayed at 38ms against a 20ms period. Deepening
-		 * the queue diluted it; draining removes it.
-		 *
-		 * Publishing faster than real time puts the synthetic clock
-		 * ahead of the wall clock, which the slew above already expects
-		 * and tolerates to 1s.
-		 */
-		blocking_read = drain_unsupported || drain_run >= RAD_DRAIN_BURST_MAX;
-
-		/*
-		 * Account for periods the SDK dropped before this one.
-		 *
-		 * Board measurement: MI drops a single period roughly every two
-		 * seconds (15 per 30s, every gap exactly one period) while rad
-		 * sits 99% idle and never waits more than 37ms for a fetch. So
-		 * this is loss inside the SDK, not rad being late, and rad
-		 * cannot prevent it. What rad can do is tell the truth about it.
-		 *
-		 * It did not: the synthetic clock advanced one period per
-		 * *delivered* frame, so missing audio was spliced out and the
-		 * timeline still claimed continuity. That is worse than a
-		 * declared gap. The published clock falls behind wall time by
-		 * one period per loss -- 300ms per 30s at the measured rate --
-		 * and every stage downstream smears it rather than showing it:
-		 * the slew below only nudges 1ms at a time above a 20ms band,
-		 * and rsd only snaps its RTP cadence for gaps wider than four
-		 * frames. A single lost period is under both thresholds, so the
-		 * client gets a continuous timeline that runs slow, and its
-		 * jitter buffer eventually underruns -- a couple hundred ms of
-		 * silence, periodically, which is the reported symptom.
-		 *
-		 * Advancing by what went missing keeps the timeline locked to
-		 * real time and makes each loss a correctly sized hole. It also
-		 * stops the slew fighting a deficit that was never drift.
-		 */
-		int64_t lost_periods = 0;
-		if (have_seq) {
-			int64_t delta = (int64_t)(uint32_t)(frame.seq - last_seq);
-
-			if (delta > 1 && delta <= RAD_SEQ_GAP_MAX_PERIODS) {
-				lost_periods = delta - 1;
-				seq_lost += lost_periods;
-				seq_gaps++;
-			} else if (delta != 1) {
-				/*
-				 * Stuck at zero, wrapped, or never implemented
-				 * by this vendor library -- and beyond a second
-				 * a "gap" is likelier a bad field than real
-				 * loss. Not evidence of anything, so it must
-				 * not be allowed to move the clock; the resync
-				 * below still covers a genuine long stall.
-				 */
-				seq_odd++;
-			}
-		}
-		last_seq = frame.seq;
-		have_seq = true;
-		if (mi_ts_prev && frame.timestamp > mi_ts_prev &&
-		    frame.timestamp - mi_ts_prev < 1000000) {
-			mi_ts_total_us += frame.timestamp - mi_ts_prev;
-			mi_ts_count++;
-		}
-		mi_ts_prev = frame.timestamp;
 
 		int samples = frame.length / 2;
 		int max_samples = ctrl_ctx.sample_rate / 50; /* 20ms */
@@ -1711,7 +1358,6 @@ int main(int argc, char **argv)
 		 * SDK audio timestamps use a different clock than the encoder
 		 * on some SoCs (T31), causing A-V sync drift. Synthetic
 		 * timestamps share the encoder's clock source. */
-		synth_audio_ts += lost_periods * period_us;
 		int64_t ts = synth_audio_ts;
 		synth_audio_ts += (int64_t)samples * 1000000 / ctrl_ctx.sample_rate;
 
@@ -1731,31 +1377,14 @@ int main(int argc, char **argv)
 		 * skews the long-run rate (measured -1000ppm under a
 		 * +5000ppm test clock; ungated tracks true rate). */
 		int64_t now_us = rss_timestamp_us();
-		work_start_us = now_us;
 		int64_t read_gap = now_us - last_read_us;
-		bool first_read = last_read_us == 0;
 		last_read_us = now_us;
-		if (!first_read && read_gap > max_read_gap_us)
-			max_read_gap_us = read_gap;
-		if (!first_read && read_gap > max_read_gap_ever_us)
-			max_read_gap_ever_us = read_gap;
 		bool live_paced = read_gap >= 15000 && read_gap <= 150000;
 		int64_t clk_err = now_us - synth_audio_ts;
 		if (clk_err > RAD_SYNTH_RESYNC_BEHIND_US || clk_err < -RAD_SYNTH_RESYNC_AHEAD_US) {
 			if (live_paced) {
-				/* Rate-limited: see RAD_RESYNC_LOG_INTERVAL_US.
-				 * The resync itself is not throttled, only the
-				 * reporting of it. */
-				resync_count++;
-				if (now_us - resync_last_log_us >= RAD_RESYNC_LOG_INTERVAL_US) {
-					RSS_WARN("audio clock resync %+lldms (lost samples or "
-						 "stall; %u resync(s) since the last report, "
-						 "worst read gap this window %lldms)",
-						 (long long)(clk_err / 1000), resync_count,
-						 (long long)(max_read_gap_us / 1000));
-					resync_last_log_us = now_us;
-					resync_count = 0;
-				}
+				RSS_WARN("audio clock resync %+lldms (lost samples or stall)",
+					 (long long)(clk_err / 1000));
 				synth_audio_ts += clk_err;
 			}
 		} else if (clk_err > RAD_SYNTH_NUDGE_BAND_US) {
@@ -1767,17 +1396,9 @@ int main(int argc, char **argv)
 		const int16_t *pcm = frame.data;
 		int out_len = 0;
 
-		if (codec_ops) {
-			int64_t enc_start_us = rss_timestamp_us();
+		if (codec_ops)
 			out_len = codec_ops->encode(&codec_ctx, pcm, samples, encode_buf,
 						    encode_buf_size, ts);
-			/* Covers the ring publish too for codecs that publish
-			 * internally (AAC), which is the point -- this is the
-			 * cost of everything the loop does between two reads. */
-			int64_t enc_us = rss_timestamp_us() - enc_start_us;
-			if (enc_us > encode_max_us)
-				encode_max_us = enc_us;
-		}
 
 		if (out_len > 0 && ring)
 			rss_ring_publish(ring, encode_buf, out_len, ts, ctrl_ctx.codec_id, 0);
@@ -1785,62 +1406,10 @@ int main(int argc, char **argv)
 		RSS_HAL_CALL(ops, audio_release_frame, hal_ctx, ai_dev, 0, &frame);
 
 		frame_count++;
-		window_frames++;
 
 		int64_t now = rss_timestamp_us();
 		if (now - last_stats >= 30000000) {
-			int64_t win_us = now - last_stats;
-			int64_t expected = period_us > 0 ? win_us / period_us : 0;
-			/* Periods the SoC recorded and rad never collected. This
-			 * is the only number here that is unambiguously audio
-			 * loss; the rest explain it. */
-			int64_t missed = expected - (int64_t)window_frames;
-			int64_t work_pct = win_us > 0 ? work_total_us * 100 / win_us : 0;
-			int64_t mi_period_us =
-				mi_ts_count ? mi_ts_total_us / (int64_t)mi_ts_count : 0;
-			char stats[288];
-
-			if (missed < 0)
-				missed = 0;
-			snprintf(stats, sizeof(stats),
-				 "audio frames: %llu (wall-short %lld/%lld, MI seq lost %lld in "
-				 "%u gap(s), %u odd), gap %lldms (peak %lldms), MI period %lldus, "
-				 "encode peak %lldms, work %lld%%, drained %llu",
-				 (unsigned long long)frame_count, (long long)missed,
-				 (long long)expected, (long long)seq_lost, seq_gaps, seq_odd,
-				 (long long)(max_read_gap_us / 1000),
-				 (long long)(max_read_gap_ever_us / 1000), (long long)mi_period_us,
-				 (long long)(encode_max_us / 1000), (long long)work_pct,
-				 (unsigned long long)drained_periods);
-
-			/*
-			 * Warn on sequence loss, not on the wall shortfall. The
-			 * shortfall is only evidence once the sequence numbers
-			 * agree that periods really went missing -- otherwise it
-			 * is an AI sample clock that is not exactly nominal, and
-			 * "MI period" against the expected period says so
-			 * directly. Getting these the wrong way round costs a
-			 * build chasing a loss that never happened.
-			 *
-			 * The routine line is periodic housekeeping and logs at
-			 * trace; only the fault case is worth a run's attention.
-			 */
-			if (seq_lost > expected / RAD_SEQ_LOSS_WARN_RATIO ||
-			    max_read_gap_us >= RAD_READ_GAP_WARN_US)
-				RSS_WARN("%s -- periods lost against the %lldms capture period",
-					 stats, (long long)(period_us / 1000));
-			else
-				RSS_TRACE("%s", stats);
-
-			max_read_gap_us = 0;
-			window_frames = 0;
-			work_total_us = 0;
-			encode_max_us = 0;
-			seq_lost = 0;
-			seq_gaps = 0;
-			seq_odd = 0;
-			mi_ts_total_us = 0;
-			mi_ts_count = 0;
+			RSS_TRACE("audio frames: %llu", (unsigned long long)frame_count);
 			last_stats = now;
 		}
 	}
