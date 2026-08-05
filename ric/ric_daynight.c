@@ -433,7 +433,10 @@ static void ric_poll_photosensor(ric_state_t *st)
 	char why[48];
 
 	snprintf(why, sizeof(why), "gpio %d = %d", st->settings.gpio_photosensor, level);
-	ric_debounce(st, night, !night, why);
+	/* No gain to report: this trigger is one pin and one bit. The gain is
+	 * only read back for the covered-lens checks in the exposure path,
+	 * which this trigger returns before reaching. */
+	ric_debounce(st, night, !night, 0, why);
 }
 
 /*
