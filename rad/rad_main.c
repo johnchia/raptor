@@ -1505,7 +1505,6 @@ int main(int argc, char **argv)
 	int64_t period_us = sample_rate > 0
 				    ? (int64_t)audio_cfg.samples_per_frame * 1000000 / sample_rate
 				    : 0;
-	int64_t encode_total_us = 0;
 	int64_t encode_max_us = 0;
 	uint64_t window_frames = 0;
 	int64_t resync_last_log_us = 0;
@@ -1776,7 +1775,6 @@ int main(int argc, char **argv)
 			 * internally (AAC), which is the point -- this is the
 			 * cost of everything the loop does between two reads. */
 			int64_t enc_us = rss_timestamp_us() - enc_start_us;
-			encode_total_us += enc_us;
 			if (enc_us > encode_max_us)
 				encode_max_us = enc_us;
 		}
@@ -1837,7 +1835,6 @@ int main(int argc, char **argv)
 			max_read_gap_us = 0;
 			window_frames = 0;
 			work_total_us = 0;
-			encode_total_us = 0;
 			encode_max_us = 0;
 			seq_lost = 0;
 			seq_gaps = 0;
