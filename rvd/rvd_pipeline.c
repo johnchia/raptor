@@ -582,8 +582,6 @@ int rvd_pipeline_init(rvd_state_t *st)
 		int ae_comp = rss_config_get_int(cfg, img, "ae_comp", 128);
 		int max_again = rss_config_get_int(cfg, img, "max_again", 160);
 		int max_dgain = rss_config_get_int(cfg, img, "max_dgain", 80);
-		/* 0 leaves the tuning's own shutter ceiling in charge, which is
-		 * what every platform did before this key existed. */
 		int dpc = rss_config_get_int(cfg, img, "dpc_strength", 128);
 		int drc = rss_config_get_int(cfg, img, "drc_strength", 128);
 		int highlight = rss_config_get_int(cfg, img, "highlight_depress", 0);
