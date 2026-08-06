@@ -256,15 +256,6 @@ static void load_sensor_from_section(rss_config_t *cfg, const char *section,
 		vin = 0;
 	sensor->vin_type = (rss_sensor_vin_t)vin;
 
-	/* Optional sensor mode request. Zero means native, and Ingenic backends
-	 * ignore these entirely — the mode there is a property of the loaded
-	 * driver. Backends that enumerate modes at runtime use them to select
-	 * one; see rss_sensor_config_t. No procfs fallback: these express what
-	 * the operator wants, not what the driver reports. */
-	sensor->width = (uint16_t)rss_config_get_int(cfg, section, "width", 0);
-	sensor->height = (uint16_t)rss_config_get_int(cfg, section, "height", 0);
-	sensor->fps = (uint32_t)rss_config_get_int(cfg, section, "fps", 0);
-
 }
 
 /* FS channel base for a given sensor index (hardware mapping) */
