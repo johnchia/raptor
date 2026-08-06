@@ -209,33 +209,6 @@ static void gpio_set(int pin, int value)
 	close(fd);
 }
 
-/*
- * Read one pin. Separate from gpio_set's path because it must not touch
- * the direction: the pin is exported as an input by ric_gpio_init, and
- * flipping an already-configured line to input to sample it would drop
- * whatever it was holding.
- */
-static bool gpio_get(int pin, int *value)
-{
-	if (pin < 0)
-		return false;
-
-	char path[64];
-	snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/value", pin);
-	int fd = open(path, O_RDONLY | O_CLOEXEC);
-	if (fd < 0)
-		return false;
-
-	char buf[4] = {0};
-	ssize_t n = read(fd, buf, sizeof(buf) - 1);
-	close(fd);
-	if (n <= 0)
-		return false;
-
-	*value = (buf[0] == '1') ? 1 : 0;
-	return true;
-}
-
 void ric_gpio_init(ric_state_t *st)
 {
 	gpio_export(st->settings.gpio_ircut, "out");
@@ -245,8 +218,6 @@ void ric_gpio_init(ric_state_t *st)
 		gpio_export(st->settings.gpio_irled, "out");
 	if (st->settings.gpio_irled2 >= 0)
 		gpio_export(st->settings.gpio_irled2, "out");
-	if (st->settings.gpio_photosensor >= 0)
-		gpio_export(st->settings.gpio_photosensor, "in");
 }
 
 /*
@@ -398,48 +369,6 @@ static void ric_debounce(ric_state_t *st, bool want_night, bool want_day, uint32
 }
 
 /*
- * Digital photosensor: one pin, one bit, no thresholds to calibrate.
- * The OpenIPC analogue is divinus's ir_sensor_pin (night.c), which this
- * follows -- including that the pin level meaning "dark" is board
- * wiring, hence photosensor_night_level.
- *
- * Not verified on hardware: the SSC30KQ board this was written on has no
- * photosensor fitted. The GPIO read underneath it is the same call the
- * IR-cut pins use in the other direction, so the untested part is the
- * polarity and the sensor, not the plumbing.
- */
-static void ric_poll_photosensor(ric_state_t *st)
-{
-	int level = 0;
-
-	if (!gpio_get(st->settings.gpio_photosensor, &level)) {
-		if (!st->photosensor_warned) {
-			RSS_WARN("photosensor: gpio %d unreadable (%s) -- holding %s mode",
-				 st->settings.gpio_photosensor, strerror(errno),
-				 st->current_mode == RIC_MODE_NIGHT ? "night" : "day");
-			st->photosensor_warned = true;
-		}
-		return;
-	}
-
-	/* Cooldown after a switch: the IR LEDs coming on can light the
-	 * sensor itself, depending on where it sits. */
-	if (st->cooldown_remaining > 0) {
-		st->cooldown_remaining--;
-		return;
-	}
-
-	bool night = (level == st->settings.photosensor_night_level);
-	char why[48];
-
-	snprintf(why, sizeof(why), "gpio %d = %d", st->settings.gpio_photosensor, level);
-	/* No gain to report: this trigger is one pin and one bit. The gain is
-	 * only read back for the covered-lens checks in the exposure path,
-	 * which this trigger returns before reaching. */
-	ric_debounce(st, night, !night, 0, why);
-}
-
-/*
  * Poll ISP exposure and decide day/night transition.
  * Uses total_gain with hysteresis debounce.
  */
@@ -454,12 +383,6 @@ void ric_poll_exposure(ric_state_t *st)
 {
 	if (st->settings.opmode != RIC_AUTO)
 		return;
-
-	/* The photosensor answers on its own -- no ISP query needed. */
-	if (st->settings.trigger == RIC_TRIGGER_GPIO) {
-		ric_poll_photosensor(st);
-		return;
-	}
 
 	/* Query RVD for ISP exposure data via control socket */
 	char resp[512];
@@ -495,8 +418,7 @@ void ric_poll_exposure(ric_state_t *st)
 	 *
 	 * The ADC trigger reads its own sensor and must not be starved by
 	 * missing exposure data -- it is the very fallback recommended
-	 * below for platforms without a readback. The GPIO photosensor
-	 * needs no exemption here: it answers above and never reaches this.
+	 * below for platforms without a readback.
 	 */
 	bool have_gain = total_gain > 0;
 	bool have_luma = ae_luma > 0;

@@ -30,7 +30,6 @@ typedef enum {
 	RIC_TRIGGER_GAIN = 1,  /* total_gain fixed thresholds (sensor-dependent, legacy) */
 	RIC_TRIGGER_ADC = 2,   /* SU_ADC photoresistor (hardware LDR, most reliable) */
 	RIC_TRIGGER_PHOTO = 3, /* EV + AWB multi-stage with anti-interference */
-	RIC_TRIGGER_GPIO = 4,  /* digital photosensor on a GPIO (one bit: dark or not) */
 } ric_trigger_t;
 
 /* Photo mode detection phases */
@@ -150,10 +149,6 @@ typedef struct {
 	int adc_night;	 /* ADC value below this → night (default 200) */
 	int adc_day;	 /* ADC value above this → day (default 600) */
 
-	/* GPIO photosensor trigger (trigger=gpio only) */
-	int gpio_photosensor;	   /* pin carrying the dark/light bit, -1 = none */
-	int photosensor_night_level; /* pin level that means dark (default 1) */
-
 	/* Photo trigger thresholds */
 	ric_photo_thresholds_t photo;
 
@@ -202,7 +197,6 @@ typedef struct {
 	/* One-shot diagnostics: a missing signal is worth saying once, and
 	 * saying every poll instead is how a log stops being read. */
 	bool no_exposure_warned;
-	bool photosensor_warned;
 
 	/* Control */
 	rss_ctrl_t *ctrl;
