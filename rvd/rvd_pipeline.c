@@ -463,31 +463,21 @@ int rvd_pipeline_init(rvd_state_t *st)
 	st->sensor_count = multi_cfg.sensor_count;
 
 	/*
-	 * Both checks below exist to catch a daemon that cannot reach its
-	 * sensor. Where the SDK binds the sensor as its driver loads and
-	 * addresses it by index, the HAL resolves the sensor's identity itself
-	 * and neither value is reachable configuration -- an address in
-	 * particular is never read -- so requiring them would refuse to start a
-	 * camera that is fully able to.
+	 * Missing sensor identity is reported, not fatal. Whether either value
+	 * is needed is the backend's business: platforms where userspace
+	 * registers the sensor pass both down and fail init without them, and
+	 * platforms whose driver owns the bus never read the address at all --
+	 * on those, refusing to start would reject a camera that works, and
+	 * demanding a value nothing reads would put fiction in every config.
+	 * A backend that needs them fails in init with its own error.
 	 */
-	const rss_hal_caps_t *sensor_caps =
-		st->ops->get_caps ? st->ops->get_caps(st->hal_ctx) : NULL;
-	bool sdk_owns_sensor = sensor_caps && sensor_caps->sdk_owns_sensor;
+	if (!multi_cfg.sensors[0].name[0])
+		RSS_WARN("sensor name not in config and not in "
+			 "/proc/jz/sensor/sensor0/name -- the backend must supply it");
 
-	/* Validate primary sensor */
-	if (!multi_cfg.sensors[0].name[0] && !sdk_owns_sensor) {
-		RSS_FATAL("sensor name not in config and not in /proc/jz/sensor/sensor0/name");
-		rss_hal_destroy(st->hal_ctx);
-		st->hal_ctx = NULL;
-		return RSS_ERR;
-	}
-
-	if (multi_cfg.sensors[0].i2c_addr == 0 && !sdk_owns_sensor) {
-		RSS_FATAL("i2c_addr not in config and not in /proc/jz/sensor/sensor0/i2c_addr");
-		rss_hal_destroy(st->hal_ctx);
-		st->hal_ctx = NULL;
-		return RSS_ERR;
-	}
+	if (multi_cfg.sensors[0].i2c_addr == 0)
+		RSS_WARN("i2c_addr not in config and not in "
+			 "/proc/jz/sensor/sensor0/i2c_addr -- the backend must not need it");
 
 	for (int s = 0; s < multi_cfg.sensor_count; s++) {
 		RSS_DEBUG("sensor%d: %s i2c=0x%02x bus=%d id=%d mclk=%d vin=%d boot=%d", s,
