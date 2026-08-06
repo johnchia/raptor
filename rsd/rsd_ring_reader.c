@@ -284,12 +284,12 @@ static int rsd_sendq_push_audio(rsd_sendq_t *q, uint32_t codec, const uint8_t *d
 	}
 
 	/*
-	 * Do not flush the whole queue on overflow. That is a defensible video
+	 * Overflow used to flush the whole queue. That is a defensible video
 	 * policy -- a decoder that has lost frames wants the next IDR, not the
 	 * frames in between -- and the wrong one for audio, where every chunk
-	 * is independently useful: it would discard up to RSD_SENDQ_SLOTS
-	 * entries, a ~100ms hole in the sound, to make room for 20ms of it, and
-	 * take the queued video with it.
+	 * is independently useful: it discards up to RSD_SENDQ_SLOTS entries,
+	 * a ~100ms hole in the sound, to make room for 20ms of it. Worse, it
+	 * takes the queued video with it.
 	 *
 	 * Drop the oldest audio chunk instead. That bounds the loss at one
 	 * chunk per overflow and never touches video, so a slow client costs
