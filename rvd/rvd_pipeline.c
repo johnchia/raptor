@@ -556,17 +556,28 @@ int rvd_pipeline_init(rvd_state_t *st)
 		if (sensor_fps <= 0)
 			/* families without max_fps report the live default-mode rate */
 			sensor_fps = read_sensor_proc_int(0, "fps", 10, 0);
+		if (sensor_fps <= 0) {
+			/* Ask the backend before guessing. The procfs above is
+			 * Ingenic's; where it is absent the sensor is still
+			 * running at a rate somebody chose, and overwriting that
+			 * with a number from nowhere would drop a 30 fps sensor
+			 * to 25 for no reason a config could explain. */
+			uint32_t num = 0, den = 0;
+			if (RSS_HAL_CALL(st->ops, isp_get_sensor_fps, st->hal_ctx, &num, &den) ==
+				    RSS_OK &&
+			    num && den)
+				sensor_fps = (int)((num + den / 2) / den);
+		}
 		if (sensor_fps <= 0)
 			sensor_fps = 25;
 		/* Sensor 0 FPS via legacy ops */
 		ret = RSS_HAL_CALL(st->ops, isp_set_sensor_fps, st->hal_ctx, sensor_fps, 1);
 		if (ret == RSS_ERR_NOTSUP)
-			/* Not a fault, so not a warning. The ISP tuning ops are
+			/* Not a fault, so not a warning: the ISP tuning ops are
 			 * documented as optional ("return -ENOTSUP if unavailable",
-			 * raptor_hal.h), and on some SoCs the sensor rate is fixed when
-			 * the mode is selected during bring-up and cannot be changed
-			 * afterwards -- SigmaStar MI is one, where the encoder framerate
-			 * is what actually varies. */
+			 * raptor_hal.h). A backend that cannot set the sensor rate
+			 * leaves the encoder framerate as the only one that varies,
+			 * which is a working pipeline, just not the requested one. */
 			RSS_INFO("sensor0 fps: setting sensor fps is unsupported on this "
 				 "platform, %d ignored",
 				 sensor_fps);
