@@ -994,7 +994,6 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 	ISP_SET_N("set-ae-comp", isp_set_ae_comp)
 	/* Not ISP_SET_N: no per-sensor variant, and the knob is the AE's
 	 * target luma rather than a per-sensor image adjustment. */
-	ISP_SET("set-ae-target", isp_set_ae_target)
 	ISP_SET_N("set-max-again", isp_set_max_again)
 	ISP_SET_N("set-max-dgain", isp_set_max_dgain)
 	ISP_SET_N("set-hflip", isp_set_hflip)
@@ -1041,7 +1040,7 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 	if (strcmp(cmd, "get-isp") == 0) {
 		uint8_t bri = 0, con = 0, sat = 0, shp = 0, hue = 0, sin = 0, tem = 0;
 		uint8_t dpc = 0, drc = 0, hld = 0, blc = 0, dfg = 0;
-		int hf = 0, vf = 0, ae = 0, aet = 0;
+		int hf = 0, vf = 0, ae = 0;
 		uint32_t again = 0, dgain = 0;
 		RSS_HAL_CALL(st->ops, isp_get_brightness, st->hal_ctx, &bri);
 		RSS_HAL_CALL(st->ops, isp_get_contrast, st->hal_ctx, &con);
@@ -1052,7 +1051,6 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 		RSS_HAL_CALL(st->ops, isp_get_temper_strength, st->hal_ctx, &tem);
 		RSS_HAL_CALL(st->ops, isp_get_hvflip, st->hal_ctx, &hf, &vf);
 		RSS_HAL_CALL(st->ops, isp_get_ae_comp, st->hal_ctx, &ae);
-		RSS_HAL_CALL(st->ops, isp_get_ae_target, st->hal_ctx, &aet);
 		RSS_HAL_CALL(st->ops, isp_get_max_again, st->hal_ctx, &again);
 		RSS_HAL_CALL(st->ops, isp_get_max_dgain, st->hal_ctx, &dgain);
 		RSS_HAL_CALL(st->ops, isp_get_dpc_strength, st->hal_ctx, &dpc);
@@ -1074,7 +1072,6 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 		cJSON_AddNumberToObject(r, "hflip", (double)hf);
 		cJSON_AddNumberToObject(r, "vflip", (double)vf);
 		cJSON_AddNumberToObject(r, "ae_comp", (double)ae);
-		cJSON_AddNumberToObject(r, "ae_target", (double)aet);
 		cJSON_AddNumberToObject(r, "max_again", (double)again);
 		cJSON_AddNumberToObject(r, "max_dgain", (double)dgain);
 		cJSON_AddNumberToObject(r, "dpc_strength", (double)dpc);
