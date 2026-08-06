@@ -163,7 +163,7 @@ void ric_adc_cleanup(ric_state_t *st)
 	st->adc_initialized = false;
 }
 
-static void gpio_export(int pin, const char *direction)
+static void gpio_export(int pin)
 {
 	if (pin < 0)
 		return;
@@ -185,8 +185,8 @@ static void gpio_export(int pin, const char *direction)
 
 	int fd = open(path, O_WRONLY);
 	if (fd >= 0) {
-		if (write(fd, direction, strlen(direction)) < 0)
-			RSS_WARN("gpio %d direction %s: %s", pin, direction, strerror(errno));
+		if (write(fd, "out", 3) < 0)
+			RSS_WARN("gpio %d direction: %s", pin, strerror(errno));
 		close(fd);
 	}
 }
@@ -211,13 +211,13 @@ static void gpio_set(int pin, int value)
 
 void ric_gpio_init(ric_state_t *st)
 {
-	gpio_export(st->settings.gpio_ircut, "out");
+	gpio_export(st->settings.gpio_ircut);
 	if (st->settings.gpio_ircut2 >= 0)
-		gpio_export(st->settings.gpio_ircut2, "out");
+		gpio_export(st->settings.gpio_ircut2);
 	if (st->settings.gpio_irled >= 0)
-		gpio_export(st->settings.gpio_irled, "out");
+		gpio_export(st->settings.gpio_irled);
 	if (st->settings.gpio_irled2 >= 0)
-		gpio_export(st->settings.gpio_irled2, "out");
+		gpio_export(st->settings.gpio_irled2);
 }
 
 /*
@@ -429,7 +429,7 @@ void ric_poll_exposure(ric_state_t *st)
 			RSS_WARN("no exposure data from rvd (gain, luma and ev all zero) -- "
 				 "holding %s mode. This platform's HAL has no exposure "
 				 "readback; use `raptorctl ric mode day|night`, or "
-				 "trigger=gpio/adc if the board has a light sensor",
+				 "trigger=adc if the board has a photoresistor",
 				 st->current_mode == RIC_MODE_NIGHT ? "night" : "day");
 			st->no_exposure_warned = true;
 		}
@@ -565,8 +565,6 @@ void ric_poll_exposure(ric_state_t *st)
 			want_day = false;
 		}
 
-		/* One line covering both directions: which way the decision
-		 * went is already in the caller's message. */
 		snprintf(why, sizeof(why), "luma=%u/%d gain=%u/%d night baseline=%u x %d%%",
 			 ae_luma, st->settings.night_luma, total_gain, st->settings.night_gain,
 			 st->night_gain_baseline, st->settings.day_gain_pct);

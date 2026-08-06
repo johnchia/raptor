@@ -992,8 +992,6 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 	ISP_SET("set-backlight-comp", isp_set_backlight_comp)
 	ISP_SET("set-defog-strength", isp_set_defog_strength)
 	ISP_SET_N("set-ae-comp", isp_set_ae_comp)
-	/* Not ISP_SET_N: no per-sensor variant, and the knob is the AE's
-	 * target luma rather than a per-sensor image adjustment. */
 	ISP_SET_N("set-max-again", isp_set_max_again)
 	ISP_SET_N("set-max-dgain", isp_set_max_dgain)
 	ISP_SET_N("set-hflip", isp_set_hflip)
