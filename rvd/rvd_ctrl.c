@@ -997,23 +997,6 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 	ISP_SET("set-ae-target", isp_set_ae_target)
 	ISP_SET_N("set-max-again", isp_set_max_again)
 	ISP_SET_N("set-max-dgain", isp_set_max_dgain)
-	/*
-	 * Not ISP_SET_N: there is no per-sensor variant and the op takes a
-	 * uint32_t. Worth having as a live command rather than config-only,
-	 * because the value it sets is one that has to be found by watching
-	 * the picture, and the alternative is a reflash per guess.
-	 */
-	if (strcmp(cmd, "set-max-exposure") == 0) {
-		if (rss_json_get_int(cmd_json, "value", &val) == 0) {
-			if (val < 0)
-				return rss_ctrl_resp_error(resp, resp_size,
-							   "need a non-negative value");
-			return fmt_hal_result(resp, resp_size,
-					      RSS_HAL_CALL(st->ops, isp_set_ae_it_max,
-							   st->hal_ctx, (uint32_t)val));
-		}
-		return rss_ctrl_resp_error(resp, resp_size, "need value");
-	}
 	ISP_SET_N("set-hflip", isp_set_hflip)
 	ISP_SET_N("set-vflip", isp_set_vflip)
 	ISP_SET("set-defog", isp_set_defog)

@@ -585,7 +585,6 @@ int rvd_pipeline_init(rvd_state_t *st)
 		int max_dgain = rss_config_get_int(cfg, img, "max_dgain", 80);
 		/* 0 leaves the tuning's own shutter ceiling in charge, which is
 		 * what every platform did before this key existed. */
-		int max_exposure_us = rss_config_get_int(cfg, img, "max_exposure_us", 0);
 		int dpc = rss_config_get_int(cfg, img, "dpc_strength", 128);
 		int drc = rss_config_get_int(cfg, img, "drc_strength", 128);
 		int highlight = rss_config_get_int(cfg, img, "highlight_depress", 0);
@@ -607,9 +606,6 @@ int rvd_pipeline_init(rvd_state_t *st)
 		RSS_HAL_CALL(st->ops, isp_set_ae_target, st->hal_ctx, ae_target);
 		RSS_HAL_CALL(st->ops, isp_set_max_again, st->hal_ctx, max_again);
 		RSS_HAL_CALL(st->ops, isp_set_max_dgain, st->hal_ctx, max_dgain);
-		if (max_exposure_us > 0)
-			RSS_HAL_CALL(st->ops, isp_set_ae_it_max, st->hal_ctx,
-				     (uint32_t)max_exposure_us);
 		RSS_HAL_CALL(st->ops, isp_set_dpc_strength, st->hal_ctx, dpc);
 		RSS_HAL_CALL(st->ops, isp_set_drc_strength, st->hal_ctx, drc);
 		RSS_HAL_CALL(st->ops, isp_set_highlight_depress, st->hal_ctx, highlight);
@@ -626,8 +622,8 @@ int rvd_pipeline_init(rvd_state_t *st)
 			  brightness, contrast, saturation, sharpness);
 		RSS_DEBUG("  sinter=%d temper=%d hue=%d ae_comp=%d ae_target=%d", sinter, temper,
 			  hue, ae_comp, ae_target);
-		RSS_DEBUG("  max_again=%d max_dgain=%d max_exposure_us=%d dpc=%d drc=%d", max_again,
-			  max_dgain, max_exposure_us, dpc, drc);
+		RSS_DEBUG("  max_again=%d max_dgain=%d dpc=%d drc=%d", max_again, max_dgain, dpc,
+			  drc);
 		RSS_DEBUG("  highlight=%d backlight=%d defog=%d", highlight, backlight, defog);
 		RSS_DEBUG("  hflip=%d vflip=%d antiflicker=%d bypass=%d", hflip, vflip, antiflicker,
 			  ret == RSS_OK);
