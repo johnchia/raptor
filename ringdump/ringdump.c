@@ -296,9 +296,21 @@ int main(int argc, char **argv)
 				lat_max = lat;
 			lat_sum += lat;
 			lat_count++;
+			/*
+			 * raw is the uncalibrated clock_now - meta.timestamp.
+			 * It is only a latency where the backend stamps frames
+			 * on CLOCK_MONOTONIC; where it stamps them on its own
+			 * epoch (IMP, MI) the constant offset swamps it, which
+			 * is what lat exists to remove. Printed anyway because
+			 * comparing raw across two rings of one process cancels
+			 * that offset and leaves the difference in pipeline
+			 * latency.
+			 */
 			fprintf(stderr,
-				"#%-6" PRIu64 " lat=%+" PRId64 "us (%+.1fms) len=%-8u key=%u\n",
-				frame_count, lat, (double)lat / 1000.0, length, meta.is_key);
+				"#%-6" PRIu64 " lat=%+" PRId64 "us (%+.1fms) raw=%+" PRId64
+				"us len=%-8u key=%u\n",
+				frame_count, lat, (double)lat / 1000.0, raw_delta, length,
+				meta.is_key);
 		} else if (dump_raw) {
 			/* JPEG rings: drop torn frames instead of emitting them.
 			 * The data region recycles ahead of the slot ring when
