@@ -144,6 +144,7 @@ sample_rate = 16000
 codec = l16
 
 [rtsp]
+backchannel = true
 port = 15554
 
 [http]
@@ -155,6 +156,11 @@ password =
 port = 18443
 username =
 password =
+
+[srt]
+enabled = true
+port = 19000
+audio = false
 
 [osd]
 enabled = false
@@ -238,6 +244,7 @@ start_daemon() {
 start_daemon rvd "$OUT/rvd" -c "$CONFIG" -f -d
 start_daemon rhd "$OUT/rhd" -c "$CONFIG" -f -d
 start_daemon rsd "$OUT/rsd" -c "$CONFIG" -f -d
+start_daemon rsr "$OUT/rsr" -c "$CONFIG" -f -d
 
 # Optional daemons (may exit immediately if disabled in config — that's OK)
 start_daemon rod "$OUT/rod" -c "$CONFIG" -f -d
@@ -620,6 +627,104 @@ echo "=== Config round-trip ==="
 
 check_contains "config save" "ok" "$OUT/raptorctl" config save
 
+# ── Truthful config-save logging ──
+# A daemon that wrote its runtime changes logs "running config saved";
+# one with nothing dirty must say so and leave the file alone. The
+# save above cleared rvd's dirty state, so the next save is a no-op.
+CFG_MARK=$(wc -l < "$LOG_DIR/rvd.log" 2>/dev/null || echo 0)
+cfg_log_since() { tail -n "+$((CFG_MARK + 1))" "$LOG_DIR/rvd.log" 2>/dev/null || true; }
+
+"$OUT/raptorctl" config save > /dev/null 2>&1
+sleep 1
+if cfg_log_since | grep -q "no config changes to save"; then
+    pass "no-op config save logs untouched"
+else
+    fail "no-op config save logs untouched" \
+        "expected 'no config changes to save' in rvd log"
+fi
+if cfg_log_since | grep -q "running config saved"; then
+    fail "no-op config save does not claim a write" \
+        "'running config saved' logged with nothing dirty"
+else
+    pass "no-op config save does not claim a write"
+fi
+
+# Dirty rvd's config without changing effective state: re-set the gop
+# to the value it already has (set marks it dirty regardless)
+GOP_NOW=$("$OUT/raptorctl" rvd enc-get 0 gop 2>/dev/null | grep -o '[0-9][0-9]*' | tail -1)
+[ -n "$GOP_NOW" ] || GOP_NOW=50
+"$OUT/raptorctl" rvd set-gop 0 "$GOP_NOW" > /dev/null 2>&1
+CFG_MARK=$(wc -l < "$LOG_DIR/rvd.log" 2>/dev/null || echo 0)
+"$OUT/raptorctl" config save > /dev/null 2>&1
+sleep 1
+if cfg_log_since | grep -q "running config saved"; then
+    pass "dirty config save logs the write"
+else
+    fail "dirty config save logs the write" \
+        "expected 'running config saved' in rvd log"
+fi
+
+echo ""
+echo "=== SRT PSI cadence ==="
+
+# PAT/PMT repetition measured in PCR time from a RAW capture
+# (srt-live-transmit; ffmpeg would remux and regenerate PSI at its own
+# cadence). PSI can only ride a frame, so a fixed emission threshold
+# quantizes to threshold plus one frame period: at this config's 25fps
+# the old fixed 450ms threshold produced 12-frame (480ms) intervals on
+# the wire, grazing the 500ms DVB bound under device load. The
+# predictive budget emits a frame early (11 frames = 440ms), holding
+# the bound with margin at any frame rate. 460ms splits the two.
+if command -v srt-live-transmit > /dev/null 2>&1; then
+    timeout -k 3 25 srt-live-transmit "srt://127.0.0.1:19000" file://con \
+        > "$LOG_DIR/psi_capture.ts" 2>/dev/null || true
+    PSI_RC=0
+    PSI_RES=$(python3 - "$LOG_DIR/psi_capture.ts" <<'PSI_EOF'
+import bisect, sys
+data = open(sys.argv[1], 'rb').read()
+pcrs = []  # (byte offset, PCR seconds)
+pats = []  # byte offsets of PAT section starts
+for off in range(0, len(data) - 187, 188):
+    p = data[off:off + 188]
+    if p[0] != 0x47:
+        continue
+    pid = ((p[1] & 0x1f) << 8) | p[2]
+    afc = (p[3] >> 4) & 0x3
+    if afc in (2, 3) and p[4] >= 7 and (p[5] & 0x10):
+        base = (p[6] << 25) | (p[7] << 17) | (p[8] << 9) | (p[9] << 1) | (p[10] >> 7)
+        ext = ((p[10] & 1) << 8) | p[11]
+        pcrs.append((off, (base * 300 + ext) / 27e6))
+    if pid == 0 and (p[1] & 0x40):
+        pats.append(off)
+if len(pcrs) < 2 or len(pats) < 10:
+    print(f"FAIL insufficient data: {len(pcrs)} PCRs, {len(pats)} PATs")
+    sys.exit(1)
+offs = [o for o, _ in pcrs]
+def at(off):
+    i = bisect.bisect_left(offs, off)
+    if i == 0:
+        return pcrs[0][1]
+    if i >= len(pcrs):
+        return pcrs[-1][1]
+    (o1, t1), (o2, t2) = pcrs[i - 1], pcrs[i]
+    return t1 + (t2 - t1) * (off - o1) / (o2 - o1) if o2 > o1 else t1
+times = [at(o) for o in pats]
+gaps = [(b - a) * 1000 for a, b in zip(times, times[1:])]
+mx = max(gaps)
+tag = "PASS" if mx <= 460 else "FAIL"
+print(f"{tag} {len(pats)} PATs over {times[-1] - times[0]:.1f}s, max interval {mx:.1f}ms")
+sys.exit(0 if mx <= 460 else 1)
+PSI_EOF
+    ) || PSI_RC=$?
+    if [ "$PSI_RC" -eq 0 ]; then
+        pass "SRT PSI cadence with margin (${PSI_RES#PASS })"
+    else
+        fail "SRT PSI cadence with margin" "${PSI_RES#FAIL }"
+    fi
+else
+    skip "SRT PSI cadence" "srt-live-transmit not installed"
+fi
+
 echo ""
 echo "=== SEI timecode + signed recording ==="
 
@@ -676,7 +781,7 @@ fi
 # Cleanly close the current segment, then verify its chain
 "$OUT/raptorctl" rmr disable > /dev/null 2>&1
 sleep 1
-REC_FILE=$(find "$LOG_DIR/rec" -name '*.mp4' | head -1)
+REC_FILE=$(find "$LOG_DIR/rec" -name '*.mp4' -not -path '*/timelapse/*' | head -1)
 if [ -n "$REC_FILE" ] && [ -x "$OUT/rverify" ]; then
     if "$OUT/rverify" -k "$LOG_DIR/sign.key.pub" "$REC_FILE" \
         > "$LOG_DIR/rverify.log" 2>&1; then
@@ -700,6 +805,204 @@ else
     skip "signed recording verification" "no recording or rverify missing"
 fi
 "$OUT/raptorctl" rmr enable > /dev/null 2>&1
+
+echo ""
+echo "=== Timelapse ==="
+
+# Runtime-enabled via ctrl (the test config ships it off), sampled
+# deterministically with timelapse-snap. The file must be all-keyframe
+# with playback-spaced timestamps -- a real-time-spaced file would mean
+# the synthetic DTS path broke -- and carries the same SEI timecodes
+# and signature chain as every other recording.
+check_contains "timelapse initially off" '"enabled":[[:space:]]*false' \
+    "$OUT/raptorctl" rmr timelapse-status
+check_contains "timelapse-enable" "ok" "$OUT/raptorctl" rmr timelapse-enable
+check_contains "timelapse-set interval" "ok" "$OUT/raptorctl" rmr timelapse-set interval 1
+sleep 1
+for i in 1 2 3 4; do
+    "$OUT/raptorctl" rmr timelapse-snap > /dev/null 2>&1
+    sleep 0.6
+done
+TL_STATUS=$("$OUT/raptorctl" rmr timelapse-status 2>/dev/null)
+echo "$TL_STATUS" | grep -q '"interval":[[:space:]]*2' &&
+    pass "interval clamped to minimum" ||
+    fail "interval clamped to minimum" "$TL_STATUS"
+
+check_contains "timelapse-disable" "ok" "$OUT/raptorctl" rmr timelapse-disable
+sleep 1
+TL_FILE=$(find "$LOG_DIR/rec/timelapse" -name '*.mp4' 2>/dev/null | head -1)
+if [ -z "$TL_FILE" ]; then
+    fail "timelapse file created" "no mp4 under rec/timelapse"
+elif command -v ffprobe > /dev/null 2>&1; then
+    pass "timelapse file created"
+    TL_RC=0
+    TL_RES=$(ffprobe -v error -select_streams v -show_entries packet=pts_time,flags \
+        -of csv=p=0 "$TL_FILE" 2>/dev/null | python3 -c '
+import sys
+rows = [l.strip().split(",") for l in sys.stdin if l.strip()]
+n = len(rows)
+nonkey = sum(1 for r in rows if "K" not in r[1])
+pts = [float(r[0]) for r in rows]
+gaps = [b - a for a, b in zip(pts, pts[1:])]
+bad = sum(1 for g in gaps if abs(g - 1.0 / 30.0) > 0.001)
+print(f"{n} samples, {nonkey} non-key, {bad} bad gaps")
+sys.exit(0 if n >= 4 and nonkey == 0 and bad == 0 else 1)
+') || TL_RC=$?
+    if [ "$TL_RC" -eq 0 ]; then
+        pass "timelapse all-keyframe at playback spacing ($TL_RES)"
+    else
+        fail "timelapse all-keyframe at playback spacing" "$TL_RES"
+    fi
+    grep -c 'MISPmicrosectime' "$TL_FILE" > /dev/null 2>&1 &&
+        pass "timelapse carries ST 0604 SEI" ||
+        fail "timelapse carries ST 0604 SEI" "none found"
+    if [ -x "$OUT/rverify" ]; then
+        if "$OUT/rverify" -k "$LOG_DIR/sign.key.pub" "$TL_FILE" \
+            > "$LOG_DIR/rverify-tl.log" 2>&1; then
+            pass "timelapse signature chain verifies"
+        else
+            fail "timelapse signature chain verifies" "see rverify-tl.log"
+        fi
+    fi
+    # Disable closed the file; a fresh enable+snap must open a second
+    # one -- the same close/reopen path a ring reconnect exercises.
+    "$OUT/raptorctl" rmr timelapse-enable > /dev/null 2>&1
+    "$OUT/raptorctl" rmr timelapse-snap > /dev/null 2>&1
+    sleep 1
+    "$OUT/raptorctl" rmr timelapse-disable > /dev/null 2>&1
+    TL_COUNT=$(find "$LOG_DIR/rec/timelapse" -name '*.mp4' 2>/dev/null | wc -l)
+    if [ "$TL_COUNT" -ge 2 ]; then
+        pass "timelapse reopens a fresh file ($TL_COUNT files)"
+    else
+        fail "timelapse reopens a fresh file" "only $TL_COUNT file(s)"
+    fi
+else
+    pass "timelapse file created"
+    skip "timelapse packet checks" "ffprobe not installed"
+fi
+
+# ── ONVIF backchannel: client audio reaches the speaker ring ──
+# rsd's receive path (sendonly SETUP, RTP over an interleaved channel,
+# PCMU decode, publish) had no x86 coverage at all -- it was exercised
+# only by the hardware battery, and only ever asserted that the ring
+# existed. Here the frames are read back out, which is what catches
+# rsd publishing into a handle that cannot publish.
+# Do NOT clear the speaker ring first: create_rings already owns one
+# here, which is the realistic state (rac playing, rad up) and the
+# case rsd got wrong -- it opened the existing ring, got a consumer
+# handle, and every publish failed -EINVAL in silence. Removing the
+# ring would push rsd down the create path and hide exactly that.
+python3 - > "$LOG_DIR/backchannel.out" 2>&1 <<'BC_EOF' &
+import socket, struct, sys, time
+
+def rsp(sock, buf):
+    while b"\r\n\r\n" not in buf[0]:
+        d = sock.recv(4096)
+        if not d:
+            return "", buf
+        buf[0] += d
+    head, _, rest = buf[0].partition(b"\r\n\r\n")
+    txt = head.decode(errors="replace")
+    clen = 0
+    for line in txt.split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            clen = int(line.split(":", 1)[1])
+    while len(rest) < clen:
+        rest += sock.recv(4096)
+    body, buf[0] = rest[:clen], rest[clen:]
+    return txt + "\r\n\r\n" + body.decode(errors="replace"), buf
+
+REQ = "Require: www.onvif.org/ver20/backchannel\r\n"
+s = socket.create_connection(("127.0.0.1", 15554), timeout=10)
+buf = [b""]
+base = "rtsp://127.0.0.1:15554/stream0"
+s.sendall(f"DESCRIBE {base} RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n{REQ}\r\n".encode())
+desc, buf = rsp(s, buf)
+if " 200 " not in desc.split("\r\n")[0]:
+    print("DESCRIBE_FAILED"); sys.exit(0)
+if "a=sendonly" not in desc:
+    print("NO_SENDONLY"); sys.exit(0)
+print("SENDONLY_OK")
+
+ctl = None
+for sec in desc.split("m=")[1:]:
+    if "a=sendonly" in sec:
+        for line in sec.split("\n"):
+            if line.strip().startswith("a=control:"):
+                ctl = line.strip().split(":", 1)[1]
+if not ctl:
+    print("NO_CONTROL"); sys.exit(0)
+
+# A backchannel-only session has nothing to play: set up the video
+# track first, exactly as a real ONVIF client does, then the
+# sendonly track beside it.
+s.sendall(f"SETUP {base}/video RTSP/1.0\r\nCSeq: 2\r\n"
+          f"Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n".encode())
+vsetup, buf = rsp(s, buf)
+sid = ""
+for line in vsetup.split("\r\n"):
+    if line.lower().startswith("session:"):
+        sid = line.split(":", 1)[1].split(";")[0].strip()
+if " 200 " not in vsetup.split("\r\n")[0]:
+    print("VIDEO_SETUP_FAILED"); sys.exit(0)
+
+url = ctl if ctl.startswith("rtsp") else base + "/" + ctl
+s.sendall(f"SETUP {url} RTSP/1.0\r\nCSeq: 3\r\nSession: {sid}\r\n"
+          f"Transport: RTP/AVP/TCP;unicast;interleaved=4-5\r\n{REQ}\r\n".encode())
+setup, buf = rsp(s, buf)
+if " 200 " not in setup.split("\r\n")[0]:
+    print("SETUP_FAILED"); sys.exit(0)
+
+s.sendall(f"PLAY {base} RTSP/1.0\r\nCSeq: 4\r\nSession: {sid}\r\nRange: npt=0.000-\r\n\r\n".encode())
+play, buf = rsp(s, buf)
+if " 200 " not in play.split("\r\n")[0]:
+    print("PLAY_FAILED"); sys.exit(0)
+
+seq = ts = sent = 0
+for _ in range(50):
+    rtp = struct.pack("!BBHII", 0x80, 0, seq & 0xFFFF, ts, 0x1234ABCD) + b"\xff" * 160
+    s.sendall(b"\x24" + struct.pack("!BH", 4, len(rtp)) + rtp)
+    seq += 1; ts += 160; sent += 1
+    time.sleep(0.005)
+print(f"SENT={sent}", flush=True)
+# rsd destroys the speaker ring when the client goes away, so hold the
+# session while the caller inspects it -- the same reason the hardware
+# battery's probe holds.
+time.sleep(6.0)
+s.close()
+BC_EOF
+BC_PID=$!
+# Poll for the ring while the probe holds its session, then read the
+# header: write_seq counts what rsd actually published. This is the
+# assertion the hardware battery cannot make -- it can only see that
+# the ring exists.
+BC_SEQ=0
+for _ in $(seq 1 40); do
+    if [ -e /dev/shm/rss_ring_speaker ]; then
+        BC_SEQ=$(timeout 5 "$OUT/ringdump" speaker 2>&1 |
+                 sed -n 's/.*Write seq: *\([0-9]*\).*/\1/p' | head -1)
+        [ "${BC_SEQ:-0}" -gt 0 ] 2>/dev/null && break
+    fi
+    sleep 0.25
+done
+wait $BC_PID 2>/dev/null
+BC_OUT=$(cat "$LOG_DIR/backchannel.out" 2>/dev/null)
+
+echo "$BC_OUT" | grep -q "SENDONLY_OK" \
+    && pass "backchannel advertises a sendonly track" \
+    || fail "backchannel sendonly track" "$(echo "$BC_OUT" | head -1)"
+
+if echo "$BC_OUT" | grep -q "SENT=50"; then
+    pass "backchannel accepts 50 RTP frames"
+else
+    fail "backchannel send" "$(echo "$BC_OUT" | tail -1)"
+fi
+
+if [ "${BC_SEQ:-0}" -gt 0 ] 2>/dev/null; then
+    pass "backchannel audio reaches the speaker ring ($BC_SEQ frames published)"
+else
+    fail "backchannel speaker ring" "rsd published nothing (write_seq=${BC_SEQ:-none})"
+fi
 
 # ── Producer restart under a lingering client ──
 # A playing client whose media goes unread (stalled player, dead NVR
