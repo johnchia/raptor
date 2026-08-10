@@ -72,21 +72,28 @@ case "$PLATFORM" in
         CROSS_GLOB="arm"
         ;;
     INFINITY6C)
-        # uClibc, and as with Infinity6B0 the C library is not a preference.
-        # This family's vendor blobs declare a libc outright -- the drop ships
-        # the whole MI set twice, one build needing libc.so.0 and one needing
-        # libc.so.6 -- so the toolchain has to match whichever set the image
-        # carries rather than whichever the chip suggests. thingino ships the
-        # uClibc set, and mismatching it is not a link error: the loader simply
-        # never finds a libc the libraries can use.
+        # Either uClibc or glibc, and unlike the other two families that is not
+        # a contradiction. This family's vendor blobs declare a libc outright,
+        # and the drop ships the whole MI set twice -- one build needing
+        # libc.so.0 and one needing libc.so.6 -- so the C library is a property
+        # of the image rather than of the chip. Both tuples are searched because
+        # either can be the right answer; what matters is that the toolchain
+        # matches the MI set the image carries, and mismatching it is not a link
+        # error but a loader that never finds a libc the libraries can use.
         #
         # Where Infinity6E is forced to glibc by its 4.9 kernel, this family
         # runs 5.10 and a uClibc toolchain is buildable against it, which is
         # what makes the smaller set an option at all.
+        #
+        # Only one of these exists in any given Buildroot output, so the search
+        # order decides nothing.
         SYSROOT_TUPLES="arm-thingino-linux-uclibcgnueabihf arm-buildroot-linux-uclibcgnueabihf \
-                        arm-openipc-linux-uclibcgnueabihf"
+                        arm-openipc-linux-uclibcgnueabihf arm-thingino-linux-gnueabihf \
+                        arm-buildroot-linux-gnueabihf arm-openipc-linux-gnueabihf"
         CROSS_CANDIDATES="arm-thingino-linux-uclibcgnueabihf- \
-                          arm-buildroot-linux-uclibcgnueabihf- arm-linux-uclibcgnueabihf-"
+                          arm-buildroot-linux-uclibcgnueabihf- arm-linux-uclibcgnueabihf- \
+                          arm-thingino-linux-gnueabihf- arm-buildroot-linux-gnueabihf- \
+                          arm-linux-gnueabihf-"
         CROSS_GLOB="arm"
         ;;
     *)
