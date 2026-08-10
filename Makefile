@@ -8,7 +8,7 @@
 # Required:
 #   PLATFORM       - Target SoC:
 #                      Ingenic   - T10, T20, T21, T23, T30, T31, T32, T33, T40, T41, A1
-#                      SigmaStar - INFINITY6E, INFINITY6B0
+#                      SigmaStar - INFINITY6E, INFINITY6B0, INFINITY6C
 #   CROSS_COMPILE  - Cross-compiler prefix
 #
 ifeq ($(filter clean distclean build,$(MAKECMDGOALS)),)
@@ -26,7 +26,7 @@ COMPY_DIR  := ../compy
 # Vendor selection — must match raptor-hal's Makefile. Ingenic parts link the
 # single IMP library; SigmaStar parts link no vendor library at all, reaching
 # MI through dlopen (see raptor-hal/src/star/i6_common.h).
-SIGMASTAR_PLATFORMS := INFINITY6E INFINITY6B0
+SIGMASTAR_PLATFORMS := INFINITY6E INFINITY6B0 INFINITY6C
 ifneq ($(filter $(PLATFORM),$(SIGMASTAR_PLATFORMS)),)
 VENDOR := sigmastar
 else

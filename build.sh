@@ -29,9 +29,11 @@ case "$platform" in
     a1|A1)   PLATFORM=A1 ;;
     infinity6e|INFINITY6E|ssc30kq|SSC30KQ) PLATFORM=INFINITY6E ;;
     infinity6b0|INFINITY6B0|ssc333|SSC333|ssc335|SSC335|ssc337|SSC337) PLATFORM=INFINITY6B0 ;;
+    infinity6c|INFINITY6C|ssc377|SSC377|ssc377de|SSC377DE|ssc378|SSC378|ssc379|SSC379)
+        PLATFORM=INFINITY6C ;;
     *)
         echo "Usage: $0 <platform> <br_output> [target...]"
-        echo "Platforms: t10 t20 t21 t23 t30 t31 t32 t33 t40 t41 a1 infinity6e infinity6b0"
+        echo "Platforms: t10 t20 t21 t23 t30 t31 t32 t33 t40 t41 a1 infinity6e infinity6b0 infinity6c"
         echo ""
         echo "  <br_output> is the buildroot output directory containing"
         echo "  host/ with the cross-compiler and sysroot."
@@ -67,6 +69,24 @@ case "$PLATFORM" in
                         arm-thingino-linux-musleabihf"
         CROSS_CANDIDATES="arm-openipc-linux-musleabihf- arm-buildroot-linux-musleabihf- \
                           arm-linux-musleabihf-"
+        CROSS_GLOB="arm"
+        ;;
+    INFINITY6C)
+        # uClibc, and as with Infinity6B0 the C library is not a preference.
+        # This family's vendor blobs declare a libc outright -- the drop ships
+        # the whole MI set twice, one build needing libc.so.0 and one needing
+        # libc.so.6 -- so the toolchain has to match whichever set the image
+        # carries rather than whichever the chip suggests. thingino ships the
+        # uClibc set, and mismatching it is not a link error: the loader simply
+        # never finds a libc the libraries can use.
+        #
+        # Where Infinity6E is forced to glibc by its 4.9 kernel, this family
+        # runs 5.10 and a uClibc toolchain is buildable against it, which is
+        # what makes the smaller set an option at all.
+        SYSROOT_TUPLES="arm-thingino-linux-uclibcgnueabihf arm-buildroot-linux-uclibcgnueabihf \
+                        arm-openipc-linux-uclibcgnueabihf"
+        CROSS_CANDIDATES="arm-thingino-linux-uclibcgnueabihf- \
+                          arm-buildroot-linux-uclibcgnueabihf- arm-linux-uclibcgnueabihf-"
         CROSS_GLOB="arm"
         ;;
     *)
