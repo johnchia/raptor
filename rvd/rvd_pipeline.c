@@ -165,6 +165,27 @@ static const char *rc_mode_str(rss_rc_mode_t m)
 	}
 }
 
+/* Read an int without rss_config_get_int's populate-on-miss side effect.
+ *
+ * rss_config_get_int stores the default back into the section when the key is
+ * absent, so a later read of the same key with a different default sees this
+ * first one instead of its own. That is wrong for a placeholder read taken
+ * before the real value is known: the OSD pool estimate below reads the stream
+ * dimensions with stand-in defaults (the sensor resolution is not queried until
+ * after HAL init), and load_stream_config reads them again with the
+ * sensor-derived default. A populating read here would pin every stream to the
+ * stand-in and quietly downscale a full-resolution sensor to it. */
+static int cfg_peek_int(rss_config_t *cfg, const char *section, const char *key, int def)
+{
+	const char *val = rss_config_get_str(cfg, section, key, NULL);
+	if (!val)
+		return def;
+
+	char *end;
+	long v = strtol(val, &end, 0);
+	return end == val ? def : (int)v;
+}
+
 /* Load one stream's config from INI section */
 static void load_stream_config(rss_config_t *cfg, const char *section, rvd_stream_t *s,
 			       int default_w, int default_h, int default_fps, int default_br)
@@ -504,10 +525,15 @@ int rvd_pipeline_init(rvd_state_t *st)
 		int font_size = rss_config_get_int(cfg, "osd", "font_size", 24);
 		if (font_size < 10)
 			font_size = 10;
-		int main_w = rss_config_get_int(cfg, "stream0", "width", 1920);
-		int main_h = rss_config_get_int(cfg, "stream0", "height", 1080);
-		int sub_w = rss_config_get_int(cfg, "stream1", "width", 640);
-		int sub_h = rss_config_get_int(cfg, "stream1", "height", 360);
+		/* Placeholder dimensions for the estimate only — read without
+		 * populating, so the sensor's true resolution still reaches the
+		 * streams (see cfg_peek_int). They scale the sub-stream region as
+		 * a ratio of the main, so a stand-in that differs from the eventual
+		 * resolution only nudges the estimate, which carries headroom. */
+		int main_w = cfg_peek_int(cfg, "stream0", "width", 1920);
+		int main_h = cfg_peek_int(cfg, "stream0", "height", 1080);
+		int sub_w = cfg_peek_int(cfg, "stream1", "width", 640);
+		int sub_h = cfg_peek_int(cfg, "stream1", "height", 360);
 		bool has_sub = rss_config_get_bool(cfg, "stream1", "enabled", true);
 
 		uint32_t osd_pool = 0;
