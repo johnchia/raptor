@@ -1274,17 +1274,24 @@ int rvd_stream_init(rvd_state_t *st, int idx)
 	}
 
 	/* ── OSD group + regions (IPU only, non-JPEG) ── */
-	if (st->osd_enabled && !s->is_jpeg && (!st->use_isp_osd || s->fs_chn % 3 != 0)) {
+	if (st->osd_enabled && !st->osd_unsupported && !s->is_jpeg &&
+	    (!st->use_isp_osd || s->fs_chn % 3 != 0)) {
 		ret = RSS_HAL_CALL(st->ops, osd_create_group, st->hal_ctx, s->chn);
-		if (ret != RSS_OK)
+		if (ret == RSS_ERR_NOTSUP) {
+			st->osd_unsupported = true;
+			RSS_INFO("osd: backend has no OSD support; overlays disabled");
+		} else if (ret != RSS_OK) {
 			RSS_WARN("osd_create_group(%d) failed: %d (non-fatal)", s->chn, ret);
+		}
 
-		pthread_mutex_lock(&st->osd_lock);
-		rvd_osd_init_stream(st, idx);
-		pthread_mutex_unlock(&st->osd_lock);
+		if (!st->osd_unsupported) {
+			pthread_mutex_lock(&st->osd_lock);
+			rvd_osd_init_stream(st, idx);
+			pthread_mutex_unlock(&st->osd_lock);
 
-		RSS_HAL_CALL(st->ops, osd_start, st->hal_ctx, s->chn);
-	} else if (st->osd_enabled && !s->is_jpeg && st->use_isp_osd) {
+			RSS_HAL_CALL(st->ops, osd_start, st->hal_ctx, s->chn);
+		}
+	} else if (st->osd_enabled && !st->osd_unsupported && !s->is_jpeg && st->use_isp_osd) {
 		/* ISP OSD: regions only, no group/start */
 		pthread_mutex_lock(&st->osd_lock);
 		rvd_osd_init_stream(st, idx);
@@ -1299,7 +1306,8 @@ int rvd_stream_init(rvd_state_t *st, int idx)
 		chain[chain_len++] = (rss_cell_t){RSS_DEV_FS, s->fs_chn, 0};
 		if (s->fs_chn == st->ivs_fs_chn && st->ivs_active)
 			chain[chain_len++] = (rss_cell_t){RSS_DEV_IVS, st->ivs_grp, 0};
-		if (st->osd_enabled && (!st->use_isp_osd || s->fs_chn % 3 != 0))
+		if (st->osd_enabled && !st->osd_unsupported &&
+		    (!st->use_isp_osd || s->fs_chn % 3 != 0))
 			chain[chain_len++] = (rss_cell_t){RSS_DEV_OSD, s->chn, 0};
 		chain[chain_len++] = (rss_cell_t){RSS_DEV_ENC, s->chn, 0};
 

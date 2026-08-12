@@ -160,6 +160,10 @@ static bool create_region(rvd_state_t *st, int s, rvd_osd_region_t *reg)
 	uint32_t w = reg->width;
 	uint32_t h = reg->height;
 
+	/* A backend with no OSD ops fails every region; do not retry it per tick. */
+	if (st->osd_unsupported)
+		return false;
+
 	w = (w + 1) & ~1u;
 	h = (h + 1) & ~1u;
 
@@ -205,7 +209,12 @@ static bool create_region(rvd_state_t *st, int s, rvd_osd_region_t *reg)
 		int sensor = st->streams[s].sensor_idx;
 		ret = RSS_HAL_CALL(st->ops, isp_osd_create_region, st->hal_ctx, sensor, &handle);
 		if (ret != RSS_OK) {
-			RSS_WARN("isp_osd_create_region(s%d/%s) failed: %d", s, reg->name, ret);
+			if (ret == RSS_ERR_NOTSUP) {
+				st->osd_unsupported = true;
+				RSS_INFO("osd: backend has no OSD support; overlays disabled");
+			} else {
+				RSS_WARN("isp_osd_create_region(s%d/%s) failed: %d", s, reg->name, ret);
+			}
 			free(reg->local_buf);
 			reg->local_buf = NULL;
 			return false;
@@ -213,7 +222,12 @@ static bool create_region(rvd_state_t *st, int s, rvd_osd_region_t *reg)
 	} else {
 		ret = RSS_HAL_CALL(st->ops, osd_create_region, st->hal_ctx, &handle, &attr);
 		if (ret != RSS_OK) {
-			RSS_WARN("osd_create_region(s%d/%s) failed: %d", s, reg->name, ret);
+			if (ret == RSS_ERR_NOTSUP) {
+				st->osd_unsupported = true;
+				RSS_INFO("osd: backend has no OSD support; overlays disabled");
+			} else {
+				RSS_WARN("osd_create_region(s%d/%s) failed: %d", s, reg->name, ret);
+			}
 			free(reg->local_buf);
 			reg->local_buf = NULL;
 			return false;
@@ -273,7 +287,7 @@ static bool probe_shm_dims(int s, const char *name, uint32_t *out_w, uint32_t *o
  */
 void rvd_osd_init_stream(rvd_state_t *st, int s)
 {
-	if (st->streams[s].is_jpeg)
+	if (st->streams[s].is_jpeg || st->osd_unsupported)
 		return;
 	if (!rss_config_get_bool(st->cfg, st->streams[s].cfg_sect, "osd_enabled", true)) {
 		RSS_INFO("osd stream%d: disabled by [%s] osd_enabled", s, st->streams[s].cfg_sect);
@@ -707,7 +721,7 @@ static void scan_new_shm(rvd_state_t *st, int s)
 
 void rvd_osd_check(rvd_state_t *st)
 {
-	if (!st->osd_enabled)
+	if (!st->osd_enabled || st->osd_unsupported)
 		return;
 
 	pthread_mutex_lock(&st->osd_lock);

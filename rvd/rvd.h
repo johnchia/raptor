@@ -101,6 +101,7 @@ struct rvd_state {
 
 	/* OSD */
 	bool osd_enabled;
+	bool osd_unsupported; /* backend publishes no OSD ops; latched so we stop retrying */
 	bool use_isp_osd; /* true = ISP OSD (no bind chain), false = IPU OSD */
 	rvd_osd_region_t osd_regions[RVD_MAX_STREAMS][RVD_OSD_MAX_REGIONS];
 	int osd_region_count[RVD_MAX_STREAMS];
