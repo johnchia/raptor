@@ -35,16 +35,15 @@ typedef enum {
 /*
  * Which device page an entity lands on.
  *
- * Home Assistant has no sections within a device — only the three categories
- * above, which is not enough shape for sixty-odd entities. So the groups that
- * are really separate subjects become separate devices, each linked back to
- * the camera with `via_device`, and each published as its own discovery
- * document. The camera's own page keeps what describes the camera.
+ * Only the two encoded streams are separate devices. They earn it by being
+ * genuinely parallel — the same six entities twice, where the page title is
+ * the only thing distinguishing "Bitrate" from "Bitrate". Everything else
+ * describes one camera and belongs on the camera's own page, sorted by the
+ * category above; splitting those out bought a tidier list at the cost of
+ * making an ordinary adjustment a journey through three pages.
  */
 typedef enum {
 	GRP_CAMERA = 0,
-	GRP_IMAGE,
-	GRP_DAYNIGHT,
 	GRP_MAIN,
 	GRP_SUB,
 	GRP_COUNT,
@@ -55,11 +54,20 @@ static const struct {
 	const char *name;   /* appended to the camera's name */
 } groups[GRP_COUNT] = {
 	[GRP_CAMERA] = {NULL, NULL},
-	[GRP_IMAGE] = {"image", "Image"},
-	[GRP_DAYNIGHT] = {"daynight", "Day/night"},
 	[GRP_MAIN] = {"main", "Main stream"},
 	[GRP_SUB] = {"sub", "Sub stream"},
 };
+
+/*
+ * Sub-devices an earlier build published and this one does not. Their
+ * discovery documents are retained on the broker, so Home Assistant would keep
+ * the devices and every entity under them indefinitely; an empty payload is
+ * how a retained discovery is withdrawn.
+ *
+ * Deletable once no camera in the fleet still runs a build that published
+ * them — they cost one empty publish per discovery cycle until then.
+ */
+static const char *const retired_groups[] = {"image", "daynight", NULL};
 
 static const char *category_name(ha_category_t c)
 {
@@ -73,13 +81,13 @@ static const char *category_name(ha_category_t c)
  * ever read. Enabling one is two clicks; wading through a dozen to find the
  * two that matter is the cost of the other default.
  *
- * Restart-tier controls ship disabled too, for a different reason — see
- * ha_control_t below — so the call sites combine the two rather than this
- * deciding on its own.
+ * Everything settable ships enabled, including the restart tier: a control
+ * nobody can find is not a safer control, and the interruption a restart costs
+ * is carried in the entity's name instead.
  *
- * Home Assistant applies either only when it first creates an entity, so a
- * camera already discovered keeps whatever it has. Clearing the discovery
- * topic and letting it republish is what re-applies it.
+ * Home Assistant applies this only when it first creates an entity, so a
+ * camera already discovered keeps whatever it has. `raptorctl rmq rediscover`
+ * is what re-applies it.
  */
 static bool enabled_by_default(ha_category_t c)
 {
@@ -106,8 +114,10 @@ typedef struct {
  * Units and constraints belong in the name: it is the only string visible
  * without opening the entity, and HA has no help-text field of any kind.
  *
- * Names are not prefixed with their group — the group is the device page the
- * entity sits on, and Home Assistant shows that above it already.
+ * A name carries whatever context its page does not. The stream pages supply
+ * "Main" and "Sub", so their entities are bare; everything on the camera's own
+ * page has to say what it is about, which is why the day/night entities name
+ * themselves and the image ones do not need to.
  */
 static const ha_entity_t entities[] = {
 	/* -- Primary: what an operator actually looks at -- */
@@ -144,34 +154,30 @@ static const ha_entity_t entities[] = {
 	 *    vendor's own scale (SigmaStar x1024), and presenting it as
 	 *    anything else would invent precision. -- */
 	{.key = "ir_state",
-	 .name = "State",
+	 .name = "Day/night",
 	 .value = "ir.state",
 	 .icon = "mdi:theme-light-dark",
 	 .cat = CAT_PRIMARY,
-	 .owner = RMQ_D_RIC,
-	 .group = GRP_DAYNIGHT},
+	 .owner = RMQ_D_RIC},
 	{.key = "total_gain",
 	 .name = "Total gain (raw)",
 	 .value = "ir.total_gain",
 	 .icon = "mdi:brightness-6",
 	 .cat = CAT_DIAGNOSTIC,
-	 .owner = RMQ_D_RIC,
-	 .group = GRP_DAYNIGHT},
+	 .owner = RMQ_D_RIC},
 	{.key = "exposure_us",
 	 .name = "Exposure",
 	 .value = "ir.exposure_us",
 	 .unit = "µs",
 	 .icon = "mdi:camera-iris",
 	 .cat = CAT_DIAGNOSTIC,
-	 .owner = RMQ_D_RIC,
-	 .group = GRP_DAYNIGHT},
+	 .owner = RMQ_D_RIC},
 	{.key = "ae_luma",
 	 .name = "AE luma",
 	 .value = "ir.ae_luma",
 	 .icon = "mdi:brightness-percent",
 	 .cat = CAT_DIAGNOSTIC,
-	 .owner = RMQ_D_RIC,
-	 .group = GRP_DAYNIGHT},
+	 .owner = RMQ_D_RIC},
 
 	/* -- Diagnostic: system. Owner RMQ_D_COUNT means "always present". -- */
 	/* Why a control can read back its old value: the restart tier writes
@@ -233,13 +239,16 @@ typedef struct {
 
 	int min, max, step; /* CTRL_NUMBER */
 	const char *unit;
-	const char *const *options; /* CTRL_SELECT, NULL-terminated */
+
+	/* CTRL_SELECT, NULL-terminated. NULL itself means the options are
+	 * derived at publish time — see res_build below. */
+	const char *const *options;
 
 	/*
-	 * Restart-tier controls ship disabled whatever their category. Using
-	 * one costs an interruption to video or audio, which is not what a
-	 * control sitting on the device page looks like it will do, so it is
-	 * enabled deliberately or not at all.
+	 * Using this control costs an interruption to video or audio, which is
+	 * not what a control sitting on a device page looks like it will do. It
+	 * says so in its name, which is the only warning Home Assistant has
+	 * anywhere to put.
 	 */
 	bool restarts;
 } ha_control_t;
@@ -251,18 +260,139 @@ static const char *const opt_acodec[] = {"pcmu", "pcma", "l16", "aac", "opus", N
 static const char *const opt_arate[] = {"8000", "16000", "32000", "48000", NULL};
 
 /*
- * A list rather than a pair of width/height boxes: the sensor supports a
- * handful of modes, and a free-typed size the ISP cannot produce fails at
- * pipeline init — after the restart, with no picture left to explain it.
+ * The resolution list, derived from the sensor rather than written down.
  *
- * A camera running a size that is not on this list shows the control blank
- * until it is set, since Home Assistant has no option matching the state. The
- * list is therefore the common set rather than a claim about any one sensor;
- * the schema in Phase 5 is where it stops being guesswork.
+ * A sensor's sizes are its own. 2560x1920 is 4:3 and 1920x1080 is 16:9, and a
+ * fixed list written for one of them crops or stretches on the other — which
+ * is what the list here used to do on every 4:3 camera in the fleet. So the
+ * ladder is the native size and fractions of it: the aspect ratio survives
+ * whatever the sensor is, and the sizes anyone recognises fall out of the
+ * arithmetic anyway, since two thirds of 1080p is 720p.
+ *
+ * Fractions rather than real modes because nothing on the camera enumerates
+ * modes: rvd's get-enc-caps carries feature flags and no geometry at all. What
+ * the native size does buy is the ceiling — the scaler will produce any size
+ * below it, and cannot invent one above.
+ *
+ * A list rather than a pair of width/height boxes, because a free-typed size
+ * the ISP cannot produce fails at pipeline init: after the restart, with no
+ * picture left to explain it.
  */
-static const char *const opt_resolution[] = {"1920x1080", "1280x720", "1024x576",
-					     "800x448",	  "640x360",  "640x480",
-					     "480x270",	  "320x240",  NULL};
+#define RES_OPT_MAX 10
+
+typedef struct {
+	int w[RES_OPT_MAX], h[RES_OPT_MAX];
+	char text[RES_OPT_MAX][16];
+	const char *opt[RES_OPT_MAX + 1]; /* NULL-terminated, for the entity */
+	int count;
+} res_list_t;
+
+/*
+ * Encoders want even dimensions and the hardware scaler is happiest on a
+ * multiple of 8. Nearest rather than down, so half of 1080 is 544 and not 536
+ * — both are legal and the first is the one encoders are built around.
+ */
+static int align8(int v)
+{
+	return ((v + 4) / 8) * 8;
+}
+
+/* Insert descending by area: Home Assistant shows options in the order given,
+ * and a list that is not sorted reads as a list that is not thought about. */
+static void res_add(res_list_t *l, int w, int h)
+{
+	if (w < 160 || h < 120 || l->count >= RES_OPT_MAX)
+		return;
+
+	for (int i = 0; i < l->count; i++) {
+		if (l->w[i] == w && l->h[i] == h)
+			return;
+	}
+
+	int at = l->count;
+	while (at > 0 && l->w[at - 1] * l->h[at - 1] < w * h) {
+		l->w[at] = l->w[at - 1];
+		l->h[at] = l->h[at - 1];
+		rss_strlcpy(l->text[at], l->text[at - 1], sizeof(l->text[at]));
+		at--;
+	}
+
+	l->w[at] = w;
+	l->h[at] = h;
+	snprintf(l->text[at], sizeof(l->text[at]), "%dx%d", w, h);
+	l->count++;
+}
+
+static void res_build(res_list_t *l, const struct rmq_state *st)
+{
+	/* Halves, thirds and quarters, plus the two ratios that land on sizes
+	 * people ask for by name. Native is added unrounded: that one size is
+	 * the sensor's own and not ours to tidy. */
+	static const struct {
+		int num, den;
+	} fracs[] = {{3, 4}, {2, 3}, {1, 2}, {1, 3}, {1, 4}};
+
+	memset(l, 0, sizeof(*l));
+
+	int w = st->sensor_width, h = st->sensor_height;
+	if (w > 0 && h > 0) {
+		res_add(l, w, h);
+		for (size_t i = 0; i < sizeof(fracs) / sizeof(fracs[0]); i++)
+			res_add(l, align8(w * fracs[i].num / fracs[i].den),
+				align8(h * fracs[i].num / fracs[i].den));
+	}
+
+	/*
+	 * Whatever the streams are actually running, which need not be one of
+	 * ours: a size set from the config file or by raptorctl is just as
+	 * real. Home Assistant matches state against the option list exactly,
+	 * so without this the control shows blank on the camera it describes.
+	 */
+	for (int i = 0; i < RMQ_STREAM_COUNT; i++) {
+		int sw = 0, sh = 0;
+		if (sscanf(st->stream_res[i], "%dx%d", &sw, &sh) == 2)
+			res_add(l, sw, sh);
+	}
+
+	for (int i = 0; i < l->count; i++)
+		l->opt[i] = l->text[i];
+	l->opt[l->count] = NULL;
+}
+
+bool rmq_ha_note_geometry(struct rmq_state *st, const cJSON *state)
+{
+	int w = 0, h = 0;
+	const cJSON *sensor = cJSON_GetObjectItemCaseSensitive(state, "sensor");
+	if (cJSON_IsObject(sensor)) {
+		const cJSON *jw = cJSON_GetObjectItemCaseSensitive(sensor, "width");
+		const cJSON *jh = cJSON_GetObjectItemCaseSensitive(sensor, "height");
+		if (cJSON_IsNumber(jw) && cJSON_IsNumber(jh)) {
+			w = jw->valueint;
+			h = jh->valueint;
+		}
+	}
+
+	bool changed = (w != st->sensor_width || h != st->sensor_height);
+	st->sensor_width = w;
+	st->sensor_height = h;
+
+	for (int i = 0; i < RMQ_STREAM_COUNT; i++) {
+		char key[16], res[16] = "";
+		snprintf(key, sizeof(key), "stream%d", i);
+
+		const cJSON *s = cJSON_GetObjectItemCaseSensitive(state, key);
+		const cJSON *r = s ? cJSON_GetObjectItemCaseSensitive(s, "resolution") : NULL;
+		if (cJSON_IsString(r) && r->valuestring)
+			rss_strlcpy(res, r->valuestring, sizeof(res));
+
+		if (strcmp(res, st->stream_res[i]) != 0) {
+			rss_strlcpy(st->stream_res[i], res, sizeof(st->stream_res[i]));
+			changed = true;
+		}
+	}
+
+	return changed;
+}
 
 /*
  * Ranges here are the ones rmq_cmd.c enforces. They are repeated rather than
@@ -287,9 +417,8 @@ static const char *const opt_resolution[] = {"1920x1080", "1280x720", "1024x576"
 	 .name = nm,                                                                               \
 	 .kind = CTRL_NUMBER,                                                                      \
 	 .icon = ic,                                                                               \
-	 .cat = CAT_CONFIG,                                                                        \
+	 .cat = CAT_PRIMARY,                                                                       \
 	 .owner = RMQ_D_RVD,                                                                       \
-	 .group = GRP_IMAGE,                                                                       \
 	 .value = "image." k,                                                                      \
 	 .cmd_tpl = "{\"cmd\":\"" cmd "\",\"value\":{{ value | int }}}",                           \
 	 .min = 0,                                                                                 \
@@ -304,7 +433,6 @@ static const char *const opt_resolution[] = {"1920x1080", "1280x720", "1024x576"
 	 .icon = ic,                                                                               \
 	 .cat = CAT_CONFIG,                                                                        \
 	 .owner = RMQ_D_RIC,                                                                       \
-	 .group = GRP_DAYNIGHT,                                                                    \
 	 .value = "ir." k,                                                                         \
 	 .cmd_tpl = "{\"cmd\":\"ircut-threshold\",\"key\":\"" k "\","                              \
 		    "\"value\":{{ value | int }}}",                                                \
@@ -312,27 +440,25 @@ static const char *const opt_resolution[] = {"1920x1080", "1280x720", "1024x576"
 	 .max = hi,                                                                                \
 	 .step = 1}
 
-/* [ircut] keys ric reads only at startup: a config write and a restart. */
-#define IRC_CFG_(k, nm, ic, lo, hi, val)                                                           \
+/*
+ * [ircut] keys ric reads only at startup: a config write and a restart. ric
+ * reports none of them back, so the control is write-only and shows blank
+ * until it is set — which is honest, and the alternative would be echoing the
+ * value we sent as though the daemon had confirmed it.
+ */
+#define IRC_CFG(k, nm, ic, lo, hi)                                                                 \
 	{.key = "ircut_" k,                                                                        \
 	 .name = nm,                                                                               \
 	 .kind = CTRL_NUMBER,                                                                      \
 	 .icon = ic,                                                                               \
 	 .cat = CAT_CONFIG,                                                                        \
 	 .owner = RMQ_D_RIC,                                                                       \
-	 .group = GRP_DAYNIGHT,                                                                    \
-	 .value = val,                                                                             \
 	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"ircut\",\"key\":\"" k "\","             \
 		    "\"value\":{{ value | int }}}",                                                \
 	 .min = lo,                                                                                \
 	 .max = hi,                                                                                \
 	 .step = 1,                                                                                \
 	 .restarts = true}
-
-/* ric reports these back, so the control can show one. */
-#define IRC_CFGV(k, nm, ic, lo, hi) IRC_CFG_(k, nm, ic, lo, hi, "ir." k)
-/* ric reports these nowhere: write-only, and honest about it. */
-#define IRC_CFG(k, nm, ic, lo, hi) IRC_CFG_(k, nm, ic, lo, hi, NULL)
 
 /*
  * One encoded stream. `n` is a string so it can be pasted into both the
@@ -388,8 +514,10 @@ static const char *const opt_resolution[] = {"1920x1080", "1280x720", "1024x576"
 		 .value = "stream" n ".resolution",                                                \
 		 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"stream" n "\",\"values\":"      \
 			    "{\"width\":{{ value.split('x')[0] | int }},"                          \
-			    "\"height\":{{ value.split('x')[1] | int }}}}",                        \
-		 .options = opt_resolution,                                                        \
+			    "\"height\":{{ value.split('x')[1] | int }}}}", /* .options left NULL: \
+									       derived from the    \
+									       sensor at publish   \
+									       time. */            \
 		 .restarts = true},                                                                \
 	{                                                                                          \
 		.key = "stream" n "_codec_set", .name = "Codec", .kind = CTRL_SELECT,              \
@@ -511,9 +639,8 @@ static const ha_control_t controls[] = {
 	 .name = "Flip horizontally",
 	 .kind = CTRL_SWITCH,
 	 .icon = "mdi:flip-horizontal",
-	 .cat = CAT_CONFIG,
+	 .cat = CAT_PRIMARY,
 	 .owner = RMQ_D_RVD,
-	 .group = GRP_IMAGE,
 	 .value = "image.hflip",
 	 .payload = "{\"cmd\":\"set-hflip\",\"value\":1}",
 	 .payload_off = "{\"cmd\":\"set-hflip\",\"value\":0}"},
@@ -521,31 +648,28 @@ static const ha_control_t controls[] = {
 	 .name = "Flip vertically",
 	 .kind = CTRL_SWITCH,
 	 .icon = "mdi:flip-vertical",
-	 .cat = CAT_CONFIG,
+	 .cat = CAT_PRIMARY,
 	 .owner = RMQ_D_RVD,
-	 .group = GRP_IMAGE,
 	 .value = "image.vflip",
 	 .payload = "{\"cmd\":\"set-vflip\",\"value\":1}",
 	 .payload_off = "{\"cmd\":\"set-vflip\",\"value\":0}"},
 
 	/* ---- Day/night ---- */
 	{.key = "ircut_mode",
-	 .name = "Mode",
+	 .name = "Day/night mode",
 	 .kind = CTRL_SELECT,
 	 .icon = "mdi:theme-light-dark",
-	 .cat = CAT_PRIMARY,
+	 .cat = CAT_CONFIG,
 	 .owner = RMQ_D_RIC,
-	 .group = GRP_DAYNIGHT,
 	 .value = "ir.mode",
 	 .cmd_tpl = "{\"cmd\":\"ircut-mode\",\"value\":\"{{ value }}\"}",
 	 .options = opt_daynight},
 	{.key = "ircut_trigger",
-	 .name = "Trigger",
+	 .name = "Day/night trigger",
 	 .kind = CTRL_SELECT,
 	 .icon = "mdi:target",
 	 .cat = CAT_CONFIG,
 	 .owner = RMQ_D_RIC,
-	 .group = GRP_DAYNIGHT,
 	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"ircut\",\"key\":\"trigger\","
 		    "\"value\":\"{{ value }}\"}",
 	 .options = opt_trigger,
@@ -559,24 +683,21 @@ static const ha_control_t controls[] = {
 	IRC_LIVE("poll_interval_ms", "Poll interval", "mdi:timer", 60000),
 
 	/*
-	 * Wiring and calibration, which ric reads only at startup. The GPIO
-	 * pins would normally come from /etc/thingino.json; on an OpenIPC base
-	 * there is no such file, so this is where a board gets described.
+	 * How the board is wired, which ric reads only at startup. These would
+	 * normally come from /etc/thingino.json; on an OpenIPC base there is no
+	 * such file, so this is where a board gets described.
+	 *
+	 * The ADC and photo trigger calibration is deliberately not here. Both
+	 * are commissioning for a trigger most boards do not use, and eight
+	 * entities is a lot of page to charge every camera for that. They stay
+	 * writable over MQTT — `config-set` on the [ircut] section reaches them
+	 * by name, and rmq_cmd.c still bounds them.
 	 */
 	IRC_CFG("gpio_ircut", "IR-cut GPIO", "mdi:chip", -1, 127),
 	IRC_CFG("gpio_ircut2", "IR-cut GPIO (H-bridge)", "mdi:chip", -1, 127),
 	IRC_CFG("gpio_irled", "IR 850nm GPIO", "mdi:led-on", -1, 127),
 	IRC_CFG("gpio_irled2", "IR 940nm GPIO", "mdi:led-on", -1, 127),
 	IRC_CFG("pulse_ms", "H-bridge pulse width", "mdi:pulse", 1, 1000),
-	IRC_CFG("adc_channel", "ADC channel", "mdi:tune-vertical", 0, 7),
-	IRC_CFG("adc_night", "ADC night threshold", "mdi:weather-night", 0, 4095),
-	IRC_CFG("adc_day", "ADC day threshold", "mdi:weather-sunny", 0, 4095),
-	IRC_CFGV("photo_ev_night", "Photo EV night", "mdi:weather-night", 0, 10000000),
-	IRC_CFGV("photo_ev_deep", "Photo EV deep night", "mdi:weather-night-partly-cloudy", 0,
-		 10000000),
-	IRC_CFGV("photo_ev_day", "Photo EV day", "mdi:weather-sunny", 0, 10000000),
-	IRC_CFGV("photo_rgain_rec", "Photo R-gain baseline", "mdi:alpha-r-circle", 0, 8192),
-	IRC_CFGV("photo_bgain_rec", "Photo B-gain baseline", "mdi:alpha-b-circle", 0, 8192),
 
 	/* ---- Main stream ---- */
 	STREAM_CTRLS("0", GRP_MAIN),
@@ -643,12 +764,24 @@ static cJSON *make_component(struct rmq_state *st, const ha_entity_t *e)
 }
 
 /* Build one control entry. */
-static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct)
+static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct, const res_list_t *res)
 {
 	static const char *const platforms[] = {"number", "select", "switch", "button"};
 
-	cJSON *c = make_common(st, ct->key, ct->name, ct->icon, ct->cat,
-			       enabled_by_default(ct->cat) && !ct->restarts, platforms[ct->kind]);
+	/*
+	 * The restart tier says so where it will be read. Home Assistant has no
+	 * help text and no warning on a control, so the name is the only place
+	 * left to put the one thing an operator wants to know before touching
+	 * it: that this one interrupts the video.
+	 */
+	char name[96];
+	if (ct->restarts)
+		snprintf(name, sizeof(name), "%s (restart)", ct->name);
+	else
+		rss_strlcpy(name, ct->name, sizeof(name));
+
+	cJSON *c = make_common(st, ct->key, name, ct->icon, ct->cat, enabled_by_default(ct->cat),
+			       platforms[ct->kind]);
 	if (!c)
 		return NULL;
 
@@ -658,9 +791,10 @@ static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct)
 		char tpl[192];
 		switch (ct->kind) {
 		case CTRL_SWITCH:
-			/* Rendered to the payloads Home Assistant compares
-			 * against by default, rather than shipping state_on /
-			 * state_off to match Jinja's "True"/"False". */
+			/* Rendered to a fixed pair rather than left as Jinja's
+			 * "True"/"False", so what the switch compares against
+			 * is stated once here and once in stat_on/stat_off
+			 * below rather than depending on Jinja's spelling. */
 			snprintf(tpl, sizeof(tpl),
 				 "{{ 'ON' if (value_json.%s | default(false)) "
 				 "else 'OFF' }}",
@@ -701,14 +835,25 @@ static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct)
 			cJSON_AddStringToObject(c, "unit_of_meas", ct->unit);
 		break;
 	case CTRL_SELECT: {
+		const char *const *choices = ct->options ? ct->options : res->opt;
 		cJSON *opts = cJSON_AddArrayToObject(c, "ops");
-		for (int i = 0; opts && ct->options[i]; i++)
-			cJSON_AddItemToArray(opts, cJSON_CreateString(ct->options[i]));
+		for (int i = 0; opts && choices[i]; i++)
+			cJSON_AddItemToArray(opts, cJSON_CreateString(choices[i]));
 		break;
 	}
 	case CTRL_SWITCH:
 		cJSON_AddStringToObject(c, "pl_on", ct->payload);
 		cJSON_AddStringToObject(c, "pl_off", ct->payload_off);
+		/*
+		 * Home Assistant defaults state_on to payload_on, which here is
+		 * a command document the camera has no reason to ever echo. Left
+		 * to the default the reported state matches neither, the entity
+		 * sits in `unknown` forever, and Home Assistant draws it as a
+		 * pair of lightning-bolt buttons rather than a toggle — having
+		 * no position it could honestly show.
+		 */
+		cJSON_AddStringToObject(c, "stat_on", "ON");
+		cJSON_AddStringToObject(c, "stat_off", "OFF");
 		break;
 	case CTRL_BUTTON:
 		cJSON_AddStringToObject(c, "pl_prs", ct->payload);
@@ -806,6 +951,9 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 	 * that still advertised them would offer a slider that silently does
 	 * nothing, which is worse than not offering it.
 	 */
+	res_list_t res;
+	res_build(&res, st);
+
 	for (int i = 0; i < control_count; i++) {
 		const ha_control_t *ct = &controls[i];
 
@@ -814,8 +962,15 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 
 		bool live = st->commands_enabled && owner_available(ct->owner, now);
 
+		/* A derived list with nothing in it means the camera reported no
+		 * geometry at all. Offering an empty dropdown would be worse
+		 * than offering nothing, so the control waits for a poll that
+		 * knows something. */
+		if (ct->kind == CTRL_SELECT && !ct->options && res.count == 0)
+			live = false;
+
 		if (live) {
-			cJSON *c = make_control(st, ct);
+			cJSON *c = make_control(st, ct, &res);
 			if (c) {
 				cJSON_AddItemToObject(cmps, ct->key, c);
 				published++;
@@ -856,6 +1011,14 @@ int rmq_ha_publish_discovery(struct rmq_state *st, const rmq_daemons_t *now,
 		if (publish_group(st, (ha_group_t)g, now, previous) < 0)
 			rc = -1;
 	}
+
+	for (int i = 0; retired_groups[i]; i++) {
+		char topic[RMQ_TOPIC_MAX];
+		snprintf(topic, sizeof(topic), "%s/device/%s_%s/config", st->discovery_prefix,
+			 st->client_id, retired_groups[i]);
+		rmq_mqtt_publish(st->mqtt, topic, "", 0, 1, true);
+	}
+
 	return rc;
 }
 

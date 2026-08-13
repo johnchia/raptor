@@ -70,6 +70,13 @@ struct rvd_state {
 	/* Sensors */
 	int sensor_count;
 
+	/* Native sensor geometry, as resolved at pipeline init. Reported so a
+	 * client can size a stream against what the sensor actually has: every
+	 * stream size is this or a scaling of it, and nothing else enumerates
+	 * the modes. 0 when it could not be determined. */
+	int sensor_width;
+	int sensor_height;
+
 	/* Streams */
 	rvd_stream_t streams[RVD_MAX_STREAMS];
 	int stream_count;

@@ -155,6 +155,22 @@ static void collect_rvd(cJSON *state)
 	if (!resp)
 		return;
 
+	/* What the sensor delivers, which is the ceiling every stream size sits
+	 * under and the only thing on the camera that describes the geometry it
+	 * can produce. Absent when rvd could not determine it. */
+	int sw = json_int(resp, "sensor_w", 0);
+	int sh = json_int(resp, "sensor_h", 0);
+	if (sw > 0 && sh > 0) {
+		cJSON *o = cJSON_AddObjectToObject(state, "sensor");
+		if (o) {
+			char res[32];
+			snprintf(res, sizeof(res), "%dx%d", sw, sh);
+			cJSON_AddStringToObject(o, "resolution", res);
+			cJSON_AddNumberToObject(o, "width", sw);
+			cJSON_AddNumberToObject(o, "height", sh);
+		}
+	}
+
 	const cJSON *streams = cJSON_GetObjectItemCaseSensitive(resp, "streams");
 	if (cJSON_IsArray(streams)) {
 		const cJSON *s = NULL;

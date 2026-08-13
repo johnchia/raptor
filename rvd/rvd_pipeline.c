@@ -810,6 +810,12 @@ int rvd_pipeline_init(rvd_state_t *st)
 		}
 	}
 
+	/* Kept for clients rather than for the pipeline, which uses the local
+	 * copy below: a stream size only means something against the size the
+	 * sensor actually delivers. */
+	st->sensor_width = sensor_w;
+	st->sensor_height = sensor_h;
+
 	/* Low latency: encoder releases frames immediately (saves 40-120ms) */
 	st->low_latency = rss_config_get_bool(cfg, "sensor", "low_latency", false);
 	if (st->low_latency)

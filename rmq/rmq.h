@@ -23,6 +23,11 @@
 /* However long a burst of commands runs, a change reaches flash within this. */
 #define RMQ_SAVE_MAX_DELAY_MS 15000
 
+/* Encoded streams the entity table describes: main and sub. A camera running
+ * more is reported in the state document all the same; it just gets no
+ * entities for them. */
+#define RMQ_STREAM_COUNT 2
+
 /* Named (not just typedef'd) so headers can forward-declare it. */
 struct rmq_state {
 	/* Config */
@@ -62,6 +67,14 @@ struct rmq_state {
 	 * entities can be removed when their daemon goes away. */
 	rmq_daemons_t last_daemons;
 	bool discovery_published;
+
+	/* Geometry the resolution list is built from, carried over from the
+	 * last poll. Cached rather than asked for at publish time so that the
+	 * options an entity offers and the value it reports come from the same
+	 * document, and cannot disagree. */
+	int sensor_width;
+	int sensor_height;
+	char stream_res[RMQ_STREAM_COUNT][16];
 
 	/* Config writes owed to daemons, deferred so that a burst of commands
 	 * costs one flash write rather than one per command. */

@@ -220,6 +220,38 @@ static int rmq_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 				     st->restart_due_ms ? "true" : "false", st->cfg_write_count);
 	}
 
+	/*
+	 * Withdraw every discovery document and publish it again, which makes
+	 * Home Assistant destroy the device and build it back from the current
+	 * definitions. The reason to want that: `enabled_by_default` and the
+	 * entity's original name are applied only when an entity is first
+	 * created, so a camera discovered by an older build keeps whatever it
+	 * was given then, however the table has changed since.
+	 *
+	 * Deliberately a command and not something a version change triggers.
+	 * Recreating an entity discards what the user did to it — the rename,
+	 * the area, the dashboard place — and that is a cost to accept
+	 * knowingly, not to be handed by an upgrade.
+	 */
+	if (strcmp(cmd, "rediscover") == 0) {
+		if (!st->ha_discovery)
+			return rss_ctrl_resp_error(resp_buf, resp_buf_size,
+						   "ha_discovery is disabled");
+		if (!rmq_mqtt_connected(st->mqtt))
+			return rss_ctrl_resp_error(resp_buf, resp_buf_size, "not connected");
+
+		rmq_ha_clear_discovery(st);
+
+		/* Republished by the next poll rather than here, so the entities
+		 * come back alongside a state document rather than ahead of one
+		 * and briefly unavailable. */
+		st->discovery_published = false;
+		return rss_ctrl_resp(resp_buf, resp_buf_size,
+				     "{\"status\":\"ok\",\"cleared\":true,"
+				     "\"republish_within_sec\":%d}",
+				     st->poll_interval_sec);
+	}
+
 	return rss_ctrl_resp_error(resp_buf, resp_buf_size, "unknown command");
 }
 
@@ -279,9 +311,15 @@ static void rmq_poll_cycle(rmq_state_t *st)
 	if (!state)
 		return;
 
+	/* Before discovery, not after: the resolution list is built from this,
+	 * and on the first cycle the geometry and the discovery document arrive
+	 * together. Read afterwards, the camera would advertise an empty list
+	 * until something unrelated forced a republish. */
+	bool geometry_changed = rmq_ha_note_geometry(st, state);
+
 	if (st->ha_discovery) {
-		bool changed =
-			!st->discovery_published || rmq_daemons_differ(&daemons, &st->last_daemons);
+		bool changed = !st->discovery_published || geometry_changed ||
+			       rmq_daemons_differ(&daemons, &st->last_daemons);
 		if (changed) {
 			const rmq_daemons_t *prev =
 				st->discovery_published ? &st->last_daemons : NULL;

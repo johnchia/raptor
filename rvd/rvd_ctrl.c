@@ -2264,6 +2264,10 @@ static int handle_config_cmd(const char *cmd, const char *cmd_json, rvd_state_t 
 		cJSON *r = cJSON_CreateObject();
 		cJSON_AddStringToObject(r, "status", "ok");
 		cJSON_AddBoolToObject(r, "ready", atomic_load(&st->pipeline_ready));
+		if (st->sensor_width > 0 && st->sensor_height > 0) {
+			cJSON_AddNumberToObject(r, "sensor_w", (double)st->sensor_width);
+			cJSON_AddNumberToObject(r, "sensor_h", (double)st->sensor_height);
+		}
 		cJSON *arr = cJSON_AddArrayToObject(r, "streams");
 		for (int i = 0; i < st->stream_count; i++) {
 			uint32_t avg_br = 0;
