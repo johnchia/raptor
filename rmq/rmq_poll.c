@@ -102,6 +102,51 @@ static void copy_bool(cJSON *dst, const cJSON *src, const char *key)
 		cJSON_AddBoolToObject(dst, key, cJSON_IsTrue(v));
 }
 
+/*
+ * rvd: the ISP tuning, read back from the hardware rather than the config.
+ *
+ * A platform that does not implement a block leaves its getter untouched, so
+ * the value reads 0 rather than being absent — indistinguishable from a real
+ * zero from out here. The controls are honest about that by being controls:
+ * they say what the ISP reports, which on such a platform is what it will keep
+ * reporting whatever is written.
+ */
+static void collect_rvd_isp(cJSON *state)
+{
+	static const char *const keys[] = {
+		"brightness",
+		"contrast",
+		"saturation",
+		"sharpness",
+		"hue",
+		"sinter",
+		"temper",
+		"ae_comp",
+		"max_again",
+		"max_dgain",
+		"dpc_strength",
+		"drc_strength",
+		"defog_strength",
+		"highlight_depress",
+		"backlight_comp",
+		"hflip",
+		"vflip",
+		NULL,
+	};
+
+	cJSON *resp = ask("rvd", "{\"cmd\":\"get-isp\"}");
+	if (!resp)
+		return;
+
+	cJSON *o = cJSON_AddObjectToObject(state, "image");
+	if (o) {
+		for (int i = 0; keys[i]; i++)
+			cJSON_AddNumberToObject(o, keys[i], json_int(resp, keys[i], 0));
+	}
+
+	cJSON_Delete(resp);
+}
+
 /* rvd: per-stream encoder state. Only the encoded video channels are
  * exposed; the JPEG channels carry no bitrate or GOP worth showing. */
 static void collect_rvd(cJSON *state)
@@ -197,6 +242,41 @@ static void collect_ric(cJSON *state)
 	}
 
 	cJSON_Delete(resp);
+
+	/*
+	 * The tuning behind the decision, from ric's own settings rather than
+	 * the file — a threshold changed live has not been saved yet, and the
+	 * control should show what is deciding rather than what was configured.
+	 * ric reports no reading for the GPIO pins or the ADC channel, so
+	 * those controls have nothing to display and do not claim to.
+	 */
+	static const char *const keys[] = {
+		"night_luma",
+		"night_gain",
+		"day_gain_pct",
+		"night_threshold",
+		"day_threshold",
+		"hysteresis_sec",
+		"poll_interval_ms",
+		"photo_ev_night",
+		"photo_ev_deep",
+		"photo_ev_day",
+		"photo_rgain_rec",
+		"photo_bgain_rec",
+		NULL,
+	};
+
+	cJSON *th = ask("ric", "{\"cmd\":\"get-thresholds\"}");
+	if (!th)
+		return;
+
+	const cJSON *trig = cJSON_GetObjectItemCaseSensitive(th, "trigger");
+	if (cJSON_IsString(trig))
+		cJSON_AddStringToObject(o, "trigger", trig->valuestring);
+	for (int i = 0; keys[i]; i++)
+		cJSON_AddNumberToObject(o, keys[i], json_int(th, keys[i], 0));
+
+	cJSON_Delete(th);
 }
 
 /*
@@ -290,8 +370,10 @@ cJSON *rmq_poll_state(rmq_daemons_t *out)
 	}
 	cJSON_AddNumberToObject(state, "daemons_up", out->up_count);
 
-	if (out->up[RMQ_D_RVD])
+	if (out->up[RMQ_D_RVD]) {
 		collect_rvd(state);
+		collect_rvd_isp(state);
+	}
 	if (out->up[RMQ_D_RSD])
 		collect_rsd(state);
 	if (out->up[RMQ_D_RAD])

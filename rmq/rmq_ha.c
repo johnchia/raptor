@@ -32,6 +32,35 @@ typedef enum {
 	CAT_DIAGNOSTIC,
 } ha_category_t;
 
+/*
+ * Which device page an entity lands on.
+ *
+ * Home Assistant has no sections within a device — only the three categories
+ * above, which is not enough shape for sixty-odd entities. So the groups that
+ * are really separate subjects become separate devices, each linked back to
+ * the camera with `via_device`, and each published as its own discovery
+ * document. The camera's own page keeps what describes the camera.
+ */
+typedef enum {
+	GRP_CAMERA = 0,
+	GRP_IMAGE,
+	GRP_DAYNIGHT,
+	GRP_MAIN,
+	GRP_SUB,
+	GRP_COUNT,
+} ha_group_t;
+
+static const struct {
+	const char *suffix; /* NULL: the camera itself, no via_device */
+	const char *name;   /* appended to the camera's name */
+} groups[GRP_COUNT] = {
+	[GRP_CAMERA] = {NULL, NULL},
+	[GRP_IMAGE] = {"image", "Image"},
+	[GRP_DAYNIGHT] = {"daynight", "Day/night"},
+	[GRP_MAIN] = {"main", "Main stream"},
+	[GRP_SUB] = {"sub", "Sub stream"},
+};
+
 static const char *category_name(ha_category_t c)
 {
 	return c == CAT_CONFIG ? "config" : c == CAT_DIAGNOSTIC ? "diagnostic" : NULL;
@@ -66,6 +95,7 @@ typedef struct {
 	const char *icon;      /* NULL for none */
 	ha_category_t cat;
 	rmq_daemon_t owner; /* component exists only while this daemon runs */
+	ha_group_t group;
 
 	/* When set, the entity is a binary_sensor rather than a sensor, and
 	 * this is the Jinja expression that makes it ON. */
@@ -75,41 +105,96 @@ typedef struct {
 /*
  * Units and constraints belong in the name: it is the only string visible
  * without opening the entity, and HA has no help-text field of any kind.
+ *
+ * Names are not prefixed with their group — the group is the device page the
+ * entity sits on, and Home Assistant shows that above it already.
  */
 static const ha_entity_t entities[] = {
 	/* -- Primary: what an operator actually looks at -- */
-	{"ir_state", "Day/night", "ir.state", NULL, NULL, "mdi:theme-light-dark", CAT_PRIMARY,
-	 RMQ_D_RIC, NULL},
-	{"rtsp_clients", "RTSP viewers", "rtsp.clients", NULL, NULL, "mdi:account-eye", CAT_PRIMARY,
-	 RMQ_D_RSD, NULL},
+	{.key = "rtsp_clients",
+	 .name = "RTSP viewers",
+	 .value = "rtsp.clients",
+	 .icon = "mdi:account-eye",
+	 .cat = CAT_PRIMARY,
+	 .owner = RMQ_D_RSD},
 
 	/* -- Diagnostic: video. Anything settable is a control rather than a
 	 *    sensor, so what is left here is only what the camera reports back
 	 *    and no one sets: what the encoder actually delivered against its
 	 *    target. -- */
-	{"stream0_avg_bitrate", "Main bitrate (actual)", "stream0.avg_bitrate", "bit/s",
-	 "data_rate", NULL, CAT_DIAGNOSTIC, RMQ_D_RVD, NULL},
-	{"stream1_avg_bitrate", "Sub bitrate (actual)", "stream1.avg_bitrate", "bit/s", "data_rate",
-	 NULL, CAT_DIAGNOSTIC, RMQ_D_RVD, NULL},
+	{.key = "stream0_avg_bitrate",
+	 .name = "Bitrate (actual)",
+	 .value = "stream0.avg_bitrate",
+	 .unit = "bit/s",
+	 .dev_class = "data_rate",
+	 .cat = CAT_DIAGNOSTIC,
+	 .owner = RMQ_D_RVD,
+	 .group = GRP_MAIN},
+	{.key = "stream1_avg_bitrate",
+	 .name = "Bitrate (actual)",
+	 .value = "stream1.avg_bitrate",
+	 .unit = "bit/s",
+	 .dev_class = "data_rate",
+	 .cat = CAT_DIAGNOSTIC,
+	 .owner = RMQ_D_RVD,
+	 .group = GRP_SUB},
 
-	/* -- Diagnostic: exposure. Raw platform units, not lux or seconds:
-	 *    total_gain is the vendor's own scale (SigmaStar x1024), and
-	 *    presenting it as anything else would invent precision. -- */
-	{"total_gain", "Total gain (raw)", "ir.total_gain", NULL, NULL, "mdi:brightness-6",
-	 CAT_DIAGNOSTIC, RMQ_D_RIC, NULL},
-	{"exposure_us", "Exposure", "ir.exposure_us", "µs", NULL, "mdi:camera-iris", CAT_DIAGNOSTIC,
-	 RMQ_D_RIC, NULL},
-	{"ae_luma", "AE luma", "ir.ae_luma", NULL, NULL, "mdi:brightness-percent", CAT_DIAGNOSTIC,
-	 RMQ_D_RIC, NULL},
+	/* -- Day/night: the decision, and the exposure readings behind it.
+	 *    Raw platform units, not lux or seconds: total_gain is the
+	 *    vendor's own scale (SigmaStar x1024), and presenting it as
+	 *    anything else would invent precision. -- */
+	{.key = "ir_state",
+	 .name = "State",
+	 .value = "ir.state",
+	 .icon = "mdi:theme-light-dark",
+	 .cat = CAT_PRIMARY,
+	 .owner = RMQ_D_RIC,
+	 .group = GRP_DAYNIGHT},
+	{.key = "total_gain",
+	 .name = "Total gain (raw)",
+	 .value = "ir.total_gain",
+	 .icon = "mdi:brightness-6",
+	 .cat = CAT_DIAGNOSTIC,
+	 .owner = RMQ_D_RIC,
+	 .group = GRP_DAYNIGHT},
+	{.key = "exposure_us",
+	 .name = "Exposure",
+	 .value = "ir.exposure_us",
+	 .unit = "µs",
+	 .icon = "mdi:camera-iris",
+	 .cat = CAT_DIAGNOSTIC,
+	 .owner = RMQ_D_RIC,
+	 .group = GRP_DAYNIGHT},
+	{.key = "ae_luma",
+	 .name = "AE luma",
+	 .value = "ir.ae_luma",
+	 .icon = "mdi:brightness-percent",
+	 .cat = CAT_DIAGNOSTIC,
+	 .owner = RMQ_D_RIC,
+	 .group = GRP_DAYNIGHT},
 
 	/* -- Diagnostic: system. Owner RMQ_D_COUNT means "always present". -- */
 	/* Why a control can read back its old value: the restart tier writes
 	 * the file, and nothing changes until the daemon has re-read it. */
-	{"restart_pending", "Restart pending", NULL, NULL, NULL, "mdi:restart-alert",
-	 CAT_DIAGNOSTIC, RMQ_D_COUNT, "value_json.restart.pending | default(false)"},
-	{"daemons_up", "Daemons running", "daemons_up", NULL, NULL, "mdi:cogs", CAT_DIAGNOSTIC,
-	 RMQ_D_COUNT, NULL},
-	{"uptime", "Uptime", "uptime", "s", "duration", NULL, CAT_DIAGNOSTIC, RMQ_D_COUNT, NULL},
+	{.key = "restart_pending",
+	 .name = "Restart pending",
+	 .icon = "mdi:restart-alert",
+	 .cat = CAT_DIAGNOSTIC,
+	 .owner = RMQ_D_COUNT,
+	 .bin_on = "value_json.restart.pending | default(false)"},
+	{.key = "daemons_up",
+	 .name = "Daemons running",
+	 .value = "daemons_up",
+	 .icon = "mdi:cogs",
+	 .cat = CAT_DIAGNOSTIC,
+	 .owner = RMQ_D_COUNT},
+	{.key = "uptime",
+	 .name = "Uptime",
+	 .value = "uptime",
+	 .unit = "s",
+	 .dev_class = "duration",
+	 .cat = CAT_DIAGNOSTIC,
+	 .owner = RMQ_D_COUNT},
 };
 
 static const int entity_count = (int)(sizeof(entities) / sizeof(entities[0]));
@@ -132,6 +217,7 @@ typedef struct {
 	const char *icon;
 	ha_category_t cat;
 	rmq_daemon_t owner;
+	ha_group_t group;
 
 	/* Where the current value sits in the state document, so the control
 	 * shows what the camera is rather than what it was last told. NULL
@@ -159,6 +245,7 @@ typedef struct {
 } ha_control_t;
 
 static const char *const opt_daynight[] = {"auto", "day", "night", NULL};
+static const char *const opt_trigger[] = {"luma", "gain", "adc", "photo", NULL};
 static const char *const opt_vcodec[] = {"h264", "h265", NULL};
 static const char *const opt_acodec[] = {"pcmu", "pcma", "l16", "aac", "opus", NULL};
 static const char *const opt_arate[] = {"8000", "16000", "32000", "48000", NULL};
@@ -188,17 +275,134 @@ static const char *const opt_resolution[] = {"1920x1080", "1280x720", "1024x576"
  * That is why the floors here are round numbers rather than the true minimum
  * rmq_cmd.c would allow.
  */
-static const ha_control_t controls[] = {
-	{.key = "ircut_mode",
-	 .name = "Day/night mode",
-	 .kind = CTRL_SELECT,
-	 .icon = "mdi:theme-light-dark",
-	 .cat = CAT_PRIMARY,
-	 .owner = RMQ_D_RIC,
-	 .value = "ir.mode",
-	 .cmd_tpl = "{\"cmd\":\"ircut-mode\",\"value\":\"{{ value }}\"}",
-	 .options = opt_daynight},
+/*
+ * Four families where every member has the same shape and only the name, the
+ * icon and a bound differ. Written out longhand they were forty near-identical
+ * blocks, which is forty chances for one of them to point at the wrong key.
+ */
 
+/* [image]: a live rvd command, a reading back from the ISP, a ceiling. */
+#define ISP_NUM(k, nm, cmd, ic, hi)                                                                \
+	{.key = "image_" k,                                                                        \
+	 .name = nm,                                                                               \
+	 .kind = CTRL_NUMBER,                                                                      \
+	 .icon = ic,                                                                               \
+	 .cat = CAT_CONFIG,                                                                        \
+	 .owner = RMQ_D_RVD,                                                                       \
+	 .group = GRP_IMAGE,                                                                       \
+	 .value = "image." k,                                                                      \
+	 .cmd_tpl = "{\"cmd\":\"" cmd "\",\"value\":{{ value | int }}}",                           \
+	 .min = 0,                                                                                 \
+	 .max = hi,                                                                                \
+	 .step = 1}
+
+/* [ircut] thresholds ric applies and records live. */
+#define IRC_LIVE(k, nm, ic, hi)                                                                    \
+	{.key = "ircut_" k,                                                                        \
+	 .name = nm,                                                                               \
+	 .kind = CTRL_NUMBER,                                                                      \
+	 .icon = ic,                                                                               \
+	 .cat = CAT_CONFIG,                                                                        \
+	 .owner = RMQ_D_RIC,                                                                       \
+	 .group = GRP_DAYNIGHT,                                                                    \
+	 .value = "ir." k,                                                                         \
+	 .cmd_tpl = "{\"cmd\":\"ircut-threshold\",\"key\":\"" k "\","                              \
+		    "\"value\":{{ value | int }}}",                                                \
+	 .min = 0,                                                                                 \
+	 .max = hi,                                                                                \
+	 .step = 1}
+
+/* [ircut] keys ric reads only at startup: a config write and a restart. */
+#define IRC_CFG_(k, nm, ic, lo, hi, val)                                                           \
+	{.key = "ircut_" k,                                                                        \
+	 .name = nm,                                                                               \
+	 .kind = CTRL_NUMBER,                                                                      \
+	 .icon = ic,                                                                               \
+	 .cat = CAT_CONFIG,                                                                        \
+	 .owner = RMQ_D_RIC,                                                                       \
+	 .group = GRP_DAYNIGHT,                                                                    \
+	 .value = val,                                                                             \
+	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"ircut\",\"key\":\"" k "\","             \
+		    "\"value\":{{ value | int }}}",                                                \
+	 .min = lo,                                                                                \
+	 .max = hi,                                                                                \
+	 .step = 1,                                                                                \
+	 .restarts = true}
+
+/* ric reports these back, so the control can show one. */
+#define IRC_CFGV(k, nm, ic, lo, hi) IRC_CFG_(k, nm, ic, lo, hi, "ir." k)
+/* ric reports these nowhere: write-only, and honest about it. */
+#define IRC_CFG(k, nm, ic, lo, hi) IRC_CFG_(k, nm, ic, lo, hi, NULL)
+
+/*
+ * One encoded stream. `n` is a string so it can be pasted into both the
+ * component key and the channel number inside the command template — the
+ * concatenation puts the digit into the JSON unquoted, which is what the
+ * command expects.
+ */
+#define STREAM_CTRLS(n, grp)                                                                       \
+	{.key = "stream" n "_bitrate_set",                                                         \
+	 .name = "Bitrate",                                                                        \
+	 .kind = CTRL_NUMBER,                                                                      \
+	 .cat = CAT_CONFIG,                                                                        \
+	 .owner = RMQ_D_RVD,                                                                       \
+	 .group = grp,                                                                             \
+	 .value = "stream" n ".bitrate",                                                           \
+	 .cmd_tpl = "{\"cmd\":\"set-bitrate\",\"channel\":" n ",\"value\":{{ value | int }}}",     \
+	 .min = 100000,                                                                            \
+	 .max = 50000000,                                                                          \
+	 .step = 100000,                                                                           \
+	 .unit = "bit/s"},                                                                         \
+		{.key = "stream" n "_fps_set",                                                     \
+		 .name = "Frame rate",                                                             \
+		 .kind = CTRL_NUMBER,                                                              \
+		 .icon = "mdi:filmstrip",                                                          \
+		 .cat = CAT_CONFIG,                                                                \
+		 .owner = RMQ_D_RVD,                                                               \
+		 .group = grp,                                                                     \
+		 .value = "stream" n ".fps",                                                       \
+		 .cmd_tpl = "{\"cmd\":\"set-fps\",\"channel\":" n ",\"value\":{{ value | int }}}", \
+		 .min = 5,                                                                         \
+		 .max = 60,                                                                        \
+		 .step = 5,                                                                        \
+		 .unit = "fps"},                                                                   \
+		{.key = "stream" n "_gop_set",                                                     \
+		 .name = "GOP",                                                                    \
+		 .kind = CTRL_NUMBER,                                                              \
+		 .icon = "mdi:key-variant",                                                        \
+		 .cat = CAT_CONFIG,                                                                \
+		 .owner = RMQ_D_RVD,                                                               \
+		 .group = grp,                                                                     \
+		 .value = "stream" n ".gop",                                                       \
+		 .cmd_tpl = "{\"cmd\":\"set-gop\",\"channel\":" n ",\"value\":{{ value | int }}}", \
+		 .min = 5,                                                                         \
+		 .max = 300,                                                                       \
+		 .step = 5},                                                                       \
+		{.key = "stream" n "_resolution_set",                                              \
+		 .name = "Resolution",                                                             \
+		 .kind = CTRL_SELECT,                                                              \
+		 .icon = "mdi:television",                                                         \
+		 .cat = CAT_CONFIG,                                                                \
+		 .owner = RMQ_D_RVD,                                                               \
+		 .group = grp,                                                                     \
+		 .value = "stream" n ".resolution",                                                \
+		 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"stream" n "\",\"values\":"      \
+			    "{\"width\":{{ value.split('x')[0] | int }},"                          \
+			    "\"height\":{{ value.split('x')[1] | int }}}}",                        \
+		 .options = opt_resolution,                                                        \
+		 .restarts = true},                                                                \
+	{                                                                                          \
+		.key = "stream" n "_codec_set", .name = "Codec", .kind = CTRL_SELECT,              \
+		.icon = "mdi:video", .cat = CAT_CONFIG, .owner = RMQ_D_RVD, .group = grp,          \
+		.value = "stream" n ".codec",                                                      \
+		.cmd_tpl =                                                                         \
+			"{\"cmd\":\"config-set\",\"section\":\"stream" n "\",\"key\":\"codec\","   \
+			"\"value\":\"{{ value }}\"}",                                              \
+		.options = opt_vcodec, .restarts = true                                            \
+	}
+
+static const ha_control_t controls[] = {
+	/* ---- The camera itself ---- */
 	{.key = "osd_enabled",
 	 .name = "OSD",
 	 .kind = CTRL_SWITCH,
@@ -208,77 +412,6 @@ static const ha_control_t controls[] = {
 	 .value = "osd.enabled",
 	 .payload = "{\"cmd\":\"osd-enable\"}",
 	 .payload_off = "{\"cmd\":\"osd-disable\"}"},
-
-	{.key = "stream0_bitrate_set",
-	 .name = "Main bitrate",
-	 .kind = CTRL_NUMBER,
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RVD,
-	 .value = "stream0.bitrate",
-	 .cmd_tpl = "{\"cmd\":\"set-bitrate\",\"channel\":0,\"value\":{{ value | int }}}",
-	 .min = 100000,
-	 .max = 50000000,
-	 .step = 100000,
-	 .unit = "bit/s"},
-	{.key = "stream1_bitrate_set",
-	 .name = "Sub bitrate",
-	 .kind = CTRL_NUMBER,
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RVD,
-	 .value = "stream1.bitrate",
-	 .cmd_tpl = "{\"cmd\":\"set-bitrate\",\"channel\":1,\"value\":{{ value | int }}}",
-	 .min = 100000,
-	 .max = 50000000,
-	 .step = 100000,
-	 .unit = "bit/s"},
-
-	{.key = "stream0_fps_set",
-	 .name = "Main frame rate",
-	 .kind = CTRL_NUMBER,
-	 .icon = "mdi:filmstrip",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RVD,
-	 .value = "stream0.fps",
-	 .cmd_tpl = "{\"cmd\":\"set-fps\",\"channel\":0,\"value\":{{ value | int }}}",
-	 .min = 5,
-	 .max = 60,
-	 .step = 5,
-	 .unit = "fps"},
-	{.key = "stream1_fps_set",
-	 .name = "Sub frame rate",
-	 .kind = CTRL_NUMBER,
-	 .icon = "mdi:filmstrip",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RVD,
-	 .value = "stream1.fps",
-	 .cmd_tpl = "{\"cmd\":\"set-fps\",\"channel\":1,\"value\":{{ value | int }}}",
-	 .min = 5,
-	 .max = 60,
-	 .step = 5,
-	 .unit = "fps"},
-
-	{.key = "stream0_gop_set",
-	 .name = "Main GOP",
-	 .kind = CTRL_NUMBER,
-	 .icon = "mdi:key-variant",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RVD,
-	 .value = "stream0.gop",
-	 .cmd_tpl = "{\"cmd\":\"set-gop\",\"channel\":0,\"value\":{{ value | int }}}",
-	 .min = 5,
-	 .max = 300,
-	 .step = 5},
-	{.key = "stream1_gop_set",
-	 .name = "Sub GOP",
-	 .kind = CTRL_NUMBER,
-	 .icon = "mdi:key-variant",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RVD,
-	 .value = "stream1.gop",
-	 .cmd_tpl = "{\"cmd\":\"set-gop\",\"channel\":1,\"value\":{{ value | int }}}",
-	 .min = 5,
-	 .max = 300,
-	 .step = 5},
 
 	/* Two gain stages, deliberately both exposed: volume is the digital
 	 * trim and gain the analog front end, and only the second one can
@@ -305,64 +438,6 @@ static const ha_control_t controls[] = {
 	 .min = 0,
 	 .max = 31,
 	 .step = 1},
-
-	/*
-	 * Restart tier. These write raptor.conf and bounce the daemon that
-	 * reads it, so the state they display goes on reporting the old value
-	 * until that has happened — which is what "Restart pending" is for.
-	 *
-	 * Resolution is one control writing two keys, which is the whole point
-	 * of the `values` form: a width applied without its height would be a
-	 * configuration nobody asked for, and briefly the live one.
-	 */
-	{.key = "stream0_resolution_set",
-	 .name = "Main resolution",
-	 .kind = CTRL_SELECT,
-	 .icon = "mdi:television",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RVD,
-	 .value = "stream0.resolution",
-	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"stream0\",\"values\":"
-		    "{\"width\":{{ value.split('x')[0] | int }},"
-		    "\"height\":{{ value.split('x')[1] | int }}}}",
-	 .options = opt_resolution,
-	 .restarts = true},
-	{.key = "stream1_resolution_set",
-	 .name = "Sub resolution",
-	 .kind = CTRL_SELECT,
-	 .icon = "mdi:television",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RVD,
-	 .value = "stream1.resolution",
-	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"stream1\",\"values\":"
-		    "{\"width\":{{ value.split('x')[0] | int }},"
-		    "\"height\":{{ value.split('x')[1] | int }}}}",
-	 .options = opt_resolution,
-	 .restarts = true},
-
-	{.key = "stream0_codec_set",
-	 .name = "Main codec",
-	 .kind = CTRL_SELECT,
-	 .icon = "mdi:video",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RVD,
-	 .value = "stream0.codec",
-	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"stream0\",\"key\":\"codec\","
-		    "\"value\":\"{{ value }}\"}",
-	 .options = opt_vcodec,
-	 .restarts = true},
-	{.key = "stream1_codec_set",
-	 .name = "Sub codec",
-	 .kind = CTRL_SELECT,
-	 .icon = "mdi:video",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RVD,
-	 .value = "stream1.codec",
-	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"stream1\",\"key\":\"codec\","
-		    "\"value\":\"{{ value }}\"}",
-	 .options = opt_vcodec,
-	 .restarts = true},
-
 	{.key = "audio_codec_set",
 	 .name = "Audio codec",
 	 .kind = CTRL_SELECT,
@@ -385,7 +460,6 @@ static const ha_control_t controls[] = {
 		    "\"value\":\"{{ value }}\"}",
 	 .options = opt_arate,
 	 .restarts = true},
-
 	{.key = "rtsp_port_set",
 	 .name = "RTSP port",
 	 .kind = CTRL_NUMBER,
@@ -399,7 +473,6 @@ static const ha_control_t controls[] = {
 	 .max = 65535,
 	 .step = 1,
 	 .restarts = true},
-
 	{.key = "request_idr",
 	 .name = "Request keyframe",
 	 .kind = CTRL_BUTTON,
@@ -407,6 +480,108 @@ static const ha_control_t controls[] = {
 	 .cat = CAT_DIAGNOSTIC,
 	 .owner = RMQ_D_RVD,
 	 .payload = "{\"cmd\":\"request-idr\",\"channel\":0}"},
+
+	/* ---- Image: the ISP tuning ----
+	 *
+	 * Every one is live and persists, because tuning is done by looking at
+	 * the picture — a restart between adjustments would make it guesswork.
+	 * They read back from the ISP rather than the config, so a platform
+	 * that ignores a block shows it unchanged rather than pretending.
+	 */
+	ISP_NUM("brightness", "Brightness", "set-brightness", "mdi:brightness-6", 255),
+	ISP_NUM("contrast", "Contrast", "set-contrast", "mdi:contrast-circle", 255),
+	ISP_NUM("saturation", "Saturation", "set-saturation", "mdi:palette", 255),
+	ISP_NUM("sharpness", "Sharpness", "set-sharpness", "mdi:triangle-outline", 255),
+	ISP_NUM("hue", "Hue", "set-hue", "mdi:palette-swatch", 255),
+	ISP_NUM("sinter", "Spatial noise reduction", "set-sinter", "mdi:blur", 255),
+	ISP_NUM("temper", "Temporal noise reduction", "set-temper", "mdi:blur-linear", 255),
+	ISP_NUM("ae_comp", "AE compensation", "set-ae-comp", "mdi:brightness-auto", 255),
+	ISP_NUM("max_again", "Max analog gain", "set-max-again", "mdi:signal", 160),
+	ISP_NUM("max_dgain", "Max digital gain", "set-max-dgain", "mdi:signal-variant", 160),
+	ISP_NUM("dpc_strength", "Dead pixel correction", "set-dpc", "mdi:grain", 255),
+	ISP_NUM("drc_strength", "Dynamic range compression", "set-drc", "mdi:gradient-vertical",
+		255),
+	ISP_NUM("defog_strength", "Defog", "set-defog-strength", "mdi:weather-fog", 255),
+	ISP_NUM("highlight_depress", "Highlight depression", "set-highlight-depress",
+		"mdi:white-balance-sunny", 255),
+	ISP_NUM("backlight_comp", "Backlight compensation", "set-backlight-comp",
+		"mdi:brightness-4", 10),
+
+	{.key = "image_hflip",
+	 .name = "Flip horizontally",
+	 .kind = CTRL_SWITCH,
+	 .icon = "mdi:flip-horizontal",
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_RVD,
+	 .group = GRP_IMAGE,
+	 .value = "image.hflip",
+	 .payload = "{\"cmd\":\"set-hflip\",\"value\":1}",
+	 .payload_off = "{\"cmd\":\"set-hflip\",\"value\":0}"},
+	{.key = "image_vflip",
+	 .name = "Flip vertically",
+	 .kind = CTRL_SWITCH,
+	 .icon = "mdi:flip-vertical",
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_RVD,
+	 .group = GRP_IMAGE,
+	 .value = "image.vflip",
+	 .payload = "{\"cmd\":\"set-vflip\",\"value\":1}",
+	 .payload_off = "{\"cmd\":\"set-vflip\",\"value\":0}"},
+
+	/* ---- Day/night ---- */
+	{.key = "ircut_mode",
+	 .name = "Mode",
+	 .kind = CTRL_SELECT,
+	 .icon = "mdi:theme-light-dark",
+	 .cat = CAT_PRIMARY,
+	 .owner = RMQ_D_RIC,
+	 .group = GRP_DAYNIGHT,
+	 .value = "ir.mode",
+	 .cmd_tpl = "{\"cmd\":\"ircut-mode\",\"value\":\"{{ value }}\"}",
+	 .options = opt_daynight},
+	{.key = "ircut_trigger",
+	 .name = "Trigger",
+	 .kind = CTRL_SELECT,
+	 .icon = "mdi:target",
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_RIC,
+	 .group = GRP_DAYNIGHT,
+	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"ircut\",\"key\":\"trigger\","
+		    "\"value\":\"{{ value }}\"}",
+	 .options = opt_trigger,
+	 .restarts = true},
+
+	/* The luma thresholds are live: ric applies and records them itself. */
+	IRC_LIVE("night_luma", "Night luma threshold", "mdi:brightness-3", 255),
+	IRC_LIVE("night_gain", "Night gain threshold", "mdi:signal", 1000000),
+	IRC_LIVE("day_gain_pct", "Day gain (% of night)", "mdi:percent", 100),
+	IRC_LIVE("hysteresis_sec", "Hysteresis", "mdi:timer-sand", 300),
+	IRC_LIVE("poll_interval_ms", "Poll interval", "mdi:timer", 60000),
+
+	/*
+	 * Wiring and calibration, which ric reads only at startup. The GPIO
+	 * pins would normally come from /etc/thingino.json; on an OpenIPC base
+	 * there is no such file, so this is where a board gets described.
+	 */
+	IRC_CFG("gpio_ircut", "IR-cut GPIO", "mdi:chip", -1, 127),
+	IRC_CFG("gpio_ircut2", "IR-cut GPIO (H-bridge)", "mdi:chip", -1, 127),
+	IRC_CFG("gpio_irled", "IR 850nm GPIO", "mdi:led-on", -1, 127),
+	IRC_CFG("gpio_irled2", "IR 940nm GPIO", "mdi:led-on", -1, 127),
+	IRC_CFG("pulse_ms", "H-bridge pulse width", "mdi:pulse", 1, 1000),
+	IRC_CFG("adc_channel", "ADC channel", "mdi:tune-vertical", 0, 7),
+	IRC_CFG("adc_night", "ADC night threshold", "mdi:weather-night", 0, 4095),
+	IRC_CFG("adc_day", "ADC day threshold", "mdi:weather-sunny", 0, 4095),
+	IRC_CFGV("photo_ev_night", "Photo EV night", "mdi:weather-night", 0, 10000000),
+	IRC_CFGV("photo_ev_deep", "Photo EV deep night", "mdi:weather-night-partly-cloudy", 0,
+		 10000000),
+	IRC_CFGV("photo_ev_day", "Photo EV day", "mdi:weather-sunny", 0, 10000000),
+	IRC_CFGV("photo_rgain_rec", "Photo R-gain baseline", "mdi:alpha-r-circle", 0, 8192),
+	IRC_CFGV("photo_bgain_rec", "Photo B-gain baseline", "mdi:alpha-b-circle", 0, 8192),
+
+	/* ---- Main stream ---- */
+	STREAM_CTRLS("0", GRP_MAIN),
+	/* ---- Sub stream ---- */
+	STREAM_CTRLS("1", GRP_SUB),
 };
 
 static const int control_count = (int)(sizeof(controls) / sizeof(controls[0]));
@@ -543,8 +718,18 @@ static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct)
 	return c;
 }
 
-int rmq_ha_publish_discovery(struct rmq_state *st, const rmq_daemons_t *now,
-			     const rmq_daemons_t *previous)
+/* The discovery topic for one group. */
+static void group_topic(struct rmq_state *st, ha_group_t g, char *out, size_t outsz)
+{
+	if (!groups[g].suffix)
+		rss_strlcpy(out, st->topic_discovery, outsz);
+	else
+		snprintf(out, outsz, "%s/device/%s_%s/config", st->discovery_prefix, st->client_id,
+			 groups[g].suffix);
+}
+
+static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t *now,
+			 const rmq_daemons_t *previous)
 {
 	cJSON *root = cJSON_CreateObject();
 	if (!root)
@@ -552,8 +737,22 @@ int rmq_ha_publish_discovery(struct rmq_state *st, const rmq_daemons_t *now,
 
 	/* Device identity. All components collapse under this on one page. */
 	cJSON *dev = cJSON_AddObjectToObject(root, "dev");
-	cJSON_AddStringToObject(dev, "ids", st->client_id);
-	cJSON_AddStringToObject(dev, "name", st->device_name);
+	if (groups[g].suffix) {
+		char ids[192], name[128];
+		snprintf(ids, sizeof(ids), "%s_%s", st->client_id, groups[g].suffix);
+		snprintf(name, sizeof(name), "%s %s", st->device_name, groups[g].name);
+		cJSON_AddStringToObject(dev, "ids", ids);
+		cJSON_AddStringToObject(dev, "name", name);
+		/*
+		 * Linked to the camera rather than free-standing, so Home
+		 * Assistant nests it under the camera and an area assigned
+		 * once covers the lot.
+		 */
+		cJSON_AddStringToObject(dev, "via_device", st->client_id);
+	} else {
+		cJSON_AddStringToObject(dev, "ids", st->client_id);
+		cJSON_AddStringToObject(dev, "name", st->device_name);
+	}
 	cJSON_AddStringToObject(dev, "mf", "Raptor");
 	cJSON_AddStringToObject(dev, "mdl", st->model);
 	if (&rss_build_hash)
@@ -583,6 +782,9 @@ int rmq_ha_publish_discovery(struct rmq_state *st, const rmq_daemons_t *now,
 	for (int i = 0; i < entity_count; i++) {
 		const ha_entity_t *e = &entities[i];
 
+		if (e->group != g)
+			continue;
+
 		if (owner_available(e->owner, now)) {
 			cJSON *c = make_component(st, e);
 			if (c) {
@@ -606,6 +808,10 @@ int rmq_ha_publish_discovery(struct rmq_state *st, const rmq_daemons_t *now,
 	 */
 	for (int i = 0; i < control_count; i++) {
 		const ha_control_t *ct = &controls[i];
+
+		if (ct->group != g)
+			continue;
+
 		bool live = st->commands_enabled && owner_available(ct->owner, now);
 
 		if (live) {
@@ -626,14 +832,41 @@ int rmq_ha_publish_discovery(struct rmq_state *st, const rmq_daemons_t *now,
 	if (!payload)
 		return -1;
 
-	int rc = rmq_mqtt_publish(st->mqtt, st->topic_discovery, payload, strlen(payload), 1, true);
-	RSS_INFO("ha: discovery published, %d entities, %zu bytes", published, strlen(payload));
+	char topic[RMQ_TOPIC_MAX];
+	group_topic(st, g, topic, sizeof(topic));
+
+	int rc = rmq_mqtt_publish(st->mqtt, topic, payload, strlen(payload), 1, true);
+	RSS_INFO("ha: %s discovery published, %d entities, %zu bytes",
+		 groups[g].name ? groups[g].name : "camera", published, strlen(payload));
 	free(payload);
 
 	return rc;
 }
 
+int rmq_ha_publish_discovery(struct rmq_state *st, const rmq_daemons_t *now,
+			     const rmq_daemons_t *previous)
+{
+	/*
+	 * One document per group, each its own retained topic. The camera goes
+	 * first so Home Assistant has the device the others point at before
+	 * they arrive — out of order it still resolves, but only after a retry.
+	 */
+	int rc = 0;
+	for (int g = 0; g < GRP_COUNT; g++) {
+		if (publish_group(st, (ha_group_t)g, now, previous) < 0)
+			rc = -1;
+	}
+	return rc;
+}
+
 int rmq_ha_clear_discovery(struct rmq_state *st)
 {
-	return rmq_mqtt_publish(st->mqtt, st->topic_discovery, "", 0, 1, true);
+	int rc = 0;
+	for (int g = 0; g < GRP_COUNT; g++) {
+		char topic[RMQ_TOPIC_MAX];
+		group_topic(st, (ha_group_t)g, topic, sizeof(topic));
+		if (rmq_mqtt_publish(st->mqtt, topic, "", 0, 1, true) < 0)
+			rc = -1;
+	}
+	return rc;
 }

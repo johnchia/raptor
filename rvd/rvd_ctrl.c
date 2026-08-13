@@ -950,15 +950,36 @@ static int handle_encoder_advanced_cmd(const char *cmd, const char *cmd_json, rv
 
 /* ── ISP commands ── */
 
+/*
+ * Where a tuning value is recorded: [image] for the primary sensor,
+ * [sensorN_image] beyond it. The same split rvd_pipeline.c reads at startup,
+ * so what is written here is what comes back on the next boot.
+ */
+static const char *image_section(int sensor_idx, char *buf, size_t bufsz)
+{
+	if (sensor_idx <= 0)
+		return "image";
+	snprintf(buf, bufsz, "sensor%d_image", sensor_idx);
+	return buf;
+}
+
 static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st, char *resp,
 			  int resp_size)
 {
 	int val;
 	int sensor_idx = -1;
+	char img_sect[32];
 	rss_json_get_int(cmd_json, "sensor", &sensor_idx);
 
+/*
+ * `key` names the [image] setting the command adjusts, so a tuning change
+ * survives a restart the way a bitrate change already does — applied to the
+ * ISP now, recorded in the config, written out by the next config-save. NULL
+ * for the few that have no config key of their own.
+ */
+
 /* ISP_SET_N: supports --sensor N via _n variant */
-#define ISP_SET_N(name, fn)                                                                        \
+#define ISP_SET_N(name, fn, key)                                                                   \
 	if (strcmp(cmd, name) == 0) {                                                              \
 		if (rss_json_get_int(cmd_json, "value", &val) == 0) {                              \
 			int ret;                                                                   \
@@ -966,40 +987,49 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 				ret = RSS_HAL_CALL(st->ops, fn##_n, st->hal_ctx, sensor_idx, val); \
 			else                                                                       \
 				ret = RSS_HAL_CALL(st->ops, fn, st->hal_ctx, val);                 \
+			if (ret == 0 && (key))                                                     \
+				rss_config_set_int(                                                \
+					st->cfg,                                                   \
+					image_section(sensor_idx, img_sect, sizeof(img_sect)),     \
+					(key), val);                                               \
 			return fmt_hal_result(resp, resp_size, ret);                               \
 		}                                                                                  \
 		return rss_ctrl_resp_error(resp, resp_size, "need value");                         \
 	}
 
 /* ISP_SET: single-sensor only (no _n variant) */
-#define ISP_SET(name, fn)                                                                          \
+#define ISP_SET(name, fn, key)                                                                     \
 	if (strcmp(cmd, name) == 0) {                                                              \
 		if (rss_json_get_int(cmd_json, "value", &val) == 0) {                              \
 			int ret = RSS_HAL_CALL(st->ops, fn, st->hal_ctx, val);                     \
+			if (ret == 0 && (key))                                                     \
+				rss_config_set_int(st->cfg, "image", (key), val);                  \
 			return fmt_hal_result(resp, resp_size, ret);                               \
 		}                                                                                  \
 		return rss_ctrl_resp_error(resp, resp_size, "need value");                         \
 	}
 
-	ISP_SET_N("set-brightness", isp_set_brightness)
-	ISP_SET_N("set-contrast", isp_set_contrast)
-	ISP_SET_N("set-saturation", isp_set_saturation)
-	ISP_SET_N("set-sharpness", isp_set_sharpness)
-	ISP_SET_N("set-hue", isp_set_hue)
-	ISP_SET_N("set-sinter", isp_set_sinter_strength)
-	ISP_SET_N("set-temper", isp_set_temper_strength)
-	ISP_SET("set-dpc", isp_set_dpc_strength)
-	ISP_SET("set-drc", isp_set_drc_strength)
-	ISP_SET("set-highlight-depress", isp_set_highlight_depress)
-	ISP_SET("set-backlight-comp", isp_set_backlight_comp)
-	ISP_SET("set-defog-strength", isp_set_defog_strength)
-	ISP_SET_N("set-ae-comp", isp_set_ae_comp)
-	ISP_SET_N("set-max-again", isp_set_max_again)
-	ISP_SET_N("set-max-dgain", isp_set_max_dgain)
-	ISP_SET_N("set-hflip", isp_set_hflip)
-	ISP_SET_N("set-vflip", isp_set_vflip)
-	ISP_SET("set-defog", isp_set_defog)
-	ISP_SET_N("set-antiflicker", isp_set_antiflicker)
+	ISP_SET_N("set-brightness", isp_set_brightness, "brightness")
+	ISP_SET_N("set-contrast", isp_set_contrast, "contrast")
+	ISP_SET_N("set-saturation", isp_set_saturation, "saturation")
+	ISP_SET_N("set-sharpness", isp_set_sharpness, "sharpness")
+	ISP_SET_N("set-hue", isp_set_hue, "hue")
+	ISP_SET_N("set-sinter", isp_set_sinter_strength, "sinter")
+	ISP_SET_N("set-temper", isp_set_temper_strength, "temper")
+	ISP_SET("set-dpc", isp_set_dpc_strength, "dpc_strength")
+	ISP_SET("set-drc", isp_set_drc_strength, "drc_strength")
+	ISP_SET("set-highlight-depress", isp_set_highlight_depress, "highlight_depress")
+	ISP_SET("set-backlight-comp", isp_set_backlight_comp, "backlight_comp")
+	ISP_SET("set-defog-strength", isp_set_defog_strength, "defog_strength")
+	ISP_SET_N("set-ae-comp", isp_set_ae_comp, "ae_comp")
+	ISP_SET_N("set-max-again", isp_set_max_again, "max_again")
+	ISP_SET_N("set-max-dgain", isp_set_max_dgain, "max_dgain")
+	ISP_SET_N("set-hflip", isp_set_hflip, "hflip")
+	ISP_SET_N("set-vflip", isp_set_vflip, "vflip")
+	/* No [image] key of its own: an on/off toggle for the strength above. */
+	ISP_SET("set-defog", isp_set_defog, NULL)
+	/* Lives in [sensor], not [image] — left to the config write path. */
+	ISP_SET_N("set-antiflicker", isp_set_antiflicker, NULL)
 
 #undef ISP_SET_N
 #undef ISP_SET

@@ -191,6 +191,27 @@ static const cmd_arg_t args_section[] = {
 	{.type = A_END},
 };
 
+/*
+ * ISP tuning. The platforms disagree about which of these do anything — the
+ * HAL answers "unsupported" where a chip has no such block, which reaches the
+ * sender as a plain error — but they agree on the scale, so one range serves.
+ */
+static const cmd_arg_t args_isp_255[] = {
+	{.key = "value", .type = A_INT, .required = true, .min = 0, .max = 255},
+	{.type = A_END},
+};
+
+/* Gain ceilings are 0-160 on every platform that implements them. */
+static const cmd_arg_t args_isp_gain[] = {
+	{.key = "value", .type = A_INT, .required = true, .min = 0, .max = 160},
+	{.type = A_END},
+};
+
+static const cmd_arg_t args_isp_backlight[] = {
+	{.key = "value", .type = A_INT, .required = true, .min = 0, .max = 10},
+	{.type = A_END},
+};
+
 /* ------------------------------------------------------------------ */
 /* The allowlist                                                       */
 /*                                                                     */
@@ -209,6 +230,28 @@ static const cmd_def_t commands[] = {
 	{"set-qp-bounds", "rvd", NULL, args_qp_bounds, true},
 	{"set-rc-mode", "rvd", NULL, args_rc_mode, true},
 	{"request-idr", "rvd", NULL, args_channel_opt, false},
+
+	/* -- Image. rvd applies each to the ISP and records it in [image], so
+	 *    every one owes a save. All seventeen keys of the section are
+	 *    here: the tier is live because tuning is done by looking at the
+	 *    picture, which a restart between adjustments makes impossible. -- */
+	{"set-brightness", "rvd", NULL, args_isp_255, true},
+	{"set-contrast", "rvd", NULL, args_isp_255, true},
+	{"set-saturation", "rvd", NULL, args_isp_255, true},
+	{"set-sharpness", "rvd", NULL, args_isp_255, true},
+	{"set-hue", "rvd", NULL, args_isp_255, true},
+	{"set-sinter", "rvd", NULL, args_isp_255, true},
+	{"set-temper", "rvd", NULL, args_isp_255, true},
+	{"set-ae-comp", "rvd", NULL, args_isp_255, true},
+	{"set-max-again", "rvd", NULL, args_isp_gain, true},
+	{"set-max-dgain", "rvd", NULL, args_isp_gain, true},
+	{"set-dpc", "rvd", NULL, args_isp_255, true},
+	{"set-drc", "rvd", NULL, args_isp_255, true},
+	{"set-defog-strength", "rvd", NULL, args_isp_255, true},
+	{"set-highlight-depress", "rvd", NULL, args_isp_255, true},
+	{"set-backlight-comp", "rvd", NULL, args_isp_backlight, true},
+	{"set-hflip", "rvd", NULL, args_bool, true},
+	{"set-vflip", "rvd", NULL, args_bool, true},
 
 	/* -- Day/night. The LED banks are a manual override of automatic
 	 *    behaviour rather than a setting, which is why they persist
@@ -364,10 +407,39 @@ static const cfg_key_t cfg_keys[] = {
 	{"osd", "font_size", V_INT, 8, 96, NULL},
 	{"osd", "font_stroke", V_INT, 0, 5, NULL},
 
-	/* -- Day/night. The thresholds are live commands, not writes. -- */
+	/* -- Day/night. The luma and gain thresholds are live commands rather
+	 *    than writes; what is left here is everything ric reads only at
+	 *    startup — how the board is wired, and how the two triggers that
+	 *    are not luma are calibrated. -- */
 	{"ircut", "enabled", V_BOOL, 0, 0, NULL},
 	{"ircut", "trigger", V_ENUM, 0, 0, choices_trigger},
 	{"ircut", "pulse_ms", V_INT, 1, 1000, NULL},
+	/*
+	 * GPIO pin assignments. These describe the board rather than any
+	 * behaviour, and are normally read from /etc/thingino.json — but that
+	 * file is absent on an OpenIPC base, which leaves the config the only
+	 * place to put them, and MQTT the only way to reach the config.
+	 *
+	 * A wrong pin here drives a wrong pin: the ceiling is the SoC's GPIO
+	 * count rather than anything ric knows to be safe. Bounded, not made
+	 * harmless.
+	 */
+	{"ircut", "gpio_ircut", V_INT, -1, 127, NULL},
+	{"ircut", "gpio_ircut2", V_INT, -1, 127, NULL},
+	{"ircut", "gpio_irled", V_INT, -1, 127, NULL},
+	{"ircut", "gpio_irled2", V_INT, -1, 127, NULL},
+	/* trigger = adc: a photoresistor on an ADC channel, 12-bit. */
+	{"ircut", "adc_channel", V_INT, 0, 7, NULL},
+	{"ircut", "adc_night", V_INT, 0, 4095, NULL},
+	{"ircut", "adc_day", V_INT, 0, 4095, NULL},
+	/* trigger = photo: EV thresholds, where higher means darker. */
+	{"ircut", "photo_ev_night", V_INT, 0, 10000000, NULL},
+	{"ircut", "photo_ev_deep", V_INT, 0, 10000000, NULL},
+	{"ircut", "photo_ev_day", V_INT, 0, 10000000, NULL},
+	/* AWB baselines for the same trigger; 0 self-calibrates from the
+	 * sensor, so the range starts there rather than at 1x (1024). */
+	{"ircut", "photo_rgain_rec", V_INT, 0, 8192, NULL},
+	{"ircut", "photo_bgain_rec", V_INT, 0, 8192, NULL},
 
 	/* -- Motion -- */
 	{"motion", "enabled", V_BOOL, 0, 0, NULL},
