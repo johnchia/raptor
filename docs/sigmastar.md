@@ -4,6 +4,13 @@ Status of the `PLATFORM=INFINITY6E` HAL backend: what works, what is
 deliberately absent, and what has not been tested. Brought up on an SSC30KQ +
 GC4653 board running OpenIPC.
 
+**Infinity6C (SSC377) is a different backend, not a variant of this one** — see
+[infinity6c.md](infinity6c.md). MI 3.0 shares almost no ABI with the MI 2.x this
+document describes, so nothing here transfers by assumption: the argument lists
+differ, the ISP is a pipeline stage rather than a set of calls inside VPE, and
+scaling belongs to a separate module. Where the two do agree it is worth saying
+so explicitly, and that document does.
+
 This is an index, not the reference. Every "deliberately absent" decision is
 argued at the point it applies, in an `OP COVERAGE` comment block at the top of
 the relevant file — `hal_isp.c`, `hal_osd.c`, `hal_audio.c`, `hal_encoder.c`.
