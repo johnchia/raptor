@@ -344,6 +344,249 @@ TEST every_refusal_explains_itself(void)
 	PASS();
 }
 
+/* ------------------------------------------------------------------ */
+/* Restart tier: config-set                                            */
+/* ------------------------------------------------------------------ */
+
+TEST refuses_config_writes_outside_the_key_table(void)
+{
+	static const char *const refused[] = {
+		/* Credentials, in the two sections that hold them. Neither
+		 * key is in the table, so neither is reachable. */
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+		"\"value\":\"x\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"username\","
+		"\"value\":\"x\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"http\",\"key\":\"password\","
+		"\"value\":\"x\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"webrtc\",\"key\":\"password\","
+		"\"value\":\"x\"}",
+
+		/* Paths and key material: no string type exists, so nothing
+		 * that names a file can be written at all. */
+		"{\"cmd\":\"config-set\",\"section\":\"recording\",\"key\":\"storage_path\","
+		"\"value\":\"/etc\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"recording\",\"key\":\"sign_key\","
+		"\"value\":\"/etc/x\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"tls_key\","
+		"\"value\":\"/etc/x\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"osd\",\"key\":\"font\","
+		"\"value\":\"/tmp/f.ttf\"}",
+
+		/* The bridge's own settings. Writing these could put the
+		 * camera beyond reach of the topic that wrote them. */
+		"{\"cmd\":\"config-set\",\"section\":\"mqtt\",\"key\":\"host\","
+		"\"value\":\"10.0.0.1\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"mqtt\",\"key\":\"enabled\","
+		"\"value\":false}",
+
+		/* Sections with no owner in the write map. */
+		"{\"cmd\":\"config-set\",\"section\":\"push\",\"key\":\"url\","
+		"\"value\":\"rtmp://x\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"webtorrent\",\"key\":\"tracker\","
+		"\"value\":\"wss://x\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"nonesuch\",\"key\":\"enabled\","
+		"\"value\":true}",
+
+		/* A real section, an invented key. */
+		"{\"cmd\":\"config-set\",\"section\":\"audio\",\"key\":\"volume_boost\","
+		"\"value\":9}",
+		NULL,
+	};
+
+	for (int i = 0; refused[i]; i++)
+		ASSERT_REFUSED(refused[i]);
+	PASS();
+}
+
+TEST accepts_a_single_write_and_routes_it(void)
+{
+	rmq_cmd_plan_t p;
+
+	ASSERT_ALLOWED("{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"port\","
+		       "\"value\":5554}",
+		       &p);
+	ASSERT_EQ(RMQ_PLAN_CONFIG, p.kind);
+	ASSERT_EQ(1, p.write_count);
+	ASSERT_EQ(RMQ_D_RSD, p.restart_owner);
+	ASSERT_STR_EQ("rtsp", p.writes[0].section);
+	ASSERT_STR_EQ("port", p.writes[0].key);
+	ASSERT_STR_EQ("5554", p.writes[0].value);
+	PASS();
+}
+
+TEST renders_every_value_as_the_file_spells_it(void)
+{
+	rmq_cmd_plan_t p;
+
+	/* A boolean, however the sender wrote it. */
+	ASSERT_ALLOWED("{\"cmd\":\"config-set\",\"section\":\"motion\",\"key\":\"enabled\","
+		       "\"value\":true}",
+		       &p);
+	ASSERT_STR_EQ("true", p.writes[0].value);
+	ASSERT_ALLOWED("{\"cmd\":\"config-set\",\"section\":\"motion\",\"key\":\"enabled\","
+		       "\"value\":0}",
+		       &p);
+	ASSERT_STR_EQ("false", p.writes[0].value);
+
+	/* A numeric enum, whether quoted or not — a template may render
+	 * either, and both have to land on the table's own spelling. */
+	ASSERT_ALLOWED("{\"cmd\":\"config-set\",\"section\":\"audio\",\"key\":\"sample_rate\","
+		       "\"value\":\"48000\"}",
+		       &p);
+	ASSERT_STR_EQ("48000", p.writes[0].value);
+	ASSERT_ALLOWED("{\"cmd\":\"config-set\",\"section\":\"audio\",\"key\":\"sample_rate\","
+		       "\"value\":48000}",
+		       &p);
+	ASSERT_STR_EQ("48000", p.writes[0].value);
+
+	/* An unlisted rate is refused rather than written through. */
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"audio\",\"key\":\"sample_rate\","
+		       "\"value\":44100}");
+	PASS();
+}
+
+TEST enforces_types_and_ranges_on_writes(void)
+{
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"jpeg\",\"key\":\"quality\","
+		       "\"value\":0}");
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"jpeg\",\"key\":\"quality\","
+		       "\"value\":101}");
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"jpeg\",\"key\":\"quality\","
+		       "\"value\":75.5}");
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"jpeg\",\"key\":\"quality\","
+		       "\"value\":\"75\"}");
+
+	/* Past 2^31: rejected on the double, before any narrowing could wrap
+	 * it back into range. */
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"port\","
+		       "\"value\":4294967296}");
+
+	/* A boolean key given something that is neither. */
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"motion\",\"key\":\"enabled\","
+		       "\"value\":2}");
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"motion\",\"key\":\"enabled\","
+		       "\"value\":\"yes\"}");
+
+	/* An enum key given a plausible near-miss. */
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"stream0\",\"key\":\"codec\","
+		       "\"value\":\"hevc\"}");
+	PASS();
+}
+
+TEST applies_a_values_map_all_or_nothing(void)
+{
+	rmq_cmd_plan_t p;
+
+	ASSERT_ALLOWED("{\"cmd\":\"config-set\",\"section\":\"stream0\",\"values\":"
+		       "{\"width\":1280,\"height\":720}}",
+		       &p);
+	ASSERT_EQ(2, p.write_count);
+	ASSERT_EQ(RMQ_D_RVD, p.restart_owner);
+	ASSERT_STR_EQ("1280", p.writes[0].value);
+	ASSERT_STR_EQ("720", p.writes[1].value);
+
+	/* One bad key refuses the whole map: half a resolution is a size
+	 * nobody chose, and it would be the live one. */
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"stream0\",\"values\":"
+		       "{\"width\":1280,\"height\":99}}");
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"stream0\",\"values\":"
+		       "{\"width\":1280,\"nonesuch\":1}}");
+
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"stream0\",\"values\":{}}");
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"stream0\",\"values\":[1,2]}");
+	PASS();
+}
+
+TEST names_writes_from_the_table_not_the_payload(void)
+{
+	rmq_cmd_plan_t p;
+
+	ASSERT_ALLOWED("{\"cmd\":\"config-set\",\"section\":\"osd\",\"key\":\"font_size\","
+		       "\"value\":32,\"file\":\"/etc/passwd\",\"nonce\":\"n1\"}",
+		       &p);
+
+	/* Only the named key crossed; the smuggled fields are not writes and
+	 * cannot become ones. */
+	ASSERT_EQ(1, p.write_count);
+	ASSERT_STR_EQ("osd", p.writes[0].section);
+	ASSERT_STR_EQ("font_size", p.writes[0].key);
+
+	/* The strings stored are the table's, so a write cannot introduce a
+	 * spelling this build does not know. */
+	ASSERT(p.writes[0].section != NULL && p.writes[0].key != NULL);
+	PASS();
+}
+
+TEST config_set_needs_a_section_and_a_key(void)
+{
+	ASSERT_REFUSED("{\"cmd\":\"config-set\"}");
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"osd\"}");
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"key\":\"font_size\",\"value\":32}");
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"osd\",\"key\":\"font_size\"}");
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"osd\",\"key\":\"font_size\","
+		       "\"value\":null}");
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":5,\"key\":\"font_size\",\"value\":9}");
+	PASS();
+}
+
+TEST every_writable_section_has_an_owner(void)
+{
+	/* Each section named in the key table must resolve to a daemon, or a
+	 * write would be staged that nothing ever restarts. Sampled through
+	 * the planner, which is the only door in. */
+	static const struct {
+		const char *json;
+		rmq_daemon_t owner;
+	} cases[] = {
+		{"{\"cmd\":\"config-set\",\"section\":\"sensor\",\"key\":\"fps\",\"value\":25}",
+		 RMQ_D_RVD},
+		{"{\"cmd\":\"config-set\",\"section\":\"jpeg\",\"key\":\"quality\",\"value\":80}",
+		 RMQ_D_RVD},
+		{"{\"cmd\":\"config-set\",\"section\":\"audio\",\"key\":\"enabled\","
+		 "\"value\":true}",
+		 RMQ_D_RAD},
+		{"{\"cmd\":\"config-set\",\"section\":\"http\",\"key\":\"port\",\"value\":8081}",
+		 RMQ_D_RHD},
+		{"{\"cmd\":\"config-set\",\"section\":\"osd\",\"key\":\"font_size\","
+		 "\"value\":20}",
+		 RMQ_D_ROD},
+		{"{\"cmd\":\"config-set\",\"section\":\"ircut\",\"key\":\"pulse_ms\","
+		 "\"value\":20}",
+		 RMQ_D_RIC},
+		{"{\"cmd\":\"config-set\",\"section\":\"motion\",\"key\":\"sensitivity\","
+		 "\"value\":3}",
+		 RMQ_D_RMD},
+		{"{\"cmd\":\"config-set\",\"section\":\"recording\",\"key\":\"stream\","
+		 "\"value\":1}",
+		 RMQ_D_RMR},
+		{"{\"cmd\":\"config-set\",\"section\":\"timelapse\",\"key\":\"interval\","
+		 "\"value\":30}",
+		 RMQ_D_RMR},
+		{NULL, RMQ_D_COUNT},
+	};
+
+	for (int i = 0; cases[i].json; i++) {
+		rmq_cmd_plan_t p;
+		ASSERT_ALLOWED(cases[i].json, &p);
+		ASSERT_EQm(cases[i].json, cases[i].owner, p.restart_owner);
+		ASSERTm(cases[i].json, p.restart_owner != RMQ_D_COUNT);
+	}
+	PASS();
+}
+
+TEST live_commands_stay_out_of_the_config_plan(void)
+{
+	rmq_cmd_plan_t p;
+
+	/* A live command still produces a daemon request and no writes, so
+	 * the two tiers cannot be confused by whoever handles the plan. */
+	ASSERT_ALLOWED("{\"cmd\":\"set-volume\",\"value\":50}", &p);
+	ASSERT_EQ(RMQ_PLAN_DAEMON, p.kind);
+	ASSERT_EQ(0, p.write_count);
+	PASS();
+}
+
 SUITE(rmq_cmd_suite)
 {
 	RUN_TEST(refuses_the_named_hazards);
@@ -363,4 +606,14 @@ SUITE(rmq_cmd_suite)
 	RUN_TEST(marks_only_persisting_commands);
 	RUN_TEST(audio_stages_keep_their_own_ranges);
 	RUN_TEST(every_refusal_explains_itself);
+
+	RUN_TEST(refuses_config_writes_outside_the_key_table);
+	RUN_TEST(accepts_a_single_write_and_routes_it);
+	RUN_TEST(renders_every_value_as_the_file_spells_it);
+	RUN_TEST(enforces_types_and_ranges_on_writes);
+	RUN_TEST(applies_a_values_map_all_or_nothing);
+	RUN_TEST(names_writes_from_the_table_not_the_payload);
+	RUN_TEST(config_set_needs_a_section_and_a_key);
+	RUN_TEST(every_writable_section_has_an_owner);
+	RUN_TEST(live_commands_stay_out_of_the_config_plan);
 }

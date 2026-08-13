@@ -2233,6 +2233,7 @@ static int handle_config_cmd(const char *cmd, const char *cmd_json, rvd_state_t 
 	if (strcmp(cmd, "status") == 0) {
 		cJSON *r = cJSON_CreateObject();
 		cJSON_AddStringToObject(r, "status", "ok");
+		cJSON_AddBoolToObject(r, "ready", atomic_load(&st->pipeline_ready));
 		cJSON *arr = cJSON_AddArrayToObject(r, "streams");
 		for (int i = 0; i < st->stream_count; i++) {
 			uint32_t avg_br = 0;

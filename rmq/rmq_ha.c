@@ -41,10 +41,14 @@ static const char *category_name(ha_category_t c)
  * Diagnostics ship disabled. They are the majority of the entity count and
  * the minority of what anyone looks at, and every one of them costs a row in
  * the entity registry and a state write on each poll whether or not it is
- * ever read. Enabling one is two clicks; wading through thirteen to find the
+ * ever read. Enabling one is two clicks; wading through a dozen to find the
  * two that matter is the cost of the other default.
  *
- * Home Assistant applies this only when it first creates an entity, so a
+ * Restart-tier controls ship disabled too, for a different reason — see
+ * ha_control_t below — so the call sites combine the two rather than this
+ * deciding on its own.
+ *
+ * Home Assistant applies either only when it first creates an entity, so a
  * camera already discovered keeps whatever it has. Clearing the discovery
  * topic and letting it republish is what re-applies it.
  */
@@ -62,6 +66,10 @@ typedef struct {
 	const char *icon;      /* NULL for none */
 	ha_category_t cat;
 	rmq_daemon_t owner; /* component exists only while this daemon runs */
+
+	/* When set, the entity is a binary_sensor rather than a sensor, and
+	 * this is the Jinja expression that makes it ON. */
+	const char *bin_on;
 } ha_entity_t;
 
 /*
@@ -71,45 +79,37 @@ typedef struct {
 static const ha_entity_t entities[] = {
 	/* -- Primary: what an operator actually looks at -- */
 	{"ir_state", "Day/night", "ir.state", NULL, NULL, "mdi:theme-light-dark", CAT_PRIMARY,
-	 RMQ_D_RIC},
+	 RMQ_D_RIC, NULL},
 	{"rtsp_clients", "RTSP viewers", "rtsp.clients", NULL, NULL, "mdi:account-eye", CAT_PRIMARY,
-	 RMQ_D_RSD},
+	 RMQ_D_RSD, NULL},
 
-	/* -- Diagnostic: video. The configured bitrate, frame rate and GOP are
-	 *    controls rather than sensors, so only what cannot be set from
-	 *    here is a reading: the negotiated format, and what the encoder
-	 *    actually delivered against its target. -- */
-	{"stream0_resolution", "Main resolution", "stream0.resolution", NULL, NULL,
-	 "mdi:television", CAT_DIAGNOSTIC, RMQ_D_RVD},
-	{"stream0_codec", "Main codec", "stream0.codec", NULL, NULL, "mdi:video", CAT_DIAGNOSTIC,
-	 RMQ_D_RVD},
+	/* -- Diagnostic: video. Anything settable is a control rather than a
+	 *    sensor, so what is left here is only what the camera reports back
+	 *    and no one sets: what the encoder actually delivered against its
+	 *    target. -- */
 	{"stream0_avg_bitrate", "Main bitrate (actual)", "stream0.avg_bitrate", "bit/s",
-	 "data_rate", NULL, CAT_DIAGNOSTIC, RMQ_D_RVD},
-	{"stream1_resolution", "Sub resolution", "stream1.resolution", NULL, NULL, "mdi:television",
-	 CAT_DIAGNOSTIC, RMQ_D_RVD},
+	 "data_rate", NULL, CAT_DIAGNOSTIC, RMQ_D_RVD, NULL},
 	{"stream1_avg_bitrate", "Sub bitrate (actual)", "stream1.avg_bitrate", "bit/s", "data_rate",
-	 NULL, CAT_DIAGNOSTIC, RMQ_D_RVD},
+	 NULL, CAT_DIAGNOSTIC, RMQ_D_RVD, NULL},
 
 	/* -- Diagnostic: exposure. Raw platform units, not lux or seconds:
 	 *    total_gain is the vendor's own scale (SigmaStar x1024), and
 	 *    presenting it as anything else would invent precision. -- */
 	{"total_gain", "Total gain (raw)", "ir.total_gain", NULL, NULL, "mdi:brightness-6",
-	 CAT_DIAGNOSTIC, RMQ_D_RIC},
+	 CAT_DIAGNOSTIC, RMQ_D_RIC, NULL},
 	{"exposure_us", "Exposure", "ir.exposure_us", "µs", NULL, "mdi:camera-iris", CAT_DIAGNOSTIC,
-	 RMQ_D_RIC},
+	 RMQ_D_RIC, NULL},
 	{"ae_luma", "AE luma", "ir.ae_luma", NULL, NULL, "mdi:brightness-percent", CAT_DIAGNOSTIC,
-	 RMQ_D_RIC},
-
-	/* -- Diagnostic: audio -- */
-	{"audio_codec", "Audio codec", "audio.codec", NULL, NULL, "mdi:waveform", CAT_DIAGNOSTIC,
-	 RMQ_D_RAD},
-	{"audio_sample_rate", "Audio sample rate", "audio.sample_rate", "Hz", NULL, "mdi:sine-wave",
-	 CAT_DIAGNOSTIC, RMQ_D_RAD},
+	 RMQ_D_RIC, NULL},
 
 	/* -- Diagnostic: system. Owner RMQ_D_COUNT means "always present". -- */
+	/* Why a control can read back its old value: the restart tier writes
+	 * the file, and nothing changes until the daemon has re-read it. */
+	{"restart_pending", "Restart pending", NULL, NULL, NULL, "mdi:restart-alert",
+	 CAT_DIAGNOSTIC, RMQ_D_COUNT, "value_json.restart.pending | default(false)"},
 	{"daemons_up", "Daemons running", "daemons_up", NULL, NULL, "mdi:cogs", CAT_DIAGNOSTIC,
-	 RMQ_D_COUNT},
-	{"uptime", "Uptime", "uptime", "s", "duration", NULL, CAT_DIAGNOSTIC, RMQ_D_COUNT},
+	 RMQ_D_COUNT, NULL},
+	{"uptime", "Uptime", "uptime", "s", "duration", NULL, CAT_DIAGNOSTIC, RMQ_D_COUNT, NULL},
 };
 
 static const int entity_count = (int)(sizeof(entities) / sizeof(entities[0]));
@@ -148,9 +148,34 @@ typedef struct {
 	int min, max, step; /* CTRL_NUMBER */
 	const char *unit;
 	const char *const *options; /* CTRL_SELECT, NULL-terminated */
+
+	/*
+	 * Restart-tier controls ship disabled whatever their category. Using
+	 * one costs an interruption to video or audio, which is not what a
+	 * control sitting on the device page looks like it will do, so it is
+	 * enabled deliberately or not at all.
+	 */
+	bool restarts;
 } ha_control_t;
 
 static const char *const opt_daynight[] = {"auto", "day", "night", NULL};
+static const char *const opt_vcodec[] = {"h264", "h265", NULL};
+static const char *const opt_acodec[] = {"pcmu", "pcma", "l16", "aac", "opus", NULL};
+static const char *const opt_arate[] = {"8000", "16000", "32000", "48000", NULL};
+
+/*
+ * A list rather than a pair of width/height boxes: the sensor supports a
+ * handful of modes, and a free-typed size the ISP cannot produce fails at
+ * pipeline init — after the restart, with no picture left to explain it.
+ *
+ * A camera running a size that is not on this list shows the control blank
+ * until it is set, since Home Assistant has no option matching the state. The
+ * list is therefore the common set rather than a claim about any one sensor;
+ * the schema in Phase 5 is where it stops being guesswork.
+ */
+static const char *const opt_resolution[] = {"1920x1080", "1280x720", "1024x576",
+					     "800x448",	  "640x360",  "640x480",
+					     "480x270",	  "320x240",  NULL};
 
 /*
  * Ranges here are the ones rmq_cmd.c enforces. They are repeated rather than
@@ -281,6 +306,100 @@ static const ha_control_t controls[] = {
 	 .max = 31,
 	 .step = 1},
 
+	/*
+	 * Restart tier. These write raptor.conf and bounce the daemon that
+	 * reads it, so the state they display goes on reporting the old value
+	 * until that has happened — which is what "Restart pending" is for.
+	 *
+	 * Resolution is one control writing two keys, which is the whole point
+	 * of the `values` form: a width applied without its height would be a
+	 * configuration nobody asked for, and briefly the live one.
+	 */
+	{.key = "stream0_resolution_set",
+	 .name = "Main resolution",
+	 .kind = CTRL_SELECT,
+	 .icon = "mdi:television",
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_RVD,
+	 .value = "stream0.resolution",
+	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"stream0\",\"values\":"
+		    "{\"width\":{{ value.split('x')[0] | int }},"
+		    "\"height\":{{ value.split('x')[1] | int }}}}",
+	 .options = opt_resolution,
+	 .restarts = true},
+	{.key = "stream1_resolution_set",
+	 .name = "Sub resolution",
+	 .kind = CTRL_SELECT,
+	 .icon = "mdi:television",
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_RVD,
+	 .value = "stream1.resolution",
+	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"stream1\",\"values\":"
+		    "{\"width\":{{ value.split('x')[0] | int }},"
+		    "\"height\":{{ value.split('x')[1] | int }}}}",
+	 .options = opt_resolution,
+	 .restarts = true},
+
+	{.key = "stream0_codec_set",
+	 .name = "Main codec",
+	 .kind = CTRL_SELECT,
+	 .icon = "mdi:video",
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_RVD,
+	 .value = "stream0.codec",
+	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"stream0\",\"key\":\"codec\","
+		    "\"value\":\"{{ value }}\"}",
+	 .options = opt_vcodec,
+	 .restarts = true},
+	{.key = "stream1_codec_set",
+	 .name = "Sub codec",
+	 .kind = CTRL_SELECT,
+	 .icon = "mdi:video",
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_RVD,
+	 .value = "stream1.codec",
+	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"stream1\",\"key\":\"codec\","
+		    "\"value\":\"{{ value }}\"}",
+	 .options = opt_vcodec,
+	 .restarts = true},
+
+	{.key = "audio_codec_set",
+	 .name = "Audio codec",
+	 .kind = CTRL_SELECT,
+	 .icon = "mdi:waveform",
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_RAD,
+	 .value = "audio.codec",
+	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"audio\",\"key\":\"codec\","
+		    "\"value\":\"{{ value }}\"}",
+	 .options = opt_acodec,
+	 .restarts = true},
+	{.key = "audio_sample_rate_set",
+	 .name = "Audio sample rate",
+	 .kind = CTRL_SELECT,
+	 .icon = "mdi:sine-wave",
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_RAD,
+	 .value = "audio.sample_rate",
+	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"audio\",\"key\":\"sample_rate\","
+		    "\"value\":\"{{ value }}\"}",
+	 .options = opt_arate,
+	 .restarts = true},
+
+	{.key = "rtsp_port_set",
+	 .name = "RTSP port",
+	 .kind = CTRL_NUMBER,
+	 .icon = "mdi:lan-connect",
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_RSD,
+	 .value = "rtsp.port",
+	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"port\","
+		    "\"value\":{{ value | int }}}",
+	 .min = 1,
+	 .max = 65535,
+	 .step = 1,
+	 .restarts = true},
+
 	{.key = "request_idr",
 	 .name = "Request keyframe",
 	 .kind = CTRL_BUTTON,
@@ -301,7 +420,7 @@ static bool owner_available(rmq_daemon_t owner, const rmq_daemons_t *d)
 
 /* The fields every component carries, whatever it is. */
 static cJSON *make_common(struct rmq_state *st, const char *key, const char *name, const char *icon,
-			  ha_category_t cat, const char *platform)
+			  ha_category_t cat, bool enabled, const char *platform)
 {
 	cJSON *c = cJSON_CreateObject();
 	if (!c)
@@ -317,7 +436,7 @@ static cJSON *make_common(struct rmq_state *st, const char *key, const char *nam
 		cJSON_AddStringToObject(c, "ic", icon);
 	if (category_name(cat))
 		cJSON_AddStringToObject(c, "ent_cat", category_name(cat));
-	if (!enabled_by_default(cat))
+	if (!enabled)
 		cJSON_AddBoolToObject(c, "en", false);
 
 	return c;
@@ -326,12 +445,16 @@ static cJSON *make_common(struct rmq_state *st, const char *key, const char *nam
 /* Build one sensor entry. */
 static cJSON *make_component(struct rmq_state *st, const ha_entity_t *e)
 {
-	cJSON *c = make_common(st, e->key, e->name, e->icon, e->cat, "sensor");
+	cJSON *c = make_common(st, e->key, e->name, e->icon, e->cat, enabled_by_default(e->cat),
+			       e->bin_on ? "binary_sensor" : "sensor");
 	if (!c)
 		return NULL;
 
-	char tpl[128];
-	snprintf(tpl, sizeof(tpl), "{{ value_json.%s | default('') }}", e->value);
+	char tpl[192];
+	if (e->bin_on)
+		snprintf(tpl, sizeof(tpl), "{{ 'ON' if %s else 'OFF' }}", e->bin_on);
+	else
+		snprintf(tpl, sizeof(tpl), "{{ value_json.%s | default('') }}", e->value);
 
 	cJSON_AddStringToObject(c, "stat_t", st->topic_state);
 	cJSON_AddStringToObject(c, "val_tpl", tpl);
@@ -349,7 +472,8 @@ static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct)
 {
 	static const char *const platforms[] = {"number", "select", "switch", "button"};
 
-	cJSON *c = make_common(st, ct->key, ct->name, ct->icon, ct->cat, platforms[ct->kind]);
+	cJSON *c = make_common(st, ct->key, ct->name, ct->icon, ct->cat,
+			       enabled_by_default(ct->cat) && !ct->restarts, platforms[ct->kind]);
 	if (!c)
 		return NULL;
 

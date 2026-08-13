@@ -13,6 +13,7 @@
 
 #include "../rmq/rmq_mqtt.h"
 #include "../rmq/rmq_poll.h"
+#include "../rmq/rmq_restart.h"
 
 int rmq_mqtt_publish(rmq_mqtt_t *m, const char *topic, const void *payload, size_t len, uint8_t qos,
 		     bool retain)
@@ -44,4 +45,11 @@ rmq_daemon_t rmq_daemon_by_name(const char *name)
 {
 	(void)name;
 	return RMQ_D_COUNT;
+}
+
+void rmq_restart_stage(struct rmq_state *st, const rmq_cfg_write_t *w, rmq_daemon_t owner)
+{
+	(void)st;
+	(void)w;
+	(void)owner;
 }

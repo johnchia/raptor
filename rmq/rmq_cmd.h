@@ -18,20 +18,35 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "rmq_restart.h"
+
 struct rmq_state;
 
 /* Longest daemon request the table can produce, with room to spare. */
 #define RMQ_CMD_REQ_MAX 512
 
+typedef enum {
+	RMQ_PLAN_DAEMON = 0, /* a request for one daemon's control socket */
+	RMQ_PLAN_CONFIG,     /* edits to the config file, applied by the bridge */
+} rmq_plan_kind_t;
+
 /*
- * A validated command, ready to send. `daemon` points into static storage.
- * Kept separate from the sending so the policy is testable without a socket,
- * which is the half worth testing.
+ * A validated command, ready to act on. `daemon` points into static storage.
+ * Kept separate from the acting so the policy is testable without a socket or
+ * a config file, which is the half worth testing.
  */
 typedef struct {
+	rmq_plan_kind_t kind;
+
+	/* RMQ_PLAN_DAEMON */
 	const char *daemon;
 	char request[RMQ_CMD_REQ_MAX];
 	bool persists; /* the daemon will dirty its config, so a save is owed */
+
+	/* RMQ_PLAN_CONFIG */
+	rmq_cfg_write_t writes[RMQ_CFG_SET_MAX];
+	int write_count;
+	rmq_daemon_t restart_owner;
 } rmq_cmd_plan_t;
 
 /*

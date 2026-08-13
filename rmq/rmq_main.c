@@ -22,6 +22,7 @@
 #include "rmq.h"
 #include "rmq_cmd.h"
 #include "rmq_ha.h"
+#include "rmq_restart.h"
 
 #include <cJSON.h>
 
@@ -156,6 +157,14 @@ static void load_config(rmq_state_t *st)
 	if (st->save_debounce_ms > RMQ_SAVE_MAX_DELAY_MS)
 		st->save_debounce_ms = RMQ_SAVE_MAX_DELAY_MS;
 
+	/* Longer than the save window: what it coalesces is a daemon restart,
+	 * and commissioning a section key by key should cost one outage. */
+	st->restart_debounce_ms = rss_config_get_int(c, "mqtt", "restart_debounce_ms", 5000);
+	if (st->restart_debounce_ms < 0)
+		st->restart_debounce_ms = 0;
+	if (st->restart_debounce_ms > RMQ_RESTART_MAX_DELAY_MS)
+		st->restart_debounce_ms = RMQ_RESTART_MAX_DELAY_MS;
+
 	/* Home Assistant discovery */
 	st->ha_discovery = rss_config_get_bool(c, "mqtt", "ha_discovery", true);
 	rss_strlcpy(st->discovery_prefix,
@@ -202,11 +211,13 @@ static int rmq_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 				     "{\"status\":\"ok\",\"connected\":%s,\"host\":\"%s\","
 				     "\"port\":%d,\"tls\":%s,\"client_id\":\"%s\","
 				     "\"topic_prefix\":\"%s\",\"commands\":%s,"
-				     "\"save_pending\":%s}",
+				     "\"save_pending\":%s,\"restart_pending\":%s,"
+				     "\"staged_edits\":%d}",
 				     rmq_mqtt_connected(st->mqtt) ? "true" : "false", st->host,
 				     st->port, st->use_tls ? "true" : "false", st->client_id,
 				     st->topic_prefix, st->commands_enabled ? "true" : "false",
-				     st->save_due_ms ? "true" : "false");
+				     st->save_due_ms ? "true" : "false",
+				     st->restart_due_ms ? "true" : "false", st->cfg_write_count);
 	}
 
 	return rss_ctrl_resp_error(resp_buf, resp_buf_size, "unknown command");
@@ -281,6 +292,10 @@ static void rmq_poll_cycle(rmq_state_t *st)
 		}
 	}
 
+	/* The bridge's own state, added to the daemons': a pending restart is
+	 * the reason a control can read back the value it had a moment ago. */
+	rmq_restart_report(st, state);
+
 	char *payload = cJSON_PrintUnformatted(state);
 	cJSON_Delete(state);
 	if (!payload)
@@ -339,6 +354,18 @@ static void serve_loop(rmq_state_t *st)
 
 		if (st->save_due_ms && now >= st->save_due_ms)
 			rmq_cmd_flush_saves(st);
+
+		if (rmq_restart_due(st, now)) {
+			/*
+			 * This blocks for as long as the slowest daemon takes
+			 * to come back — tens of seconds for rvd. That is
+			 * within the keepalive, and serialising it against the
+			 * poll is deliberate: state collected mid-restart
+			 * describes a camera that does not exist yet.
+			 */
+			rmq_restart_apply(st);
+			next_poll_ms = 0; /* publish the settled state at once */
+		}
 	}
 }
 
@@ -399,6 +426,7 @@ int main(int argc, char **argv)
 	/* A change made moments before the stop is still owed to flash, and
 	 * the daemons that hold it may be going down with us. */
 	rmq_cmd_flush_saves(&st);
+	rmq_restart_flush_writes(&st);
 
 	/* A graceful DISCONNECT tells the broker to discard the will, so the
 	 * retained status would otherwise stay "online" forever. Publish the

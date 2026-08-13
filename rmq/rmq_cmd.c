@@ -4,6 +4,7 @@
 
 #include "rmq_cmd.h"
 #include "rmq.h"
+#include "rmq_restart.h"
 
 #include <rss_common.h>
 #include <rss_ipc.h>
@@ -193,9 +194,10 @@ static const cmd_arg_t args_section[] = {
 /* ------------------------------------------------------------------ */
 /* The allowlist                                                       */
 /*                                                                     */
-/* Live tier only: every command here takes effect on the running       */
-/* camera. Anything needing a daemon restart waits for the restart      */
-/* protocol, and nothing that stops a daemon appears at all.            */
+/* Live tier: every command here takes effect on the running camera     */
+/* without interrupting it. Settings that only apply on a restart go    */
+/* through config-set and the key table below, and nothing that merely  */
+/* stops a daemon appears in either.                                    */
 /* ------------------------------------------------------------------ */
 
 static const cmd_def_t commands[] = {
@@ -232,6 +234,9 @@ static const cmd_def_t commands[] = {
 
 	{"config-get-section", NULL, NULL, args_section, false},
 
+	/* `config-set` is deliberately absent: it is not a daemon request, so
+	 * it has its own table below and its own planner. */
+
 	{NULL, NULL, NULL, NULL, false},
 };
 
@@ -240,6 +245,162 @@ static const cmd_def_t *find_command(const char *name)
 	for (int i = 0; commands[i].name; i++) {
 		if (strcmp(commands[i].name, name) == 0)
 			return &commands[i];
+	}
+	return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/* The writable config keys                                            */
+/*                                                                     */
+/* Restart tier: these change the file rather than the running daemon,  */
+/* so the owner is restarted to pick them up.                           */
+/*                                                                     */
+/* Every value here is an integer, a boolean or a closed enum. There is */
+/* no string type on purpose — that single omission is what keeps every */
+/* path, format string, endpoint alias and credential in raptor.conf    */
+/* unreachable from the network, without a rule naming any of them. It  */
+/* also bounds what a write can be: no value from outside can be longer */
+/* than the number or the table entry it is checked against.            */
+/* ------------------------------------------------------------------ */
+
+typedef enum {
+	V_INT = 0,
+	V_BOOL,
+	V_ENUM,
+} val_type_t;
+
+typedef struct {
+	const char *section;
+	const char *key;
+	val_type_t type;
+	int min, max;		    /* V_INT */
+	const char *const *choices; /* V_ENUM, NULL-terminated */
+} cfg_key_t;
+
+/*
+ * Which daemon re-reads a section. Mirrors raptorctl's own map
+ * (raptorctl_config.c), extended with the sections raptor has gained since.
+ *
+ * Unlike the readable list above, [rtsp] and [http] appear here: a section
+ * that cannot be read in bulk can still have individual keys written, and the
+ * password is simply not one of the keys the table names.
+ */
+static const struct {
+	const char *section;
+	rmq_daemon_t owner;
+} write_owner[] = {
+	{"sensor", RMQ_D_RVD}, {"stream0", RMQ_D_RVD},	 {"stream1", RMQ_D_RVD},
+	{"jpeg", RMQ_D_RVD},   {"audio", RMQ_D_RAD},	 {"rtsp", RMQ_D_RSD},
+	{"http", RMQ_D_RHD},   {"osd", RMQ_D_ROD},	 {"ircut", RMQ_D_RIC},
+	{"motion", RMQ_D_RMD}, {"recording", RMQ_D_RMR}, {"timelapse", RMQ_D_RMR},
+	{NULL, RMQ_D_COUNT},
+};
+
+static rmq_daemon_t write_section_owner(const char *section)
+{
+	for (int i = 0; write_owner[i].section; i++) {
+		if (strcmp(section, write_owner[i].section) == 0)
+			return write_owner[i].owner;
+	}
+	return RMQ_D_COUNT;
+}
+
+static const char *const choices_vcodec[] = {"h264", "h265", NULL};
+static const char *const choices_acodec[] = {"pcmu", "pcma", "l16", "aac", "opus", NULL};
+static const char *const choices_ainput[] = {"amic", "dmic", NULL};
+static const char *const choices_arate[] = {"8000", "16000", "32000", "48000", NULL};
+static const char *const choices_trigger[] = {"luma", "gain", "adc", "photo", NULL};
+static const char *const choices_algorithm[] = {"move", "base_move", "persondet", "yolo", NULL};
+static const char *const choices_recmode[] = {"continuous", "motion", "both", NULL};
+
+static const cfg_key_t cfg_keys[] = {
+	/* -- Sensor -- */
+	{"sensor", "fps", V_INT, 1, 120, NULL},
+	{"sensor", "antiflicker", V_INT, 0, 2, NULL},
+
+	/* -- Video. Resolution is the reason this tier exists at all: an
+	 *    encoder is created at its size and cannot be resized. -- */
+	{"stream0", "width", V_INT, 160, 4096, NULL},
+	{"stream0", "height", V_INT, 120, 4096, NULL},
+	{"stream0", "codec", V_ENUM, 0, 0, choices_vcodec},
+	{"stream0", "profile", V_INT, 0, 2, NULL},
+	{"stream0", "osd_enabled", V_BOOL, 0, 0, NULL},
+	{"stream0", "jpeg", V_BOOL, 0, 0, NULL},
+	{"stream1", "enabled", V_BOOL, 0, 0, NULL},
+	{"stream1", "width", V_INT, 160, 4096, NULL},
+	{"stream1", "height", V_INT, 120, 4096, NULL},
+	{"stream1", "codec", V_ENUM, 0, 0, choices_vcodec},
+	{"stream1", "profile", V_INT, 0, 2, NULL},
+	{"stream1", "osd_enabled", V_BOOL, 0, 0, NULL},
+	{"stream1", "jpeg", V_BOOL, 0, 0, NULL},
+
+	/* -- Snapshots -- */
+	{"jpeg", "enabled", V_BOOL, 0, 0, NULL},
+	{"jpeg", "quality", V_INT, 1, 100, NULL},
+	{"jpeg", "fps", V_INT, 1, 30, NULL},
+	{"jpeg", "idle", V_BOOL, 0, 0, NULL},
+
+	/* -- Audio -- */
+	{"audio", "enabled", V_BOOL, 0, 0, NULL},
+	{"audio", "input", V_ENUM, 0, 0, choices_ainput},
+	{"audio", "sample_rate", V_ENUM, 0, 0, choices_arate},
+	{"audio", "codec", V_ENUM, 0, 0, choices_acodec},
+	{"audio", "bitrate", V_INT, 8000, 320000, NULL},
+
+	/* -- RTSP and HTTP. Both sections hold a username and password, and
+	 *    neither appears among the keys, so the credential is out of
+	 *    reach in the same way an unnamed command is. -- */
+	{"rtsp", "enabled", V_BOOL, 0, 0, NULL},
+	{"rtsp", "port", V_INT, 1, 65535, NULL},
+	{"rtsp", "max_clients", V_INT, 1, 32, NULL},
+	{"rtsp", "session_timeout", V_INT, 10, 3600, NULL},
+	{"rtsp", "idr_on_join", V_BOOL, 0, 0, NULL},
+	{"http", "enabled", V_BOOL, 0, 0, NULL},
+	{"http", "port", V_INT, 1, 65535, NULL},
+	{"http", "max_clients", V_INT, 1, 32, NULL},
+
+	/* -- OSD -- */
+	{"osd", "enabled", V_BOOL, 0, 0, NULL},
+	{"osd", "font_size", V_INT, 8, 96, NULL},
+	{"osd", "font_stroke", V_INT, 0, 5, NULL},
+
+	/* -- Day/night. The thresholds are live commands, not writes. -- */
+	{"ircut", "enabled", V_BOOL, 0, 0, NULL},
+	{"ircut", "trigger", V_ENUM, 0, 0, choices_trigger},
+	{"ircut", "pulse_ms", V_INT, 1, 1000, NULL},
+
+	/* -- Motion -- */
+	{"motion", "enabled", V_BOOL, 0, 0, NULL},
+	{"motion", "algorithm", V_ENUM, 0, 0, choices_algorithm},
+	{"motion", "sensitivity", V_INT, 0, 5, NULL},
+	{"motion", "cooldown_sec", V_INT, 1, 3600, NULL},
+	{"motion", "record", V_BOOL, 0, 0, NULL},
+	{"motion", "record_post_sec", V_INT, 0, 600, NULL},
+
+	/* -- Recording. storage_path is absent with the rest of the strings,
+	 *    which also keeps the write path away from the filesystem. -- */
+	{"recording", "enabled", V_BOOL, 0, 0, NULL},
+	{"recording", "mode", V_ENUM, 0, 0, choices_recmode},
+	{"recording", "stream", V_INT, 0, 1, NULL},
+	{"recording", "audio", V_BOOL, 0, 0, NULL},
+	{"recording", "segment_minutes", V_INT, 1, 1440, NULL},
+	{"recording", "max_storage_mb", V_INT, 0, 1000000, NULL},
+	{"recording", "prebuffer_sec", V_INT, 0, 5, NULL},
+
+	/* -- Timelapse -- */
+	{"timelapse", "enabled", V_BOOL, 0, 0, NULL},
+	{"timelapse", "interval", V_INT, 2, 86400, NULL},
+	{"timelapse", "playback_fps", V_INT, 1, 120, NULL},
+	{"timelapse", "max_mb", V_INT, 0, 1000000, NULL},
+
+	{NULL, NULL, V_INT, 0, 0, NULL},
+};
+
+static const cfg_key_t *cfg_key_find(const char *section, const char *key)
+{
+	for (int i = 0; cfg_keys[i].section; i++) {
+		if (strcmp(cfg_keys[i].section, section) == 0 && strcmp(cfg_keys[i].key, key) == 0)
+			return &cfg_keys[i];
 	}
 	return NULL;
 }
@@ -322,6 +483,162 @@ static int add_arg(cJSON *req, const cJSON *in, const cmd_arg_t *a, char *err, s
 	return -1;
 }
 
+/* ------------------------------------------------------------------ */
+/* config-set                                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Render one JSON value to the string the config file will hold. Everything
+ * written comes from the table — the enum's own spelling, or a number this
+ * function formatted — so no byte of the payload reaches the file verbatim.
+ */
+static int render_value(const cfg_key_t *k, const cJSON *v, char *out, size_t outsz, char *err,
+			size_t errsz)
+{
+	if (!v || cJSON_IsNull(v)) {
+		snprintf(err, errsz, "'%s' needs a value", k->key);
+		return -1;
+	}
+
+	if (k->type == V_BOOL) {
+		/* A JSON boolean, or the 0/1 a Home Assistant template is
+		 * likelier to render. */
+		bool on;
+		if (cJSON_IsBool(v)) {
+			on = cJSON_IsTrue(v);
+		} else if (cJSON_IsNumber(v) &&
+			   (cJSON_GetNumberValue(v) == 0 || cJSON_GetNumberValue(v) == 1)) {
+			on = cJSON_GetNumberValue(v) != 0;
+		} else {
+			snprintf(err, errsz, "'%s' must be true or false", k->key);
+			return -1;
+		}
+		snprintf(out, outsz, "%s", on ? "true" : "false");
+		return 0;
+	}
+
+	if (k->type == V_INT) {
+		if (!cJSON_IsNumber(v)) {
+			snprintf(err, errsz, "'%s' must be a number", k->key);
+			return -1;
+		}
+		double d = cJSON_GetNumberValue(v);
+		/* Range-checked as a double before narrowing, as in add_arg:
+		 * a value far outside int would otherwise wrap into range. */
+		if (!(d >= (double)k->min && d <= (double)k->max)) {
+			snprintf(err, errsz, "'%s' out of range (%d-%d)", k->key, k->min, k->max);
+			return -1;
+		}
+		if (d != (double)(long long)d) {
+			snprintf(err, errsz, "'%s' must be a whole number", k->key);
+			return -1;
+		}
+		snprintf(out, outsz, "%d", (int)d);
+		return 0;
+	}
+
+	/* V_ENUM. A number is accepted as well as a string so that the numeric
+	 * enums — sample rate is the one — still match when a template renders
+	 * 16000 rather than "16000". */
+	char given[RMQ_CFG_VAL_MAX];
+	if (cJSON_IsString(v) && v->valuestring) {
+		rss_strlcpy(given, v->valuestring, sizeof(given));
+	} else if (cJSON_IsNumber(v) &&
+		   cJSON_GetNumberValue(v) == (double)(long long)cJSON_GetNumberValue(v)) {
+		snprintf(given, sizeof(given), "%lld", (long long)cJSON_GetNumberValue(v));
+	} else {
+		snprintf(err, errsz, "'%s' must be a string", k->key);
+		return -1;
+	}
+
+	for (int i = 0; k->choices[i]; i++) {
+		if (strcmp(given, k->choices[i]) == 0) {
+			rss_strlcpy(out, k->choices[i], outsz);
+			return 0;
+		}
+	}
+	err_choices(err, errsz, k->key, k->choices);
+	return -1;
+}
+
+static int add_write(rmq_cmd_plan_t *out, const char *section, const char *key, const cJSON *v,
+		     char *err, size_t errsz)
+{
+	const cfg_key_t *k = cfg_key_find(section, key);
+	if (!k) {
+		/* As with sections: a key that exists but holds a credential or
+		 * a path, and one that was never a key at all, read the same
+		 * from out here. */
+		snprintf(err, errsz, "'%.32s' is not a writable key of [%.24s]", key, section);
+		return -1;
+	}
+	if (out->write_count >= RMQ_CFG_SET_MAX) {
+		snprintf(err, errsz, "too many keys in one command (max %d)", RMQ_CFG_SET_MAX);
+		return -1;
+	}
+
+	rmq_cfg_write_t *w = &out->writes[out->write_count];
+	if (render_value(k, v, w->value, sizeof(w->value), err, errsz) < 0)
+		return -1;
+
+	/* Names copied from the table, not from the payload, so a line that
+	 * reaches raptor.conf is spelled the way this build spells it. */
+	rss_strlcpy(w->section, k->section, sizeof(w->section));
+	rss_strlcpy(w->key, k->key, sizeof(w->key));
+	out->write_count++;
+	return 0;
+}
+
+/*
+ * Two shapes, one path: `key`/`value` for a single edit, or a `values` map to
+ * commission a whole section in one message. The map is all-or-nothing — one
+ * bad key refuses the lot — because a half-applied section is a configuration
+ * nobody chose.
+ */
+static int plan_config_set(const cJSON *root, rmq_cmd_plan_t *out, char *err, size_t errsz)
+{
+	const cJSON *sec = cJSON_GetObjectItemCaseSensitive(root, "section");
+	if (!cJSON_IsString(sec) || !sec->valuestring) {
+		snprintf(err, errsz, "missing 'section'");
+		return -1;
+	}
+
+	out->restart_owner = write_section_owner(sec->valuestring);
+	if (out->restart_owner == RMQ_D_COUNT) {
+		snprintf(err, errsz, "section is not writable");
+		return -1;
+	}
+
+	const cJSON *values = cJSON_GetObjectItemCaseSensitive(root, "values");
+	if (values) {
+		if (!cJSON_IsObject(values)) {
+			snprintf(err, errsz, "'values' must be an object");
+			return -1;
+		}
+		const cJSON *v = NULL;
+		cJSON_ArrayForEach(v, values)
+		{
+			if (!v->string)
+				continue;
+			if (add_write(out, sec->valuestring, v->string, v, err, errsz) < 0)
+				return -1;
+		}
+		if (out->write_count == 0) {
+			snprintf(err, errsz, "'values' names no keys");
+			return -1;
+		}
+		return 0;
+	}
+
+	const cJSON *key = cJSON_GetObjectItemCaseSensitive(root, "key");
+	if (!cJSON_IsString(key) || !key->valuestring) {
+		snprintf(err, errsz, "missing 'key' or 'values'");
+		return -1;
+	}
+	return add_write(out, sec->valuestring, key->valuestring,
+			 cJSON_GetObjectItemCaseSensitive(root, "value"), err, errsz);
+}
+
 int rmq_cmd_plan(const char *json, rmq_cmd_plan_t *out, char *err, size_t errsz)
 {
 	memset(out, 0, sizeof(*out));
@@ -342,6 +659,15 @@ int rmq_cmd_plan(const char *json, rmq_cmd_plan_t *out, char *err, size_t errsz)
 		snprintf(err, errsz, "missing 'cmd'");
 		cJSON_Delete(root);
 		return -1;
+	}
+
+	/* Handled apart from the table because it produces edits rather than a
+	 * daemon request, and is checked against its own allowlist. */
+	if (strcmp(cmd->valuestring, "config-set") == 0) {
+		out->kind = RMQ_PLAN_CONFIG;
+		int rc = plan_config_set(root, out, err, errsz);
+		cJSON_Delete(root);
+		return rc;
 	}
 
 	const cmd_def_t *def = find_command(cmd->valuestring);
@@ -550,6 +876,29 @@ void rmq_cmd_handle(rmq_state_t *st, const char *topic, const uint8_t *payload, 
 		return;
 	}
 	free(json);
+
+	if (plan.kind == RMQ_PLAN_CONFIG) {
+		for (int i = 0; i < plan.write_count; i++)
+			rmq_restart_stage(st, &plan.writes[i], plan.restart_owner);
+
+		const char *owner = rmq_daemon_name(plan.restart_owner);
+		RSS_INFO("cmd: staged %d config edit(s) for %s", plan.write_count, owner);
+
+		/*
+		 * Answered as accepted, not as applied: the edit is staged and
+		 * the restart is still ahead of it. The result says which
+		 * daemon will bounce, so a caller that cares can wait for the
+		 * restart entity rather than guess.
+		 */
+		cJSON *r = cJSON_CreateObject();
+		if (r) {
+			cJSON_AddStringToObject(r, "status", "staged");
+			cJSON_AddNumberToObject(r, "edits", plan.write_count);
+			cJSON_AddStringToObject(r, "restarts", owner);
+		}
+		publish_result(st, cmd_name, nonce[0] ? nonce : NULL, NULL, r);
+		return;
+	}
 
 	char sock[128];
 	snprintf(sock, sizeof(sock), RSS_SOCK_FMT, plan.daemon);

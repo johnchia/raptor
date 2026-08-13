@@ -13,6 +13,7 @@
 
 #include "rmq_mqtt.h"
 #include "rmq_poll.h"
+#include "rmq_restart.h"
 
 /* Derived topics are the prefix plus a suffix, so the prefix is capped low
  * enough that appending the longest suffix cannot truncate. */
@@ -45,6 +46,7 @@ struct rmq_state {
 	int reconnect_delay_ms;
 	int poll_interval_sec;
 	int save_debounce_ms;
+	int restart_debounce_ms;
 
 	/* Derived topics */
 	char topic_status[RMQ_TOPIC_MAX];
@@ -66,6 +68,16 @@ struct rmq_state {
 	bool save_owed[RMQ_D_COUNT];
 	uint64_t save_due_ms;	/* 0 = nothing owed */
 	uint64_t save_first_ms; /* when the oldest owed change arrived */
+
+	/* Restart tier: edits a daemon only sees when it re-reads the config,
+	 * held until the burst ends so a section costs one write and one
+	 * restart rather than one of each per key. */
+	rmq_cfg_write_t cfg_writes[RMQ_CFG_PENDING_MAX];
+	int cfg_write_count;
+	bool restart_owed[RMQ_D_COUNT];
+	uint64_t restart_due_ms;   /* 0 = nothing staged */
+	uint64_t restart_first_ms; /* when the oldest staged edit arrived */
+	char restart_error[160];   /* last failure, until the next apply */
 
 	/* Control socket */
 	rss_ctrl_t *ctrl;
