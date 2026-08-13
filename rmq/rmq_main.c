@@ -1,15 +1,15 @@
 /*
  * rmq_main.c -- Raptor MQTT bridge
  *
- * Holds one broker connection on behalf of the whole camera and, in later
- * phases, fans commands out to the per-daemon control sockets. This first
- * phase establishes only presence: a retained status topic plus a Last Will,
- * so the broker knows whether the camera is alive. It subscribes to nothing
- * and accepts no commands, so there is no path from the network to any daemon.
+ * Holds one broker connection on behalf of the whole camera: a retained status
+ * topic backed by a Last Will so the broker knows whether it is alive, a
+ * periodic state document assembled from the per-daemon control sockets, and
+ * one command topic that fans back out to those same sockets.
  *
  * One process rather than an MQTT client inside each daemon: the payloads are
- * untrusted network input, and raptor keeps that out of the address space that
- * owns the hardware.
+ * untrusted network input, and raptor keeps that out of the address spaces
+ * that own the hardware. What may cross from that input to a daemon is the
+ * allowlist in rmq_cmd.c, which is the whole of the trust boundary.
  */
 
 #include <stdio.h>
@@ -20,6 +20,7 @@
 #include <sys/select.h>
 
 #include "rmq.h"
+#include "rmq_cmd.h"
 #include "rmq_ha.h"
 
 #include <cJSON.h>
@@ -140,6 +141,20 @@ static void load_config(rmq_state_t *st)
 
 	snprintf(st->topic_status, sizeof(st->topic_status), "%s/status", st->topic_prefix);
 	snprintf(st->topic_state, sizeof(st->topic_state), "%s/state", st->topic_prefix);
+	snprintf(st->topic_cmd, sizeof(st->topic_cmd), "%s/cmd", st->topic_prefix);
+	snprintf(st->topic_result, sizeof(st->topic_result), "%s/result", st->topic_prefix);
+
+	/* Commands default on: this bridge is the camera's only management
+	 * surface, so a read-only bridge is the unusual case rather than the
+	 * safe default. Turning it off leaves the state and discovery topics
+	 * exactly as they were. */
+	st->commands_enabled = rss_config_get_bool(c, "mqtt", "commands", true);
+
+	st->save_debounce_ms = rss_config_get_int(c, "mqtt", "save_debounce_ms", 3000);
+	if (st->save_debounce_ms < 0)
+		st->save_debounce_ms = 0;
+	if (st->save_debounce_ms > RMQ_SAVE_MAX_DELAY_MS)
+		st->save_debounce_ms = RMQ_SAVE_MAX_DELAY_MS;
 
 	/* Home Assistant discovery */
 	st->ha_discovery = rss_config_get_bool(c, "mqtt", "ha_discovery", true);
@@ -186,10 +201,12 @@ static int rmq_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 		return rss_ctrl_resp(resp_buf, resp_buf_size,
 				     "{\"status\":\"ok\",\"connected\":%s,\"host\":\"%s\","
 				     "\"port\":%d,\"tls\":%s,\"client_id\":\"%s\","
-				     "\"topic_prefix\":\"%s\"}",
+				     "\"topic_prefix\":\"%s\",\"commands\":%s,"
+				     "\"save_pending\":%s}",
 				     rmq_mqtt_connected(st->mqtt) ? "true" : "false", st->host,
 				     st->port, st->use_tls ? "true" : "false", st->client_id,
-				     st->topic_prefix);
+				     st->topic_prefix, st->commands_enabled ? "true" : "false",
+				     st->save_due_ms ? "true" : "false");
 	}
 
 	return rss_ctrl_resp_error(resp_buf, resp_buf_size, "unknown command");
@@ -220,6 +237,11 @@ static int rmq_connect(rmq_state_t *st)
 
 	if (rmq_mqtt_connect(st->mqtt, &opts) < 0)
 		return -1;
+
+	/* Before announcing availability, so the camera is never advertised
+	 * as online during the window where a command would be missed. */
+	if (rmq_cmd_subscribe(st) < 0)
+		RSS_WARN("mqtt: subscribe to %s failed, commands will not arrive", st->topic_cmd);
 
 	/* Retained so a subscriber connecting later still learns the state. */
 	rmq_mqtt_publish(st->mqtt, st->topic_status, RMQ_STATUS_ONLINE, strlen(RMQ_STATUS_ONLINE),
@@ -314,7 +336,15 @@ static void serve_loop(rmq_state_t *st)
 			rmq_poll_cycle(st);
 			next_poll_ms = now + (uint64_t)st->poll_interval_sec * 1000;
 		}
+
+		if (st->save_due_ms && now >= st->save_due_ms)
+			rmq_cmd_flush_saves(st);
 	}
+}
+
+static void on_message(const char *topic, const uint8_t *payload, size_t len, void *user)
+{
+	rmq_cmd_handle(user, topic, payload, len);
 }
 
 int main(int argc, char **argv)
@@ -347,8 +377,15 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	rmq_mqtt_set_message_cb(st.mqtt, on_message, &st);
+
 	RSS_INFO("rmq: broker %s:%d, client '%s', prefix '%s'", st.host, st.port, st.client_id,
 		 st.topic_prefix);
+	if (st.commands_enabled)
+		RSS_INFO("rmq: commands accepted on %s, results on %s", st.topic_cmd,
+			 st.topic_result);
+	else
+		RSS_INFO("rmq: commands disabled, read-only bridge");
 
 	rss_mkdir_p(RSS_RUN_DIR);
 	st.ctrl = rss_ctrl_listen(RSS_RUN_DIR "/rmq.sock");
@@ -358,6 +395,10 @@ int main(int argc, char **argv)
 	serve_loop(&st);
 
 	RSS_INFO("rmq shutting down");
+
+	/* A change made moments before the stop is still owed to flash, and
+	 * the daemons that hold it may be going down with us. */
+	rmq_cmd_flush_saves(&st);
 
 	/* A graceful DISCONNECT tells the broker to discard the will, so the
 	 * retained status would otherwise stay "online" forever. Publish the

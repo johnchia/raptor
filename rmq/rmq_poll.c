@@ -25,6 +25,15 @@ const char *rmq_daemon_name(rmq_daemon_t d)
 	return (d >= 0 && d < RMQ_D_COUNT) ? daemon_names[d] : "?";
 }
 
+rmq_daemon_t rmq_daemon_by_name(const char *name)
+{
+	for (int i = 0; name && i < RMQ_D_COUNT; i++) {
+		if (strcmp(name, daemon_names[i]) == 0)
+			return (rmq_daemon_t)i;
+	}
+	return RMQ_D_COUNT;
+}
+
 bool rmq_daemons_differ(const rmq_daemons_t *a, const rmq_daemons_t *b)
 {
 	for (int i = 0; i < RMQ_D_COUNT; i++) {
@@ -82,6 +91,15 @@ static int json_int(const cJSON *o, const char *key, int fallback)
 {
 	const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, key);
 	return cJSON_IsNumber(v) ? (int)cJSON_GetNumberValue(v) : fallback;
+}
+
+/* Copies a bool across only when the daemon reported one: an absent key means
+ * the feature is not built in, and a false would claim it is present and off. */
+static void copy_bool(cJSON *dst, const cJSON *src, const char *key)
+{
+	const cJSON *v = cJSON_GetObjectItemCaseSensitive(src, key);
+	if (cJSON_IsBool(v))
+		cJSON_AddBoolToObject(dst, key, cJSON_IsTrue(v));
 }
 
 /* rvd: per-stream encoder state. Only the encoded video channels are
@@ -181,6 +199,65 @@ static void collect_ric(cJSON *state)
 	cJSON_Delete(resp);
 }
 
+/*
+ * rad: the levels the write path can move, so a control reads back the value
+ * the hardware is actually at rather than the one last commanded.
+ */
+static void collect_rad(cJSON *state)
+{
+	cJSON *resp = ask("rad", "{\"cmd\":\"status\"}");
+	if (!resp)
+		return;
+
+	cJSON *o = cJSON_AddObjectToObject(state, "audio");
+	if (!o) {
+		cJSON_Delete(resp);
+		return;
+	}
+
+	const cJSON *codec = cJSON_GetObjectItemCaseSensitive(resp, "codec");
+	if (cJSON_IsString(codec))
+		cJSON_AddStringToObject(o, "codec", codec->valuestring);
+	cJSON_AddNumberToObject(o, "sample_rate", json_int(resp, "sample_rate", 0));
+	cJSON_AddNumberToObject(o, "volume", json_int(resp, "volume", 0));
+	cJSON_AddNumberToObject(o, "gain", json_int(resp, "gain", 0));
+	copy_bool(o, resp, "muted");
+
+	/* The speaker keys are absent unless audio output is configured, and
+	 * the effects keys unless the build carries them. */
+	copy_bool(o, resp, "ao_enabled");
+	if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(resp, "ao_enabled"))) {
+		cJSON_AddNumberToObject(o, "ao_volume", json_int(resp, "ao_volume", 0));
+		cJSON_AddNumberToObject(o, "ao_gain", json_int(resp, "ao_gain", 0));
+	}
+	copy_bool(o, resp, "aec");
+	copy_bool(o, resp, "ns");
+	copy_bool(o, resp, "hpf");
+	copy_bool(o, resp, "agc");
+
+	cJSON_Delete(resp);
+}
+
+/* rod: whether the overlay is being drawn, and how much of it there is. */
+static void collect_rod(cJSON *state)
+{
+	cJSON *resp = ask("rod", "{\"cmd\":\"config-show\"}");
+	if (!resp)
+		return;
+
+	const cJSON *cfg = cJSON_GetObjectItemCaseSensitive(resp, "config");
+	if (cJSON_IsObject(cfg)) {
+		cJSON *o = cJSON_AddObjectToObject(state, "osd");
+		if (o) {
+			copy_bool(o, cfg, "enabled");
+			cJSON_AddNumberToObject(o, "elements", json_int(cfg, "elements", 0));
+			cJSON_AddNumberToObject(o, "font_size", json_int(cfg, "font_size", 0));
+		}
+	}
+
+	cJSON_Delete(resp);
+}
+
 static void collect_system(cJSON *state)
 {
 	int len = 0;
@@ -217,6 +294,10 @@ cJSON *rmq_poll_state(rmq_daemons_t *out)
 		collect_rvd(state);
 	if (out->up[RMQ_D_RSD])
 		collect_rsd(state);
+	if (out->up[RMQ_D_RAD])
+		collect_rad(state);
+	if (out->up[RMQ_D_ROD])
+		collect_rod(state);
 	if (out->up[RMQ_D_RIC])
 		collect_ric(state);
 

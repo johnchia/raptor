@@ -21,7 +21,7 @@ CFLAGS = -Wall -Wextra -std=$(RAPTOR_STD) -D_GNU_SOURCE -g $(SAN_FLAGS) $(RAPTOR
 LDFLAGS = $(SAN_FLAGS) -lpthread -lrt -lm
 
 TEST_SRCS = main.c test_ric_json.c test_nal.c test_prebuf.c test_mux.c test_codec.c test_sdp.c test_ring.c test_rsp.c \
-            test_ctrl.c test_sign.c test_storage.c test_timelapse.c
+            test_ctrl.c test_sign.c test_storage.c test_timelapse.c test_rmq_cmd.c
 LIB_SRCS = ../ric/ric_json.c ../rmr/rmr_nal.c ../rmr/rmr_prebuf.c ../rmr/rmr_mux.c ../rmr/rmr_sign.c ../rmr/rmr_timelapse.c ../../raptor-common/src/rss_sign.c ../../raptor-common/src/rss_jpeg.c ../../raptor-common/src/rss_aac.c ../rmr/rmr_storage.c \
            ../../raptor-common/src/rss_util.c ../../raptor-common/src/rss_log.c \
            ../../raptor-common/src/cJSON.c \
@@ -29,6 +29,11 @@ LIB_SRCS = ../ric/ric_json.c ../rmr/rmr_nal.c ../rmr/rmr_prebuf.c ../rmr/rmr_mux
            ../../raptor-common/third_party/monocypher/monocypher-ed25519.c
 CTRL_SRCS = ../rvd/rvd_ctrl.c mock_hal.c \
             ../../raptor-common/src/rss_config.c ../../raptor-common/src/rss_ctrl_cmds.c
+
+# rmq_cmd.c is the MQTT command policy. mock_rmq.c stands in for the broker
+# and the daemon table it would otherwise link against; neither is reached by
+# the part under test.
+RMQ_SRCS = ../rmq/rmq_cmd.c mock_rmq.c
 IPC_SRCS = ../../raptor-ipc/src/rss_ring.c ../../raptor-ipc/src/rss_ctrl.c \
            ../../raptor-ipc/src/rss_osd_shm.c ../../raptor-ipc/src/rss_ipc_log.c
 
@@ -38,9 +43,9 @@ SDP_SRC = sdp_parse.c
 $(SDP_SRC): ../rwd/rwd_sdp.c
 	sed '/^int rwd_sdp_generate_answer/,$$d' $< > $@
 
-tests: $(TEST_SRCS) $(LIB_SRCS) $(CTRL_SRCS) $(IPC_SRCS) $(SDP_SRC) greatest.h
+tests: $(TEST_SRCS) $(LIB_SRCS) $(CTRL_SRCS) $(IPC_SRCS) $(RMQ_SRCS) $(SDP_SRC) greatest.h
 	$(CC) $(CFLAGS) -DRWD_H -include ../fuzz/fuzz_rwd_shim.h \
-		-o $@ $(TEST_SRCS) $(LIB_SRCS) $(CTRL_SRCS) $(IPC_SRCS) $(SDP_SRC) $(LDFLAGS)
+		-o $@ $(TEST_SRCS) $(LIB_SRCS) $(CTRL_SRCS) $(IPC_SRCS) $(RMQ_SRCS) $(SDP_SRC) $(LDFLAGS)
 
 test_slow_rtsp: test_slow_rtsp.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)

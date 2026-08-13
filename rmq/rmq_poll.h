@@ -37,6 +37,9 @@ typedef enum {
 
 const char *rmq_daemon_name(rmq_daemon_t d);
 
+/* Inverse of the above. Returns RMQ_D_COUNT for a name we do not know. */
+rmq_daemon_t rmq_daemon_by_name(const char *name);
+
 typedef struct {
 	bool up[RMQ_D_COUNT];
 	int up_count;
