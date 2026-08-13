@@ -146,7 +146,6 @@ typedef struct {
 	const char *payload_off; /* switch off */
 
 	int min, max, step; /* CTRL_NUMBER */
-	const char *mode;   /* CTRL_NUMBER: "box" or "slider" */
 	const char *unit;
 	const char *const *options; /* CTRL_SELECT, NULL-terminated */
 } ha_control_t;
@@ -156,7 +155,7 @@ static const char *const opt_daynight[] = {"auto", "day", "night", NULL};
 /*
  * Ranges here are the ones rmq_cmd.c enforces. They are repeated rather than
  * shared because these are a different thing: what the interface offers, not
- * what the camera accepts. A slider that stops short of the permitted range
+ * what the camera accepts. A control that stops short of the permitted range
  * is a usability choice; one that runs past it produces rejections.
  */
 static const ha_control_t controls[] = {
@@ -180,8 +179,6 @@ static const ha_control_t controls[] = {
 	 .payload = "{\"cmd\":\"osd-enable\"}",
 	 .payload_off = "{\"cmd\":\"osd-disable\"}"},
 
-	/* Bitrate spans three orders of magnitude, so it is a box rather than
-	 * a slider: no slider is readable across that range. */
 	{.key = "stream0_bitrate_set",
 	 .name = "Main bitrate",
 	 .kind = CTRL_NUMBER,
@@ -192,7 +189,6 @@ static const ha_control_t controls[] = {
 	 .min = 32000,
 	 .max = 50000000,
 	 .step = 1000,
-	 .mode = "box",
 	 .unit = "bit/s"},
 	{.key = "stream1_bitrate_set",
 	 .name = "Sub bitrate",
@@ -204,7 +200,6 @@ static const ha_control_t controls[] = {
 	 .min = 32000,
 	 .max = 50000000,
 	 .step = 1000,
-	 .mode = "box",
 	 .unit = "bit/s"},
 
 	{.key = "stream0_fps_set",
@@ -218,7 +213,6 @@ static const ha_control_t controls[] = {
 	 .min = 1,
 	 .max = 60,
 	 .step = 1,
-	 .mode = "slider",
 	 .unit = "fps"},
 	{.key = "stream1_fps_set",
 	 .name = "Sub frame rate",
@@ -231,7 +225,6 @@ static const ha_control_t controls[] = {
 	 .min = 1,
 	 .max = 60,
 	 .step = 1,
-	 .mode = "slider",
 	 .unit = "fps"},
 
 	{.key = "stream0_gop_set",
@@ -244,8 +237,7 @@ static const ha_control_t controls[] = {
 	 .cmd_tpl = "{\"cmd\":\"set-gop\",\"channel\":0,\"value\":{{ value | int }}}",
 	 .min = 1,
 	 .max = 300,
-	 .step = 1,
-	 .mode = "slider"},
+	 .step = 1},
 	{.key = "stream1_gop_set",
 	 .name = "Sub GOP",
 	 .kind = CTRL_NUMBER,
@@ -256,8 +248,7 @@ static const ha_control_t controls[] = {
 	 .cmd_tpl = "{\"cmd\":\"set-gop\",\"channel\":1,\"value\":{{ value | int }}}",
 	 .min = 1,
 	 .max = 300,
-	 .step = 1,
-	 .mode = "slider"},
+	 .step = 1},
 
 	/* Two gain stages, deliberately both exposed: volume is the digital
 	 * trim and gain the analog front end, and only the second one can
@@ -272,8 +263,7 @@ static const ha_control_t controls[] = {
 	 .cmd_tpl = "{\"cmd\":\"set-volume\",\"value\":{{ value | int }}}",
 	 .min = 0,
 	 .max = 100,
-	 .step = 1,
-	 .mode = "slider"},
+	 .step = 1},
 	{.key = "audio_gain_set",
 	 .name = "Mic gain (analog step)",
 	 .kind = CTRL_NUMBER,
@@ -284,8 +274,7 @@ static const ha_control_t controls[] = {
 	 .cmd_tpl = "{\"cmd\":\"set-gain\",\"value\":{{ value | int }}}",
 	 .min = 0,
 	 .max = 31,
-	 .step = 1,
-	 .mode = "slider"},
+	 .step = 1},
 
 	{.key = "request_idr",
 	 .name = "Request keyframe",
@@ -396,8 +385,14 @@ static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct)
 		cJSON_AddNumberToObject(c, "min", ct->min);
 		cJSON_AddNumberToObject(c, "max", ct->max);
 		cJSON_AddNumberToObject(c, "step", ct->step);
-		if (ct->mode)
-			cJSON_AddStringToObject(c, "mode", ct->mode);
+		/*
+		 * Always a box, never a slider. Home Assistant's slider offers
+		 * no text entry at all, so a value has to be dragged to — which
+		 * is hopeless for bitrate's three orders of magnitude and merely
+		 * annoying for the rest. A box still shows the current value and
+		 * still enforces min/max/step.
+		 */
+		cJSON_AddStringToObject(c, "mode", "box");
 		if (ct->unit)
 			cJSON_AddStringToObject(c, "unit_of_meas", ct->unit);
 		break;
