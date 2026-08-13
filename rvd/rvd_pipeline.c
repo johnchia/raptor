@@ -86,9 +86,9 @@ void rvd_stream_publish_info(rvd_state_t *st, int idx)
 				break;
 			}
 		}
-		rss_ring_set_stream_info(s->ring, RVD_JPEG_STREAM_ID_BASE + jpeg_idx, RSS_CODEC_JPEG,
-					 s->enc_cfg.width, s->enc_cfg.height, s->enc_cfg.fps_num,
-					 s->enc_cfg.fps_den, 0, 0);
+		rss_ring_set_stream_info(s->ring, RVD_JPEG_STREAM_ID_BASE + jpeg_idx,
+					 RSS_CODEC_JPEG, s->enc_cfg.width, s->enc_cfg.height,
+					 s->enc_cfg.fps_num, s->enc_cfg.fps_den, 0, 0);
 	} else {
 		rss_ring_set_stream_info(s->ring, idx, s->enc_cfg.codec, s->enc_cfg.width,
 					 s->enc_cfg.height, s->enc_cfg.fps_num, s->enc_cfg.fps_den,
@@ -610,16 +610,18 @@ int rvd_pipeline_init(rvd_state_t *st)
 		ret = RSS_HAL_CALL(st->ops, isp_set_sensor_fps, st->hal_ctx, sensor_fps, 1);
 		if (ret == RSS_ERR_NOTSUP) {
 			/*
-			 * Not a fault, so not a warning: the ISP tuning ops are
-			 * documented as optional ("return -ENOTSUP if unavailable",
-			 * raptor_hal.h). A backend that cannot set the sensor rate
-			 * leaves the encoder framerate as the only one that varies,
-			 * which is a working pipeline, just not the requested one.
+			 * Not a fault, so not a warning. An op a backend leaves out
+			 * answers NOTSUP through the RSS_HAL_CALL NULL guard, and a
+			 * backend may return it outright; either way the daemon is
+			 * expected to carry on (docs 10-hal-api.md 9.3). On some SoCs
+			 * the sensor rate is fixed when the mode is selected during
+			 * bring-up and cannot be changed afterwards -- the encoder
+			 * framerate is what varies there.
 			 *
-			 * Report the rate the sensor actually runs at rather than
-			 * the one that was refused. The refused number describes
-			 * nothing, and printing it invites the conclusion that the
-			 * pipeline is running at it.
+			 * Report the rate the sensor actually runs at rather than the
+			 * one that was refused. The refused number describes nothing,
+			 * and printing it invites the conclusion that the pipeline is
+			 * running at it.
 			 */
 			uint32_t num = 0, den = 0;
 			int actual = 0;
@@ -1475,24 +1477,30 @@ int rvd_stream_init(rvd_state_t *st, int idx)
 					rvd_level_idc(s->enc_cfg.width, s->enc_cfg.height));
 
 				bool jpeg_codec = (s->enc_cfg.codec == RSS_CODEC_JPEG);
+				/* Declare the ring's ref capacity at the tracking
+				 * maximum, not the encoder's nominal buffer count:
+				 * after RequestIDR+Flush the T41 encoder emits IDR
+				 * AUs from a buffer beyond max_stream_cnt, and a
+				 * buf_idx past the declared count makes publish_ref
+				 * reject exactly the keyframes (every later joiner
+				 * then starves in the keyframe hold). The stride
+				 * still describes the real per-buffer size. */
 				if (!jpeg_codec && st->refmode && st->refmode_shm &&
 				    st->enc_shm_size[idx] > 0) {
 					uint8_t cnt = s->enc_cfg.max_stream_cnt;
 					if (!cnt)
 						cnt = 2;
 					rss_ring_enable_refmode(s->ring, st->enc_shm_size[idx], 0,
-								cnt, st->enc_shm_size[idx] / cnt);
+								RSS_RING_MAX_REF_BUFS,
+								st->enc_shm_size[idx] / cnt);
 				} else if (!jpeg_codec && st->refmode && !st->refmode_shm &&
 					   st->rmem_size > 0) {
 					uint32_t actual_stride = 0;
-					uint8_t actual_cnt = s->enc_cfg.max_stream_cnt;
 					RSS_HAL_CALL(st->ops, enc_get_stream_buf_size, st->hal_ctx,
 						     s->chn, &actual_stride);
-					if (!actual_cnt)
-						actual_cnt = 2;
-					rss_ring_enable_refmode(s->ring, st->rmem_size,
-								st->rmem_mmap_offset, actual_cnt,
-								actual_stride);
+					rss_ring_enable_refmode(
+						s->ring, st->rmem_size, st->rmem_mmap_offset,
+						RSS_RING_MAX_REF_BUFS, actual_stride);
 				}
 			}
 		}

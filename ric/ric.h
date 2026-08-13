@@ -5,14 +5,15 @@
 #ifndef RIC_H
 #define RIC_H
 
-#include <rss_ipc.h>
-#include <rss_common.h>
-
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <rss_ipc.h>
+#include <rss_common.h>
+
 /* Day/night state */
 typedef enum {
+	RIC_MODE_UNSET = -1, /* startup only: forces the first set through */
 	RIC_MODE_DAY = 0,
 	RIC_MODE_NIGHT = 1,
 } ric_mode_t;
@@ -73,6 +74,8 @@ typedef struct {
 	/* AWB baseline auto-calibration */
 	bool calibrated;
 	uint8_t cal_count;
+	uint32_t cal_first_ev; /* EV of the window's first sample: the whole
+				* window must agree with it to +-13% */
 	uint32_t cal_rgain_sum;
 	uint32_t cal_bgain_sum;
 	uint16_t rgain_base;
@@ -85,8 +88,10 @@ typedef struct {
 	uint8_t ev_night_count;
 	uint8_t ev_deep_count;
 
-	/* Day detection (phase == DAY_DETECT) */
-	uint8_t day_ring_idx;
+	/* Day detection (phase == DAY_DETECT). The index counts on past
+	 * ring-full so it must not wrap back under the size and replay
+	 * the seeding return. */
+	uint32_t day_ring_idx;
 	uint32_t day_ring[PHOTO_DAY_RING_SIZE];
 	uint32_t day_ref_ev;
 	uint8_t day_trigger_count;
@@ -108,14 +113,6 @@ typedef struct {
 	uint32_t fixed_check_ev;
 	uint8_t fixed_check_count;
 
-	/* Anti-flap */
-	bool anti_flap;
-	uint8_t anti_flap_count;
-	uint32_t anti_flap_ticks;
-
-	/* Pending mode change */
-	bool change_pending;
-	uint32_t max_dgain;
 } ric_photo_state_t;
 
 /* Config from [ircut] section */
@@ -136,9 +133,15 @@ typedef struct {
 	ric_trigger_t trigger;
 
 	/* Luma trigger thresholds */
-	int night_luma;	  /* ae_luma below this → night (default 20, 0-255) */
-	int night_gain;	  /* gain above this → night regardless of luma (default 80000) */
-	int day_gain_pct; /* night→day: gain below this % of baseline → day (default 25) */
+	int night_luma;	       /* ae_luma below this → night (default 20, 0-255) */
+	int night_gain;	       /* gain above this → night regardless of luma (default 80000) */
+	int day_gain_pct;      /* night→day: gain below this % of baseline → day (default 25) */
+	int probe_gain_pct;    /* night: gain dip below this % of baseline lifts the IR
+				* LEDs for an ambient luma probe (default 90, 0 = off) */
+	int probe_holdoff_sec; /* minimum spacing between failed probes (default 60) */
+	int probe_recheck_sec; /* probe anyway after this long in night with no dip:
+				* IR wash can hide ambient light from every AE
+				* metric (default 600, 0 = off) */
 
 	/* Gain trigger thresholds (legacy, trigger=gain only) */
 	int night_threshold; /* gain above this → night */
@@ -173,6 +176,10 @@ typedef struct {
 	/* Anti-flap: cooldown after mode switch + gain baseline */
 	int cooldown_remaining;	      /* polls remaining before evaluating transitions */
 	uint32_t night_gain_baseline; /* total_gain sampled after IR LEDs stabilize */
+	uint32_t night_ev_baseline;   /* EV at the same settled moment: the probe dip
+				       * watches EV where it exists, because AE can
+				       * answer new light with exposure alone while
+				       * gain sits pinned at its floor (Wyze V3) */
 	uint32_t night_detect_gain;   /* gain at the moment night was detected */
 
 	/* Ratio-triggered day switches are verified once the IR is off:
@@ -182,10 +189,30 @@ typedef struct {
 	int day_lockout_polls; /* suppress day attempts while > 0 */
 	int day_lockout_next;  /* doubling backoff, 0 = start over */
 
+	/* IR-off ambient probe (night, luma trigger): compressed-gain
+	 * sensors floor total_gain in a lit scene long before the day
+	 * ratio can fire; the dip below the baseline is the hint, the
+	 * probe lifts the LEDs so luma becomes trustworthy. */
+	bool probe_active;
+	int probe_polls_left;	 /* settle + evaluation window countdown */
+	int probe_holdoff_polls; /* suppress probes while > 0 */
+	int probe_dip_run;	 /* consecutive dip polls before a probe fires */
+	int probe_recheck_polls; /* countdown to the next interval recheck */
+
+	/* Baseline settling: gc2053-class AE walks for many seconds after
+	 * the IR lights the scene; the cooldown extends until three
+	 * consecutive polls agree within 10% (walks step and can hold a
+	 * value briefly), within a hard cap, so the baseline reflects a
+	 * settled reading instead of a mid-walk value. */
+	uint32_t settle_prev_gain;
+	int settle_agree_run;
+	int settle_extend_left;
+
 	/* Photo mode state */
 	ric_photo_state_t photo;
 
 	/* ADC state */
+	int adc_fd;
 	bool adc_initialized;
 	int adc_fail_run;     /* consecutive failed reads, 0 while healthy */
 	bool adc_fail_warned; /* a warning has fired for the current run */
@@ -209,6 +236,7 @@ typedef struct {
 /* ric_daynight.c */
 void ric_gpio_init(ric_state_t *st);
 void ric_set_mode(ric_state_t *st, ric_mode_t mode);
+void ric_force_mode(ric_state_t *st, ric_mode_t mode);
 void ric_set_isp_mode(ric_mode_t mode);
 int ric_ircut_drive(ric_state_t *st, ric_mode_t pos);
 int ric_irled_drive(ric_state_t *st, bool bank940, bool on);

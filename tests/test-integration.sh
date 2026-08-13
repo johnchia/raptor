@@ -146,6 +146,9 @@ codec = l16
 [rtsp]
 backchannel = true
 port = 15554
+# Bounded like a real device: multi-MB autotuned sndbufs absorb client
+# stalls silently and the recovery-invariants leg's fault never fires.
+tcp_sndbuf = 65536
 
 [http]
 port = 18080
@@ -420,6 +423,35 @@ if [ -n "$SDP1" ] && echo "$SDP1" | grep -qi "H265"; then
     fi
 else
     skip "H.265 SDP" "DESCRIBE failed or codec mismatch"
+fi
+
+# ── A rate change reaches the next client's SDP ──
+# rvd republishes the ring header on set-fps, but rsd answers DESCRIBE from
+# a cache it filled when it opened the ring, and an in-place republish wakes
+# nobody. Without a refresh in the reader every client after the change is
+# still told the old rate -- which the ring header cannot show, so this goes
+# through DESCRIBE.
+sdp_framerate() {
+    rtsp_describe 15554 stream0 | sed -n 's/.*a=framerate:\([0-9][0-9]*\).*/\1/p' | head -1
+}
+
+FPS_SDP_BEFORE=$(sdp_framerate)
+"$OUT/raptorctl" rvd set-fps 0 12 > /dev/null 2>&1
+sleep 2
+FPS_SDP_AFTER=$(sdp_framerate)
+if [ "$FPS_SDP_AFTER" = "12" ] && [ "$FPS_SDP_BEFORE" != "12" ]; then
+    pass "set-fps moves a=framerate for the next client ($FPS_SDP_BEFORE -> $FPS_SDP_AFTER)"
+elif [ -z "$FPS_SDP_BEFORE" ]; then
+    skip "set-fps moves a=framerate" "no a=framerate in the SDP (DESCRIBE failed?)"
+else
+    fail "set-fps moves a=framerate for the next client" \
+        "before=$FPS_SDP_BEFORE after=$FPS_SDP_AFTER, expected 12"
+fi
+
+# Hand the following legs back the rate they had
+if [ -n "$FPS_SDP_BEFORE" ]; then
+    "$OUT/raptorctl" rvd set-fps 0 "$FPS_SDP_BEFORE" > /dev/null 2>&1
+    sleep 1
 fi
 
 # ffprobe (if available — best RTSP test tool)
@@ -814,6 +846,12 @@ echo "=== Timelapse ==="
 # with playback-spaced timestamps -- a real-time-spaced file would mean
 # the synthetic DTS path broke -- and carries the same SEI timecodes
 # and signature chain as every other recording.
+# test-logs persists across runs and the storage path splits by DATE:
+# a run that straddles midnight (or follows an earlier run) leaves
+# stale files whose date directory can sort ahead of today's, and
+# `find | head -1` then probes a 1-frame leftover instead of this
+# run's file. Start from an empty tree.
+rm -rf "$LOG_DIR/rec/timelapse"
 check_contains "timelapse initially off" '"enabled":[[:space:]]*false' \
     "$OUT/raptorctl" rmr timelapse-status
 check_contains "timelapse-enable" "ok" "$OUT/raptorctl" rmr timelapse-enable
@@ -1028,6 +1066,7 @@ sleep 3
 pkill -f "$OUT/rvd" 2>/dev/null || true
 sleep 2
 start_daemon rvd "$OUT/rvd" -c "$CONFIG" -f -d
+start_daemon rad "$OUT/rad" -c "$CONFIG" -f -d
 sleep 3
 
 if timeout -k 3 15 ffprobe -v error -rtsp_transport tcp \
@@ -1040,6 +1079,110 @@ fi
 kill $ZOMBIE_PID 2>/dev/null || true
 wait $ZOMBIE_PID 2>/dev/null || true
 
+
+# ── Audio ring cadence: AAC frames stamp on the sample grid ──
+# The AAC accumulator publishes 1024-sample frames built from 20ms
+# chunks; stamping them on the chunk grid gave four 60ms intervals
+# then one 80ms at 16kHz, and the weave rode into recordings and
+# sender reports. The real codec runs here (x86 libfaac): restart rad
+# on an AAC config and require every ring interval to be the exact
+# frame duration.
+AAC_CONF="$LOG_DIR/test-aac.conf"
+sed 's/^codec = l16/codec = aac/' "$CONFIG" > "$AAC_CONF"
+pkill -f "$OUT/rad" 2>/dev/null || true
+sleep 1
+start_daemon rad "$OUT/rad" -c "$AAC_CONF" -f -d
+sleep 4
+AAC_DTS=$("$OUT/ringdump" audio -f -n 25 2>&1 | sed -n 's/.*dt=\([0-9]*\).*/\1/p' | tail -20)
+if [ -n "$AAC_DTS" ] && python3 - <<PYEOF2
+import sys
+dts = [int(x) for x in """$AAC_DTS""".split()]
+ideal = 1024 * 1000000 // 16000
+bad = [d for d in dts if abs(d - ideal) > 1500]
+print(f"aac ring: {len(dts)} intervals, ideal {ideal}us, off-grid: {bad}")
+sys.exit(1 if bad or len(dts) < 10 else 0)
+PYEOF2
+then
+    pass "aac ring intervals sit on the 1024-sample grid"
+else
+    fail "aac ring intervals sit on the 1024-sample grid" "chunk-grid weave (60/60/80ms) or no frames"
+fi
+pkill -f "$OUT/rad" 2>/dev/null || true
+sleep 1
+start_daemon rad "$OUT/rad" -c "$CONFIG" -f -d
+sleep 1
+
+# ── Sensor rate on a platform that will not set it ──
+# A backend that leaves isp_set_sensor_fps out, or refuses it outright,
+# is behaving as specified, so rvd reports the rate in force instead of
+# repeating the number that was dropped. Which answer is honest depends
+# on what can be read back, hence three arms; the mock's two knobs pick
+# which platform it imitates. No [sensor] fps in the suite config and no
+# /proc/jz on the host, so rvd falls back to 25 -- the same case that
+# made the original line mislead.
+fps_arm() {
+    arm_name="$1"
+    arm_want="$2"
+    shift 2
+    pkill -f "$OUT/rvd" 2>/dev/null || true
+    sleep 1
+    start_daemon rvd env "$@" "$OUT/rvd" -c "$CONFIG" -f -d
+    sleep 2
+    if grep -q "$arm_want" "$LOG_DIR/rvd.log" 2>/dev/null; then
+        pass "$arm_name"
+    else
+        fail "$arm_name" "expected '$arm_want' in rvd log"
+        [ "$VERBOSE" = "1" ] && grep -i "sensor0 fps\|isp_set_sensor_fps" "$LOG_DIR/rvd.log"
+    fi
+    # Whichever arm fired, a documented refusal is not a fault: no
+    # warning about the call, and the arm's own line is not raised to one
+    if grep -q "isp_set_sensor_fps failed" "$LOG_DIR/rvd.log" 2>/dev/null ||
+        grep "sensor0 fps" "$LOG_DIR/rvd.log" 2>/dev/null | grep -q "WARN"; then
+        fail "$arm_name is not a fault" "a documented NOTSUP was reported as one"
+    else
+        pass "$arm_name is not a fault"
+    fi
+}
+
+echo ""
+echo "=== Sensor rate diagnostics ==="
+
+fps_arm "unsettable and unreadable names no rate as the sensor's" \
+    "no source confirmed" RSS_MOCK_SENSOR_FPS_SET=notsup
+fps_arm "unsettable but readable names the rate in force over the request" \
+    "sensor runs at 30, not the 25 asked for" \
+    RSS_MOCK_SENSOR_FPS_SET=notsup RSS_MOCK_SENSOR_FPS_ACTUAL=30
+fps_arm "unsettable and already at the requested rate says so plainly" \
+    "not settable on this platform; the sensor runs at 25" \
+    RSS_MOCK_SENSOR_FPS_SET=notsup RSS_MOCK_SENSOR_FPS_ACTUAL=25
+
+# A setter that fails for a real reason is still a fault: the three
+# arms above must not have swallowed the warning path with them
+pkill -f "$OUT/rvd" 2>/dev/null || true
+sleep 1
+start_daemon rvd env RSS_MOCK_SENSOR_FPS_SET=error "$OUT/rvd" -c "$CONFIG" -f -d
+sleep 2
+if grep -q "isp_set_sensor_fps failed" "$LOG_DIR/rvd.log" 2>/dev/null &&
+    ! grep -q "not settable on this platform\|no source confirmed" "$LOG_DIR/rvd.log" 2>/dev/null; then
+    pass "a setter that fails outright is still reported as a failure"
+else
+    fail "a setter that fails outright is still reported as a failure" \
+        "expected 'isp_set_sensor_fps failed' and none of the unsupported-platform lines"
+fi
+
+# Default mock: the setter works, so none of the three arms may appear
+pkill -f "$OUT/rvd" 2>/dev/null || true
+sleep 1
+start_daemon rvd "$OUT/rvd" -c "$CONFIG" -f -d
+sleep 2
+if grep -q "sensor0 fps: 25$" "$LOG_DIR/rvd.log" 2>/dev/null &&
+    ! grep -q "not settable on this platform\|no source confirmed" "$LOG_DIR/rvd.log" 2>/dev/null; then
+    pass "a settable sensor still reports the rate it was given"
+else
+    fail "a settable sensor still reports the rate it was given" \
+        "expected a plain 'sensor0 fps: 25' and no unsupported-platform line"
+fi
+
 if [ "$KEEP" = "1" ]; then
     echo ""
     echo "=== Keeping daemons running (Ctrl-C to stop) ==="
@@ -1047,6 +1190,37 @@ if [ "$KEEP" = "1" ]; then
     echo "  RSD: rtsp://127.0.0.1:15554/stream0"
     echo "  raptorctl: $OUT/raptorctl"
     wait
+fi
+
+# ── Recovery invariants: RTP through disturbances ──
+# The slow-client legs above prove the server SURVIVES a stall; this
+# one proves the streams stay CORRECT through it: both tracks' RTP
+# timestamps monotonic across a send-queue overflow (client stall) and
+# a producer restart, and video re-enters on a keyframe, never an
+# orphan P. This is the seam a field bug (PR #27) shipped through:
+# fault injection asserted only coarse recovery while timestamp
+# analysis only ever saw undisturbed streams. Runs last: the rvd
+# restart disturbs everything after it.
+echo ""
+echo "=== Recovery invariants ==="
+if command -v python3 > /dev/null 2>&1; then
+    RTPINV_LOG="$LOG_DIR/rtp_invariants.out"
+    python3 "$RAPTOR_DIR/tests/rtp_invariants.py" \
+        "rtsp://127.0.0.1:15554/stream0" 3 4 15 > "$RTPINV_LOG" 2>&1 &
+    RTPINV_PID=$!
+    sleep 9
+    pkill -f "$OUT/rvd -c" 2>/dev/null || true
+    sleep 1
+    start_daemon rvd "$OUT/rvd" -c "$CONFIG" -f -d
+    RTPINV_RC=0
+    wait $RTPINV_PID || RTPINV_RC=$?
+    if [ "$RTPINV_RC" -eq 0 ]; then
+        pass "recovery invariants ($(tail -1 "$RTPINV_LOG" | cut -c1-120))"
+    else
+        fail "recovery invariants" "$(tail -3 "$RTPINV_LOG" | tr '\n' ' ' | cut -c1-220)"
+    fi
+else
+    skip "recovery invariants" "python3 not installed"
 fi
 
 # Shutdown happens in trap

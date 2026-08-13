@@ -6,6 +6,8 @@
 #define RSD_H
 
 #include <compy.h>
+
+#include "rsd_sendq.h"
 #include <rss_ipc.h>
 #include <rss_common.h>
 #include <rss_sei.h>
@@ -70,50 +72,7 @@ typedef struct {
 	atomic_bool playing;
 } rsd_stream_t;
 
-/* Per-client send queue — decouples ring reader from network I/O.
- * Every entry holds a malloc'd copy of the frame payload so the
- * reader can overwrite frame_buf with the next ring frame without
- * waiting for any send thread to finish. The memcpy cost is small
- * next to the send-latency hit we'd otherwise take from a barrier
- * wait, especially on slow single-core SoCs. */
-#define RSD_SENDQ_SLOTS	  8
-#define RSD_FRAME_VIDEO	  0
-#define RSD_FRAME_AUDIO	  1
-#define RSD_SENDQ_OK	  0
-#define RSD_SENDQ_DROPPED 1
-
-typedef struct {
-	const uint8_t *data; /* malloc'd copy or rmem pointer (zerocopy) */
-	uint32_t len;
-	uint32_t rtp_ts;
-	uint8_t type;	  /* RSD_FRAME_VIDEO or RSD_FRAME_AUDIO */
-	uint32_t codec;	  /* audio codec (RSD_FRAME_AUDIO only) */
-	bool zerocopy;	  /* true = rmem pointer, don't free */
-	uint8_t buf_idx;  /* refmode: encoder buffer index */
-	uint32_t buf_gen; /* refmode: generation at peek time */
-} rsd_sendq_entry_t;
-
-typedef struct {
-	rsd_sendq_entry_t entries[RSD_SENDQ_SLOTS];
-	int head;
-	int tail;
-	int count;
-	pthread_mutex_t lock;
-	pthread_cond_t cond;
-	bool shutdown;
-	/*
-	 * Discard accounting. One queue carries both streams, audio pushes at
-	 * 50/s against video's 30/s, and a single video entry can hold the send
-	 * thread for the length of an IDR's worth of blocking writes -- so
-	 * RSD_SENDQ_SLOTS is only about 100ms of stream and a slow client
-	 * overflows it. Without these counters an overflow is indistinguishable
-	 * from a capture fault, which is exactly the confusion that cost a
-	 * round of board testing on the audio dropouts.
-	 */
-	uint32_t drop_audio; /* audio entries discarded to overflow */
-	uint32_t drop_video; /* video entries discarded to overflow */
-	uint32_t overflows;  /* times the queue was full on push */
-} rsd_sendq_t;
+/* Send queue: types and policy live in rsd_sendq.h */
 
 /* Per-client state */
 typedef struct rsd_client {
@@ -137,6 +96,8 @@ typedef struct rsd_client {
 	uint32_t audio_ts_offset;
 	uint32_t audio_ts_rand;
 	bool audio_ts_base_set;
+	uint32_t last_audio_client_ts; /* per-client monotonic enforcement */
+	bool has_last_audio_client_ts;
 	bool is_tcp;
 	int stream_idx;	      /* RSD_STREAM_MAIN or RSD_STREAM_SUB */
 	uint32_t video_codec; /* RSS_CODEC_H264 or RSS_CODEC_H265 */
@@ -239,7 +200,15 @@ typedef struct rsd_server {
 	rsd_ring_ctx_t video[RSD_STREAM_COUNT];
 
 	/* Audio ring — same cross-thread access pattern as video ring pointers */
+	/* Owned by the audio reader thread: it opens, closes and reopens
+	 * the ring as rad restarts. Sessions must never dereference it --
+	 * the SDP-relevant fields are cached in the atomics below, written
+	 * by the reader at each (re)open (a SETUP racing a reopen once
+	 * read a freed header). */
 	rss_ring_t *ring_audio;
+	_Atomic uint32_t audio_sdp_codec;
+	_Atomic uint32_t audio_sdp_clock;
+	_Atomic uint32_t audio_sdp_aot; /* ring header "profile": AAC object type */
 	uint64_t audio_read_seq;
 	bool has_audio;
 
@@ -291,8 +260,6 @@ void rsd_endpoints_load(rsd_server_t *srv, rss_config_t *cfg);
 /* rsd_ring_reader.c */
 void *rsd_video_reader_thread(void *arg);
 void *rsd_audio_reader_thread(void *arg);
-int rsd_sendq_init(rsd_sendq_t *q);
-void rsd_sendq_destroy(rsd_sendq_t *q);
 void *rsd_client_send_thread(void *arg);
 
 #endif /* RSD_H */

@@ -291,7 +291,8 @@ $CC $CFLAGS $COMPY_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_main.c" -o "$OUT/rsd_main.o"
 $CC $CFLAGS $COMPY_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_server.c" -o "$OUT/rsd_server.o"
 $CC $CFLAGS $COMPY_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_session.c" -o "$OUT/rsd_session.o"
 $CC $CFLAGS $COMPY_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_ring_reader.c" -o "$OUT/rsd_ring_reader.o"
-$CC -o "$OUT/rsd" "$OUT"/rsd_main.o "$OUT"/rsd_server.o "$OUT"/rsd_session.o "$OUT"/rsd_ring_reader.o $LIBS "$COMPY_BUILD/libcompy.a" $MBEDTLS_LIBS $LDFLAGS
+$CC $CFLAGS $COMPY_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_sendq.c" -o "$OUT/rsd_sendq.o"
+$CC -o "$OUT/rsd" "$OUT"/rsd_main.o "$OUT"/rsd_server.o "$OUT"/rsd_session.o "$OUT"/rsd_ring_reader.o "$OUT"/rsd_sendq.o $LIBS "$COMPY_BUILD/libcompy.a" $MBEDTLS_LIBS $LDFLAGS
 echo "  -> rsd"
 
 echo "=== RIC ==="
@@ -406,11 +407,13 @@ if [ ! -f "$FAAC_BUILD/libfaac.a" ]; then
         '#define HAVE_SYS_TYPES_H 1' \
         '#define HAVE_STRCASECMP 1' \
         '#define FAAC_PRECISION_SINGLE 1' \
+        '#define FAAC_SBR_DECIMATION 1' \
         '#define MAX_CHANNELS 2' \
         > "$FAAC_BUILD/config.h"
-    FAAC_SRCS="bitstream.c blockswitch.c channels.c cpu_compute.c fft.c \
-               filtbank.c frame.c huff2.c huffdata.c quantize.c stereo.c \
-               tns.c util.c"
+    # Every libfaac source: the hand list predated the new faac_encoder
+    # API (faac.c) and SBR, and drifted exactly the way the comment
+    # above warns.
+    FAAC_SRCS=$(cd "$FAAC_DIR/libfaac" && ls *.c)
     # -w silences upstream libfaac warnings (sign-compare, unused-parameter,
     # missing-field-initializers). Not our code to fix.
     for f in $FAAC_SRCS; do
@@ -424,10 +427,10 @@ fi
 FAAC_CFLAGS="-I$FAAC_DIR/include"
 FAAC_LIBS="$FAAC_BUILD/libfaac.a"
 
-for f in rad_main.c rad_codec.c rad_codec_g711.c rad_codec_l16.c rad_codec_aac.c rad_codec_opus.c; do
-  $CC $CFLAGS $HAL_CFLAGS $FAAC_CFLAGS -c "$RAPTOR_DIR/rad/$f" -o "$OUT/${f%.c}.o"
+for f in rad_main.c rad_clock.c rad_resync.c rad_codec.c rad_codec_g711.c rad_codec_l16.c rad_codec_aac.c rad_codec_opus.c; do
+  $CC $CFLAGS $HAL_CFLAGS $FAAC_CFLAGS -DRAPTOR_AAC -DRAPTOR_OPUS -c "$RAPTOR_DIR/rad/$f" -o "$OUT/${f%.c}.o"
 done
-$CC -o "$OUT/rad" "$OUT"/rad_main.o "$OUT"/rad_codec.o "$OUT"/rad_codec_g711.o \
+$CC -o "$OUT/rad" "$OUT"/rad_main.o "$OUT"/rad_clock.o "$OUT"/rad_resync.o "$OUT"/rad_codec.o "$OUT"/rad_codec_g711.o \
     "$OUT"/rad_codec_l16.o "$OUT"/rad_codec_aac.o "$OUT"/rad_codec_opus.o \
     $LIBS_HAL $FAAC_LIBS -lopus $LDFLAGS
 echo "  -> rad"

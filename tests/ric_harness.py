@@ -521,12 +521,14 @@ def scenario_cooldown(stub, watch):
 def scenario_covered_lens_baseline(stub, watch):
     """The covered-lens test every user runs, modeled with IR-dependent
     optics: covering goes dark -> night; the IR LED bounces off the
-    cover so the scene reads bright (gain 459 vs 45025 at detection);
-    when a false day switches the IR off, the covered lens goes dark
-    again. Brightness cannot separate this from a real bright scene
-    (459 vs 377 in the field), so ric must verify a ratio-triggered
-    day after the IR drops: a night-dark verdict reverts with backoff
-    instead of oscillating, and a real uncover verifies and sticks."""
+    cover so the scene reads bright (gain 459 vs 45025 at detection).
+    The settled bounce IS the baseline now (no 10%-of-trigger clamp:
+    a starlight sensor legitimately settles below 1% of its trigger),
+    so a covered lens holds night with no day attempt, no probe and
+    no IR blinking. Uncovering into a bright room reads the same
+    brightness (377 vs 459 -- level cannot separate them), lands as a
+    sustained dip below the settled baseline, and the probe resolves
+    it with the emitter off: real ambient light, verified day."""
     stub.set_scene(luma=120, gain=400, ev=500)
     ric = Ric("covered", LUMA_CONF)
     if not ric.wait_running():
@@ -541,51 +543,39 @@ def scenario_covered_lens_baseline(stub, watch):
         result(False, "covered-lens: night entry", str(stub.modes_since(mm)))
         ric.stop()
         return
-    # IR on, reflecting off the cover: bright to every metric.
+    # IR on, reflecting off the cover: bright to every metric, and the
+    # settled reading becomes the honest night baseline.
     stub.set_scene(luma=50, gain=459, ev=2600)
+    time.sleep(10 * POLL_MS / 1000.0)
 
-    # The reflection crosses the clamped trigger and a day attempt
-    # happens; the moment it does, the IR is off and the cover reads
-    # dark again. Feed that back like the physics would.
-    mm2 = stub.mark()
-    if not wait_for(lambda: "day" in stub.modes_since(mm2), 10):
-        result(False, "covered-lens: expected a day attempt off the reflection",
-               str(stub.modes_since(mm2)))
-        ric.stop()
-        return
-    stub.set_scene(luma=8, gain=44002, ev=242354)  # IR off, still covered
+    gm, mm2 = watch.mark(), stub.mark()
+    time.sleep(25 * POLL_MS / 1000.0)
+    led_vals = [c for _, p, _, c in watch.since(gm) if p == IRLED]
+    result("day" not in stub.modes_since(mm2) and "0" not in led_vals,
+           "covered-lens: covered scene holds night, no day attempt, no blink",
+           "modes=%s leds=%s" % (stub.modes_since(mm2), led_vals))
+    result("day verification failed" not in ric.read_log(),
+           "covered-lens: no verify churn while covered", ric.read_log()[-200:])
 
-    ok = wait_for(lambda: "night" in stub.modes_since(mm2), 6)
-    result(ok, "covered-lens: false day reverts to night",
-           str(stub.modes_since(mm2)))
-    verified_warn = "day verification failed" in ric.read_log()
-    result(verified_warn, "covered-lens: false day diagnosed",
+    # Uncover into a bright room: same brightness level as the bounce,
+    # but it dips below the settled baseline -> probe -> honest luma.
+    gm, mm3 = watch.mark(), stub.mark()
+    stub.set_scene(luma=50, gain=377, ev=1900)
+    ok = wait_for(lambda: last_value(watch.since(gm), IRLED) == "0", 4)
+    result(ok, "covered-lens: uncover dips the baseline and probes",
+           str(watch.since(gm)))
+    stub.set_scene(luma=90, gain=300, ev=2000)  # true ambient, no IR
+    ok = wait_for(lambda: "day" in stub.modes_since(mm3), 5)
+    result(ok, "covered-lens: probe verifies real day and sticks",
            ric.read_log()[-300:])
+    result(last_value(watch.since(gm), IRLED) == "0",
+           "covered-lens: IR stays off in verified day", str(watch.since(gm)))
 
-    # Back in night: reflection again. The backoff must hold -- no
-    # second day attempt in the lockout window (the old behavior
-    # flapped once per cooldown+hysteresis).
-    stub.set_scene(luma=50, gain=459, ev=2600)
-    mm3 = stub.mark()
-    time.sleep(20 * POLL_MS / 1000.0)
-    result("day" not in stub.modes_since(mm3),
-           "covered-lens: backoff holds night against the reflection",
-           str(stub.modes_since(mm3)))
-
-    # Uncover with a bright light: identical brightness to the
-    # reflection, but now the scene stays bright when the IR drops.
-    # The next attempt verifies and day sticks.
-    stub.set_scene(luma=51, gain=377, ev=521)
+    # Re-cover: dark again, normal dusk returns night.
     mm4 = stub.mark()
-    ok = wait_for(lambda: "day" in stub.modes_since(mm4), 45 * POLL_MS / 1000.0 + 8)
-    result(ok, "covered-lens: real uncover verifies day after backoff",
-           str(stub.modes_since(mm4)))
-    if ok:
-        time.sleep((3 + 3) * POLL_MS / 1000.0)
-        post = stub.modes_since(mm4)
-        result("night" not in post,
-               "covered-lens: verified day is stable",
-               str(post))
+    stub.set_scene(luma=8, gain=44002, ev=242354)
+    ok = wait_for(lambda: "night" in stub.modes_since(mm4), 5)
+    result(ok, "covered-lens: re-cover returns to night", str(stub.modes_since(mm4)))
     ric.stop()
 
 
@@ -622,6 +612,268 @@ def scenario_baseline_refresh(stub, watch):
     ok = wait_for(lambda: "day" in stub.modes_since(mm2), 6)
     result(ok, "baseline-refresh: running max restores an honest day trigger",
            str(stub.modes_since(mm2)) + " " + ric.read_log()[-200:])
+    ric.stop()
+
+
+def scenario_probe_dawn(stub, watch):
+    """T20-class compressed gain: a lit scene under IR floors total_gain
+    far above the day ratio (Wyze V2 bench: night baseline 1300 with IR,
+    lights-on 1024 = 79%, ratio floor 325 unreachable). The dip below
+    probe_gain_pct of the baseline lifts the IR LEDs; true ambient luma
+    then decides day, and the LEDs stay off through the switch."""
+    stub.set_scene(luma=70, gain=4500, ev=1200000)
+    ric = Ric("probedawn", LUMA_CONF)
+    if not ric.wait_running():
+        result(False, "probe dawn: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    time.sleep(0.5)
+
+    mm = stub.mark()
+    stub.set_scene(luma=6, gain=8192, ev=50000000)  # dark, gain at ceiling
+    if not wait_for(lambda: "night" in stub.modes_since(mm), 4):
+        result(False, "probe dawn: night entry", str(stub.modes_since(mm)))
+        ric.stop()
+        return
+    # IR bounce lights the scene: AE re-locks luma, gain settles low
+    stub.set_scene(luma=72, gain=1300, ev=370000)
+    time.sleep((3 + 2) * POLL_MS / 1000.0)  # cooldown -> baseline 1300
+
+    gm, mm = watch.mark(), stub.mark()
+    # lab lights on: gain dips to 79% of baseline, luma still AE-locked
+    stub.set_scene(luma=73, gain=1024, ev=290000)
+    ok = wait_for(lambda: last_value(watch.since(gm), IRLED) == "0", 3)
+    result(ok, "probe dawn: gain dip lifts IR for an ambient sample",
+           str(watch.since(gm)))
+    # without IR the scene reads bright
+    stub.set_scene(luma=95, gain=2500, ev=800000)
+    ok = wait_for(lambda: "day" in stub.modes_since(mm), 4)
+    result(ok, "probe dawn: ambient luma switches to day",
+           ric.read_log()[-300:])
+    result(last_value(watch.since(gm), IRLED) == "0",
+           "probe dawn: IR stays off through the day switch",
+           str(watch.since(gm)))
+    ric.stop()
+
+
+def scenario_probe_dark_restore(stub, watch):
+    """A probe that finds real darkness restores the IR LEDs, stays in
+    night mode, and holds off instead of blinking every poll."""
+    stub.set_scene(luma=70, gain=4500, ev=1200000)
+    ric = Ric("probedark", LUMA_CONF)
+    if not ric.wait_running():
+        result(False, "probe dark: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    time.sleep(0.5)
+
+    mm = stub.mark()
+    stub.set_scene(luma=6, gain=8192, ev=50000000)
+    if not wait_for(lambda: "night" in stub.modes_since(mm), 4):
+        result(False, "probe dark: night entry", str(stub.modes_since(mm)))
+        ric.stop()
+        return
+    stub.set_scene(luma=72, gain=1300, ev=370000)
+    time.sleep((3 + 2) * POLL_MS / 1000.0)  # cooldown -> baseline 1300
+
+    gm = watch.mark()
+    # IR bounce shifted (camera re-aimed): gain dips, room still dark
+    stub.set_scene(luma=72, gain=1024, ev=300000)
+    ok = wait_for(lambda: last_value(watch.since(gm), IRLED) == "0", 3)
+    result(ok, "probe dark: dip lifts IR", str(watch.since(gm)))
+
+    rm = watch.mark()
+    stub.set_scene(luma=4, gain=8192, ev=50000000)  # truly dark without IR
+    ok = wait_for(lambda: last_value(watch.since(rm), IRLED) == "1", 3)
+    result(ok, "probe dark: darkness restores IR", str(watch.since(rm)))
+
+    # IR-lit scene returns brighter than before; the resampled baseline
+    # (cooldown after restore) makes 1024 a fresh dip, but the holdoff
+    # must keep the LEDs from blinking again.
+    stub.set_scene(luma=72, gain=1300, ev=370000)
+    time.sleep((3 + 1) * POLL_MS / 1000.0)
+    rm2 = watch.mark()
+    stub.set_scene(luma=72, gain=1024, ev=300000)
+    time.sleep(8 * POLL_MS / 1000.0)
+    result(last_value(watch.since(rm2), IRLED) != "0",
+           "probe dark: holdoff suppresses an immediate re-probe",
+           str(watch.since(rm2)))
+    st = ric_status()
+    result(st.get("state") == "night", "probe dark: still night", str(st))
+    ric.stop()
+
+
+def scenario_probe_slow_ae(stub, watch):
+    """gc2053-class AE settles over many seconds after the IR lights the
+    scene: the night baseline must wait for the walk to stand still
+    instead of adopting a mid-swing value 15x above the settled gain,
+    and the walk itself must not read as a probe-worthy dip (Wyze V3:
+    baseline 4502 sampled mid-walk, settled 306, IR blinking at every
+    probe holdoff all night). A real dip below the settled baseline
+    must still probe."""
+    stub.set_scene(luma=70, gain=4500, ev=1200000)
+    ric = Ric("probeslowae", LUMA_CONF)
+    if not ric.wait_running():
+        result(False, "slow-AE: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    time.sleep(0.5)
+
+    gm, mm = watch.mark(), stub.mark()
+    stub.set_scene(luma=6, gain=45000, ev=50000000)  # dark, gain at ceiling
+    if not wait_for(lambda: "night" in stub.modes_since(mm), 4):
+        result(False, "slow-AE: night entry", str(stub.modes_since(mm)))
+        ric.stop()
+        return
+    # AE walks down over many polls once IR lights the scene, then holds
+    for g in (20000, 9000, 4500, 1500, 700, 306):
+        stub.set_scene(luma=72, gain=g, ev=300000)
+        time.sleep(2 * POLL_MS / 1000.0)
+    time.sleep(26 * POLL_MS / 1000.0)
+    led_vals = [c for _, p, _, c in watch.since(gm) if p == IRLED and c in ("0", "1")]
+    result("0" not in led_vals,
+           "slow-AE: neither the walk nor the settled gain false-probes",
+           str(watch.since(gm)))
+    st = ric_status()
+    if not st or st.get("state") != "night":
+        result(False, "slow-AE: still night after the walk", str(st))
+        ric.stop()
+        return
+    result(True, "slow-AE: still night after the walk")
+
+    # lights on: a real dip below the settled baseline still probes;
+    # react to the lifted LEDs with the true bright ambient
+    gm = watch.mark()
+    stub.set_scene(luma=72, gain=240, ev=250000)
+    ok = wait_for(lambda: last_value(watch.since(gm), IRLED) == "0", 5)
+    result(ok, "slow-AE: a real dip below the settled baseline probes",
+           str(watch.since(gm)))
+    if ok:
+        stub.set_scene(luma=95, gain=200, ev=200000)
+        ok = wait_for(lambda: "day" in stub.modes_since(mm), 5)
+        result(ok, "slow-AE: the probe completes into day",
+               ric.read_log()[-200:])
+    ric.stop()
+
+
+def scenario_probe_recheck(stub, watch):
+    """IR wash can hide ambient light entirely: on a Wyze V3 the IR-lit
+    scene reads EV 637 lit vs ~700 dark -- a 9% perturbation no dip
+    threshold can catch. The periodic recheck probes anyway after
+    probe_recheck_sec without a dip, bounding dawn latency on
+    wash-dominated scenes; a dark recheck restores, re-arms, and fires
+    again an interval later."""
+    conf = LUMA_CONF + "probe_recheck_sec = 2\n"
+    stub.set_scene(luma=70, gain=4500, ev=1200000)
+    ric = Ric("procheck", conf)
+    if not ric.wait_running():
+        result(False, "recheck: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    time.sleep(0.5)
+
+    mm = stub.mark()
+    stub.set_scene(luma=6, gain=8192, ev=50000000)
+    if not wait_for(lambda: "night" in stub.modes_since(mm), 4):
+        result(False, "recheck: night entry", str(stub.modes_since(mm)))
+        ric.stop()
+        return
+    # IR-lit scene, rock stable: no dip ever
+    stub.set_scene(luma=72, gain=1300, ev=370000)
+    time.sleep((3 + 3) * POLL_MS / 1000.0)
+
+    # a recheck probe must fire within ~2s even with nothing dipping
+    gm = watch.mark()
+    ok = wait_for(lambda: last_value(watch.since(gm), IRLED) == "0", 4)
+    result(ok, "recheck: stable night still probes on the interval",
+           str(watch.since(gm)))
+    # the room is genuinely dark without IR: restore and hold night
+    stub.set_scene(luma=4, gain=8192, ev=50000000)
+    ok = wait_for(lambda: last_value(watch.since(gm), IRLED) == "1", 4)
+    result(ok, "recheck: dark recheck restores IR", str(watch.since(gm)))
+    st = ric_status()
+    result(st is not None and st.get("state") == "night",
+           "recheck: still night", str(st))
+
+    # back to the stable IR-lit scene; the interval must re-arm and a
+    # second recheck fire (holdoff applies to failed DIP probes, the
+    # recheck cadence is its own clock)
+    stub.set_scene(luma=72, gain=1300, ev=370000)
+    time.sleep(3 * POLL_MS / 1000.0)
+    gm2 = watch.mark()
+    ok = wait_for(lambda: last_value(watch.since(gm2), IRLED) == "0", 6)
+    result(ok, "recheck: the interval re-arms after a dark recheck",
+           str(watch.since(gm2)))
+    stub.set_scene(luma=95, gain=2500, ev=800000)  # honest bright ambient
+    ok = wait_for(lambda: "day" in stub.modes_since(mm), 5)
+    result(ok, "recheck: a lit recheck completes into day",
+           ric.read_log()[-200:])
+    ric.stop()
+
+
+def scenario_recheck_rearm(stub, watch):
+    """Shortening probe_recheck_sec at runtime must re-arm the running
+    countdown: the bench sets a short interval mid-night to bound its
+    dawn legs, and a countdown still holding the old ten-minute value
+    would ignore it until the next night entry."""
+    conf = LUMA_CONF + "probe_recheck_sec = 3600\n"
+    stub.set_scene(luma=70, gain=4500, ev=1200000)
+    ric = Ric("rearm", conf)
+    if not ric.wait_running():
+        result(False, "recheck-rearm: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    time.sleep(0.5)
+    mm = stub.mark()
+    stub.set_scene(luma=6, gain=8192, ev=50000000)
+    if not wait_for(lambda: "night" in stub.modes_since(mm), 4):
+        result(False, "recheck-rearm: night entry", str(stub.modes_since(mm)))
+        ric.stop()
+        return
+    stub.set_scene(luma=72, gain=1300, ev=370000)
+    time.sleep((3 + 3) * POLL_MS / 1000.0)
+
+    gm = watch.mark()
+    r = ctrl_cmd(RUN_DIR + "/ric.sock",
+                 {"cmd": "set-threshold", "key": "probe_recheck_sec", "value": 1})
+    ok = r is not None and r.get("status") == "ok"
+    probed = wait_for(lambda: last_value(watch.since(gm), IRLED) == "0", 4)
+    result(ok and probed,
+           "recheck-rearm: shortening the interval re-arms the countdown",
+           "resp=%s events=%s" % (r, watch.since(gm)))
+    ric.stop()
+
+
+def scenario_noir_luma_dawn(stub, watch):
+    """With no IR bank enabled nothing pollutes luma at night, so dawn
+    may ride luma directly even when the gain ratio cannot fire: a
+    compressed-gain sensor sits at 56% of its pinned night baseline in
+    a lit room, far above the 25% ratio floor."""
+    conf = LUMA_CONF + "ir850 = false\nir940 = false\n"
+    stub.set_scene(luma=70, gain=4500, ev=1200000)
+    ric = Ric("noirdawn", conf)
+    if not ric.wait_running():
+        result(False, "no-IR dawn: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    time.sleep(0.5)
+
+    gm, mm = watch.mark(), stub.mark()
+    stub.set_scene(luma=6, gain=8192, ev=50000000)
+    if not wait_for(lambda: "night" in stub.modes_since(mm), 4):
+        result(False, "no-IR dawn: night entry", str(stub.modes_since(mm)))
+        ric.stop()
+        return
+    result(last_value(watch.since(gm), IRLED) != "1",
+           "no-IR dawn: disabled banks stay dark at night",
+           str(watch.since(gm)))
+    time.sleep((3 + 2) * POLL_MS / 1000.0)  # cooldown -> baseline 8192
+
+    mm2 = stub.mark()
+    stub.set_scene(luma=70, gain=4564, ev=1280000)  # lit: 56% of baseline
+    ok = wait_for(lambda: "day" in stub.modes_since(mm2), 4)
+    result(ok, "no-IR dawn: luma alone returns to day",
+           ric.read_log()[-300:])
     ric.stop()
 
 
@@ -995,6 +1247,52 @@ def scenario_gain_trigger(stub, watch):
     ric.stop()
 
 
+def scenario_photo_night_boot(stub, watch):
+    """A camera that powers up in darkness must reach night mode at
+    production speed: with no AWB baseline neither spectral path can
+    confirm, so the EV-only boot path (stock behavior) must fire on
+    the ev_night counter alone -- not minutes later on the drift
+    fallback. Calibration itself must wait for day mode: on
+    short-throw scenes the IR LEDs pull EV below ev_day, and a
+    baseline learned under IR poisons every deviation check."""
+    conf = GPIO_CONF + "trigger = photo\n"
+    stub.set_scene(luma=5, gain=30000, ev=200000, rgain=170, bgain=150)
+    ric = Ric("photoboot", conf, poll_ms=10)
+    if not ric.wait_running():
+        result(False, "photo boot: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    mm = stub.mark()
+    # settle(7) + NIGHT_EV_TRIGGER(23) = 30 polls; at 10ms that is
+    # 0.3s. 3s is generous headroom and far below the ~2000 polls the
+    # drift fallback would need -- a pass proves the fast path fired.
+    ok = wait_for(lambda: "night" in stub.modes_since(mm), 3)
+    result(ok, "photo boot: dark boot reaches night on EV alone, fast",
+           ric.read_log()[-300:])
+    if not ok:
+        ric.stop()
+        return
+    log = ric.read_log()
+    result("photo AWB calibrated" not in log,
+           "photo boot: no AWB baseline learned in the dark", log[-200:])
+
+    # Bright scene: day must come back uncalibrated via the ratio path,
+    # and only then may calibration sample (day mode, IR off).
+    mm2 = stub.mark()
+    stub.set_scene(luma=100, gain=500, ev=3000, rgain=140, bgain=140)
+    ok = wait_for(lambda: "day" in stub.modes_since(mm2), 10)
+    result(ok, "photo boot: uncalibrated day return via ratio path",
+           ric.read_log()[-300:])
+    ok = wait_for(lambda: "photo AWB calibrated" in ric.read_log(), 6)
+    log = ric.read_log()
+    day_pos = log.rfind("switched to DAY")
+    cal_pos = log.rfind("photo AWB calibrated")
+    result(ok and day_pos >= 0 and cal_pos > day_pos,
+           "photo boot: calibration waits for day mode",
+           "day@%d cal@%d" % (day_pos, cal_pos))
+    ric.stop()
+
+
 def scenario_photo(stub, watch):
     """Photo trigger: AWB auto-calibration from bright samples, night via
     EV + R-gain spectral shift (path 1), day via the fixed-EV drift
@@ -1221,6 +1519,56 @@ def scenario_ir940_only_board(stub, watch):
     finally:
         with open("/etc/thingino.json", "w") as f:
             f.write(orig)
+
+
+def scenario_mode_reassert(stub, watch):
+    """Forcing a mode is an explicit hardware assertion, not a
+    state-machine hint: after bench verbs perturb the rails (ircut
+    night, ir850 on) while the daemon believes day, `mode day` must
+    still cut the LEDs and re-pulse the filter -- found on a Wyze V3
+    as day mode with lit IR LEDs, because a matching current_mode
+    made the force a silent no-op."""
+    stub.set_scene(luma=120, gain=500, ev=4000)
+    ric = Ric("modereassert", LUMA_CONF)
+    if not ric.wait_running():
+        result(False, "mode-reassert: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    time.sleep(0.5)
+
+    gm = watch.mark()
+    ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "ircut", "value": "night"})
+    ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "ir850", "value": "on"})
+    if not wait_last(watch, gm, IRLED, "1"):
+        result(False, "mode-reassert: bench perturbation", str(watch.since(gm)))
+        ric.stop()
+        return
+
+    gm = watch.mark()
+    r = ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "mode", "value": "day"})
+    ok = r is not None and r.get("state") == "day"
+    led = wait_last(watch, gm, IRLED, "0")
+    result(ok and led, "mode-reassert: forced day cuts perturbed IR",
+           "resp=%s events=%s" % (r, watch.since(gm)))
+    w = wait_pulse(watch, gm, IRCUT1, IRCUT2)
+    result(w is not None,
+           "mode-reassert: forced day re-pulses the filter day-ward",
+           str(watch.since(gm)))
+
+    # Symmetric: perturb day-ward while forced night, re-assert night
+    ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "mode", "value": "night"})
+    time.sleep(0.3)
+    gm = watch.mark()
+    ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "ir850", "value": "off"})
+    ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "ircut", "value": "day"})
+    time.sleep(0.3)
+    gm = watch.mark()
+    ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "mode", "value": "night"})
+    ok = wait_last(watch, gm, IRLED, "1")
+    result(ok, "mode-reassert: forced night relights perturbed IR",
+           str(watch.since(gm)))
+    ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "mode", "value": "auto"})
+    ric.stop()
 
 
 def scenario_manual_gpio(stub, watch):
@@ -1584,6 +1932,95 @@ def scenario_disabled(stub, watch):
            str(watch.since(gm)))
 
 
+def scenario_hostile_config(stub, watch):
+    """Config-file values outside every documented range must clamp, not
+    crash: poll_interval_ms = 0 divided two probe-path expressions
+    before load_config clamped it, so a typo'd config took ric down
+    with SIGFPE the first time a probe armed."""
+    conf = (GPIO_CONF
+            + "trigger = luma\nnight_luma = 300\nnight_gain = 80000\n"
+            + "day_gain_pct = -5\nhysteresis_sec = 0\npulse_ms = 100\n"
+            + "poll_interval_ms = 0\nprobe_gain_pct = 90\n"
+            + "probe_holdoff_sec = 999999999\nprobe_recheck_sec = 999999999\n")
+    stub.set_scene(luma=120, gain=500, ev=4000)
+    ric = Ric("hostile", conf)
+    if not ric.wait_running():
+        result(False, "hostile config: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    result("clamped" in ric.read_log(),
+           "hostile config: out-of-range keys named in the log",
+           ric.read_log()[-300:])
+
+    mm = stub.mark()
+    stub.set_scene(luma=5, gain=90000, ev=200000)
+    if not wait_for(lambda: "night" in stub.modes_since(mm), 8):
+        result(False, "hostile config: reaches night", str(stub.modes_since(mm)))
+        ric.stop()
+        return
+    # Baseline settles, then a dip arms the probe; pre-fix the probe's
+    # holdoff arithmetic divided by the raw poll_interval_ms = 0.
+    time.sleep(2.5)
+    stub.set_scene(luma=5, gain=30000, ev=60000)
+    ok = wait_for(lambda: "ambient probe" in ric.read_log(), 10)
+    result(ok, "hostile config: probe arms", ric.read_log()[-200:])
+    ok = wait_for(lambda: "probe found darkness" in ric.read_log(), 10)
+    result(ok, "hostile config: probe completes without SIGFPE",
+           ric.read_log()[-200:])
+    r = ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "status"})
+    result(r is not None and r.get("status") == "ok",
+           "hostile config: ric alive after the probe", str(r))
+    ric.stop()
+
+
+def scenario_ctrl_contract(stub, watch):
+    """The ctrl surface validates at the boundary like every other
+    daemon: a mode outside auto|day|night is an error (and never
+    persisted), status is an explicit verb, and an unknown command
+    is an error instead of a status alias."""
+    stub.set_scene(luma=120, gain=500, ev=4000)
+    ric = Ric("ctrlc", LUMA_CONF)
+    if not ric.wait_running():
+        result(False, "ctrl-contract: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    time.sleep(0.3)
+
+    r = ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "mode", "value": "banana"})
+    ok = r is not None and r.get("status") == "error"
+    result(ok, "ctrl-contract: mode banana rejected", str(r))
+    r = ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "mode"})
+    ok = r is not None and r.get("mode") == "auto"
+    result(ok, "ctrl-contract: mode unchanged after rejection", str(r))
+
+    r = ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "status"})
+    ok = (r is not None and r.get("status") == "ok" and "mode" in r
+          and "state" in r)
+    result(ok, "ctrl-contract: explicit status carries mode and state", str(r))
+
+    r = ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "bogus-cmd"})
+    ok = r is not None and r.get("status") == "error"
+    result(ok, "ctrl-contract: unknown command is an error", str(r))
+    ric.stop()
+
+
+def scenario_photo_threshold_order(stub, watch):
+    """Inverted photo thresholds (ev_deep under ev_night) break the
+    deep-count logic silently; the load must say so."""
+    conf = (GPIO_CONF + "trigger = photo\nphoto_ev_night = 50000\n"
+            + "photo_ev_deep = 10000\n")
+    stub.set_scene(luma=100, gain=500, ev=3000, rgain=140, bgain=140)
+    ric = Ric("photoorder", conf, poll_ms=100)
+    if not ric.wait_running():
+        result(False, "photo-order: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    ok = wait_for(lambda: "photo thresholds out of order" in ric.read_log(), 3)
+    result(ok, "photo-order: inverted thresholds warned at load",
+           ric.read_log()[-300:])
+    ric.stop()
+
+
 def scenario_json_discovery(stub, watch):
     """No pins in the config: they come from /etc/thingino.json (the
     sandbox owns that file via an overlay)."""
@@ -1627,9 +2064,16 @@ def main():
         scenario_cooldown,
         scenario_covered_lens_baseline,
         scenario_baseline_refresh,
+        scenario_probe_dawn,
+        scenario_probe_dark_restore,
+        scenario_noir_luma_dawn,
+        scenario_probe_slow_ae,
+        scenario_probe_recheck,
+        scenario_recheck_rearm,
         scenario_ctrl,
         scenario_ctrl_extras,
         scenario_manual_gpio,
+        scenario_mode_reassert,
         scenario_single_gpio,
         scenario_ir_combos,
         scenario_ir940_only_board,
@@ -1637,6 +2081,7 @@ def main():
         scenario_pulse_width,
         scenario_gain_trigger,
         scenario_photo,
+        scenario_photo_night_boot,
         scenario_photo_day_ratio,
         scenario_photo_interference,
         scenario_photo_no_ev,
@@ -1649,7 +2094,13 @@ def main():
         scenario_gpio_failure,
         scenario_disabled,
         scenario_json_discovery,
+        scenario_hostile_config,
+        scenario_ctrl_contract,
+        scenario_photo_threshold_order,
     ]
+    only = os.environ.get("RIC_SCENARIO", "")
+    if only:
+        scenarios = [sc for sc in scenarios if only in sc.__name__]
     for sc in scenarios:
         print("== %s" % sc.__name__, flush=True)
         try:

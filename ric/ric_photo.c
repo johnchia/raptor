@@ -40,15 +40,13 @@
 #define FIXED_CHECK_INTERVAL	200
 #define FIXED_CHECK_DRIFT_LIMIT 200
 
-/* Anti-flap */
-#define ANTI_FLAP_SETTLE 150
-
 void ric_photo_reset(ric_photo_state_t *ps, ric_photo_phase_t phase)
 {
 	bool was_calibrated = ps->calibrated;
 	uint16_t rg_base = ps->rgain_base;
 	uint16_t bg_base = ps->bgain_base;
 	uint8_t cal_count = ps->cal_count;
+	uint32_t first_ev = ps->cal_first_ev;
 	uint32_t rg_sum = ps->cal_rgain_sum;
 	uint32_t bg_sum = ps->cal_bgain_sum;
 
@@ -60,6 +58,7 @@ void ric_photo_reset(ric_photo_state_t *ps, ric_photo_phase_t phase)
 	ps->rgain_base = rg_base;
 	ps->bgain_base = bg_base;
 	ps->cal_count = cal_count;
+	ps->cal_first_ev = first_ev;
 	ps->cal_rgain_sum = rg_sum;
 	ps->cal_bgain_sum = bg_sum;
 }
@@ -81,6 +80,27 @@ static bool photo_calibrate(ric_state_t *st)
 	/* Only calibrate from bright samples */
 	if (ps->ev > thr->ev_day)
 		return false;
+
+	/* And only from a STANDING scene: the whole window must agree with
+	 * its first sample to +-13% (the same ends-agree idiom the day and
+	 * interference rings use). A mode-change transient can sit under
+	 * ev_day for many seconds while AE walks -- measured on a T20, EV
+	 * climbed 3% per sample for 10s after the IR LEDs cut -- and a
+	 * baseline learned mid-walk poisons every deviation check. The
+	 * per-sample step of a slow walk stays inside any band; the drift
+	 * across a 16-sample window does not. */
+	if (ps->cal_count == 0) {
+		ps->cal_first_ev = ps->ev;
+	} else {
+		double first = (double)ps->cal_first_ev;
+		if ((double)ps->ev < first * DAY_RATIO_LOW ||
+		    (double)ps->ev > first * DAY_RATIO_HIGH) {
+			ps->cal_count = 0;
+			ps->cal_rgain_sum = 0;
+			ps->cal_bgain_sum = 0;
+			ps->cal_first_ev = ps->ev;
+		}
+	}
 
 	ps->cal_rgain_sum += ps->rgain;
 	ps->cal_bgain_sum += ps->bgain;
@@ -123,6 +143,15 @@ static void photo_night_control(ric_state_t *st)
 	uint32_t ev = ps->ev;
 	int rdiff, bdiff;
 
+	/* Without a calibrated baseline the deviations below would measure
+	 * against zero and count on every sample; hold the spectral paths
+	 * until calibration and let the fixed-EV fallback carry alone. */
+	if (!ps->calibrated) {
+		ps->rgain_dev[0] = ps->rgain_dev[1] = 0;
+		ps->bgain_dev[0] = ps->bgain_dev[1] = 0;
+		goto ev_checks;
+	}
+
 	/* R-gain deviation check 1 (threshold 15) */
 	rdiff = (int)rg - (int)rg_base;
 	if (rdiff < 0)
@@ -153,6 +182,7 @@ static void photo_night_control(ric_state_t *st)
 	else
 		ps->bgain_dev[1] = 0;
 
+ev_checks:
 	/*
 	 * EV level checks — HIGH ev = dark on Ingenic.
 	 * ev > ev_night: dark enough for night consideration.
@@ -194,11 +224,18 @@ static void photo_night_control(ric_state_t *st)
 	    ps->bgain_dev[0] >= NIGHT_BGAIN_TRIGGER && ps->bgain_dev[1] >= NIGHT_BGAIN_TRIGGER)
 		reason = 2;
 
+	/* Path 3, uncalibrated only: a camera that boots in darkness has
+	 * no WB baseline, so neither spectral path can ever confirm, and
+	 * waiting minutes on the drift fallback leaves it blind in day
+	 * mode. The stock algorithm this port descends from enters night
+	 * on EV evidence alone; do the same until the first day period
+	 * calibrates, after which the spectral paths take over. */
+	if (reason == 0 && !ps->calibrated && ps->ev_night_count >= NIGHT_EV_TRIGGER)
+		reason = 3;
+
 	if (reason > 0) {
 		RSS_DEBUG("photo night trigger (reason=%d ev=%u rg=%u bg=%u base=%u/%u)", reason,
 			  ev, rg, bg, ps->rgain_base, ps->bgain_base);
-		ps->change_pending = true;
-		ps->max_dgain = 0;
 		ric_set_mode(st, RIC_MODE_NIGHT);
 		ric_photo_reset(ps, PHOTO_PHASE_DAY_DETECT);
 		return;
@@ -218,8 +255,6 @@ static void photo_night_control(ric_state_t *st)
 		if (ps->fixed_check_count >= FIXED_DRIFT_TRIGGER) {
 			if (ev >= thr->ev_deep) {
 				RSS_DEBUG("photo fixed-ev night (ev=%u)", ev);
-				ps->change_pending = true;
-				ps->max_dgain = 0;
 				ric_set_mode(st, RIC_MODE_NIGHT);
 				ric_photo_reset(ps, PHOTO_PHASE_DAY_DETECT);
 			}
@@ -247,7 +282,7 @@ static void photo_day_control(ric_state_t *st)
 		return;
 	}
 
-	uint8_t idx = ps->day_ring_idx;
+	uint32_t idx = ps->day_ring_idx;
 	ps->day_ring[idx % PHOTO_DAY_RING_SIZE] = ps->ev;
 	idx++;
 	ps->day_ring_idx = idx;
@@ -296,15 +331,11 @@ static void photo_day_control(ric_state_t *st)
 		if (ps->day_trigger_count < 3) {
 			RSS_DEBUG("photo day approach (%d/3 ev=%u ref=%u)", ps->day_trigger_count,
 				  sample, ps->day_ref_ev);
-			ps->max_dgain = 1000000;
-			ps->change_pending = true;
 			return;
 		}
 
 		RSS_DEBUG("photo day trigger (ev=%u ref=%u rg=%u bg=%u)", ps->ev, ps->day_ref_ev,
 			  ps->rgain, ps->bgain);
-		ps->change_pending = true;
-		ps->max_dgain = 100000;
 		ric_set_mode(st, RIC_MODE_DAY);
 		ric_photo_reset(ps, PHOTO_PHASE_INTERFERE);
 		return;
@@ -365,14 +396,10 @@ static void photo_interfere_control(ric_state_t *st)
 		if (ps->interf_rise_count > INTERF_RISE_TRIGGER) {
 			RSS_DEBUG("photo interfere: false day (ev=%u ref=%u)", ps->ev,
 				  ps->interf_ref_ev);
-			ps->change_pending = true;
-			ps->max_dgain = 100000;
 			ric_set_mode(st, RIC_MODE_NIGHT);
 			ric_photo_reset(ps, PHOTO_PHASE_NIGHT_DETECT);
 			return;
 		}
-		if (current < ref * INTERF_RATIO_LOW)
-			ps->interf_fall_count = 0;
 		return;
 	}
 
@@ -441,7 +468,6 @@ static void photo_fixed_control(ric_state_t *st)
 		RSS_DEBUG("photo fixed drift: day detected (ev=%u ref=%u)", ps->ev,
 			  ps->fixed_ref_ev);
 		ps->fixed_drift_count = 0;
-		ps->change_pending = true;
 		ric_set_mode(st, RIC_MODE_DAY);
 		ric_photo_reset(ps, PHOTO_PHASE_NIGHT_DETECT);
 	}
@@ -464,22 +490,16 @@ void ric_photo_poll(ric_state_t *st, uint32_t ev, uint16_t rgain, uint16_t bgain
 	ps->bgain = bgain;
 	poll_count++;
 
-	/* Auto-calibrate R/B gain baseline from bright samples */
-	if (!ps->calibrated) {
-		if (!photo_calibrate(st))
-			return;
-	}
-
-	/* Anti-flap: after mode transitions, wait for ISP to settle */
-	if (ps->anti_flap) {
-		ps->anti_flap_ticks++;
-		if (ps->anti_flap_ticks > ANTI_FLAP_SETTLE) {
-			ps->anti_flap = false;
-			ps->anti_flap_ticks = 0;
-			ps->anti_flap_count = 0;
-		}
-		return;
-	}
+	/* Auto-calibrate the R/B gain baseline from bright samples, but
+	 * only in day mode: at night the IR LEDs shift the WB spectrum,
+	 * and on short-throw scenes they pull EV under ev_day too, so a
+	 * baseline learned there poisons every deviation check. Being
+	 * uncalibrated no longer blocks the poll: the EV-only paths below
+	 * (fixed-EV fallback, day ratio, interference) need no baseline,
+	 * so a camera that boots in darkness still reaches night mode
+	 * instead of freezing in day until dawn. */
+	if (!ps->calibrated && st->current_mode == RIC_MODE_DAY)
+		photo_calibrate(st);
 
 	if (poll_count % 10 == 0) {
 		RSS_DEBUG("photo [%s] ev=%u rg=%u bg=%u (base=%u/%u) | "

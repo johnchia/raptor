@@ -27,93 +27,11 @@
 #include <rss_common.h>
 
 #include "rad.h"
+#include "rad_clock.h"
+#include "rad_resync.h"
 
-/*
- * Synthetic audio clock slew (AI loop). The clock advances by sample
- * count, so ADC crystal error and samples lost inside the SDK (FIFO
- * overrun during stalls) otherwise accumulate as unbounded A/V drift
- * in every consumer. Each chunk, compare against CLOCK_MONOTONIC:
- * beyond a resync threshold re-anchor hard and warn; beyond the NUDGE
- * band (chunk-scheduling jitter floor) correct by 1ms. Authority is
- * 1ms per 20ms chunk — far above any crystal error, gentle enough to
- * stay inaudible in timestamp terms.
- *
- * The thresholds are asymmetric. Clock BEHIND wall = samples lost or
- * a stall; it never self-heals, so resync at 150ms. Clock AHEAD of
- * wall happens legitimately while draining the SDK's buffered chunks
- * after a stall or at startup (frame_depth ~400ms read back-to-back
- * outruns wall) — a symmetric threshold fires repeated backward
- * resyncs mid-drain, rewinding the published timeline. Tolerate up to
- * 1s ahead (T23 measured ~760ms of real salvage; decays via nudge in
- * seconds); beyond that something is truly wrong.
- */
-#define RAD_SYNTH_RESYNC_BEHIND_US 150000
-#define RAD_SYNTH_RESYNC_AHEAD_US  1000000
-#define RAD_SYNTH_NUDGE_BAND_US	   20000
-#define RAD_SYNTH_NUDGE_US	   1000
-
-/*
- * Resync reporting.
- *
- * One resync is worth a line of its own: it names audio the SDK lost. But a
- * sustained loss episode fires one every time the error climbs back over the
- * threshold, and hundreds of identical warnings evict everything else from a
- * 64 KB syslog ring -- destroying the very context needed to explain them. So
- * the first is logged in full, the rest are counted, and the episode is
- * summarised when it ends or once a minute while it continues.
- *
- * The summary is the useful diagnostic anyway: a count and a total say how
- * much audio went missing and how fast, which a stream of identical
- * threshold-sized corrections does not.
- */
-#define RAD_RESYNC_QUIET_US   5000000  /* no resync for this long ends an episode */
-#define RAD_RESYNC_SUMMARY_US 60000000 /* a longer episode reports in as it runs */
-
-typedef struct {
-	int64_t open_us; /* wall time the window opened; 0 when none is open */
-	int64_t last_us; /* wall time of the most recent resync */
-	int64_t total_us;
-	unsigned int count;
-} rad_resync_log_t;
-
-static void rad_resync_summarise(rad_resync_log_t *r, int64_t now_us)
-{
-	if (r->count > 1)
-		RSS_WARN("audio clock resynced %u times in %llds, %+lldms corrected in total",
-			 r->count, (long long)((r->last_us - r->open_us) / 1000000),
-			 (long long)(r->total_us / 1000));
-
-	r->count = 0;
-	r->total_us = 0;
-	r->open_us = now_us;
-}
-
-static void rad_resync_note(rad_resync_log_t *r, int64_t now_us, int64_t corr_us)
-{
-	if (!r->open_us) {
-		RSS_WARN("audio clock resync %+lldms (lost samples or stall)",
-			 (long long)(corr_us / 1000));
-		r->open_us = now_us;
-	}
-
-	r->last_us = now_us;
-	r->total_us += corr_us;
-	r->count++;
-}
-
-/* Called every chunk, so an episode that stops still gets its summary. */
-static void rad_resync_tick(rad_resync_log_t *r, int64_t now_us)
-{
-	if (!r->open_us)
-		return;
-
-	if (now_us - r->last_us >= RAD_RESYNC_QUIET_US) {
-		rad_resync_summarise(r, now_us);
-		r->open_us = 0;
-	} else if (now_us - r->open_us >= RAD_RESYNC_SUMMARY_US) {
-		rad_resync_summarise(r, now_us);
-	}
-}
+/* Synthetic audio clock: sample-count advance slewed toward
+ * CLOCK_MONOTONIC. Control law and its history live in rad_clock.c. */
 
 /* ── AO thread context (needed by ctrl handler for ao-enable/ao-disable) ── */
 
@@ -175,7 +93,7 @@ typedef struct {
 	rad_codec_ctx_t *codec_ctx;
 	uint8_t **encode_buf;
 	int *encode_buf_size;
-	int64_t *synth_audio_ts;
+	rad_clock_t *synth_clock;
 } rad_ctrl_ctx_t;
 
 static int rad_fmt_result(char *buf, int bufsz, int ret)
@@ -458,7 +376,7 @@ static int rad_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 		ctx->codec_ctx->ring = *ctx->ring;
 
 		ctx->ai_disabled = false;
-		*ctx->synth_audio_ts = rss_timestamp_us();
+		rad_clock_init(ctx->synth_clock, rss_timestamp_us());
 		RSS_INFO("audio input enabled: %s %d Hz", ctx->codec_str, ctx->sample_rate);
 		return rss_ctrl_resp_ok(resp_buf, resp_buf_size);
 	}
@@ -1339,9 +1257,9 @@ int main(int argc, char **argv)
 	RSS_DEBUG("audio loop: %d samples/frame (%dms), %s", audio_cfg.samples_per_frame, 1000 / 50,
 		  codec_str);
 
-	int64_t synth_audio_ts = rss_timestamp_us();
-	int64_t last_read_us = 0; /* pacing detector for the clock slew */
-	rad_resync_log_t resync_log = { 0 };
+	rad_clock_t synth_clock;
+	rad_clock_init(&synth_clock, rss_timestamp_us());
+	rad_resync_log_t resync_log = {0};
 
 	ctrl_ctx = (rad_ctrl_ctx_t){
 		.cfg = dctx.cfg,
@@ -1377,7 +1295,7 @@ int main(int argc, char **argv)
 		.codec_ctx = &codec_ctx,
 		.encode_buf = &encode_buf,
 		.encode_buf_size = &encode_buf_size,
-		.synth_audio_ts = &synth_audio_ts,
+		.synth_clock = &synth_clock,
 	};
 
 	uint64_t frame_count = 0;
@@ -1418,44 +1336,17 @@ int main(int argc, char **argv)
 		if (samples > max_samples)
 			samples = max_samples;
 
-		/* Always use synthetic timestamps from IMP_System_GetTimeStamp.
+		/* Always use synthetic timestamps from the sample counter.
 		 * SDK audio timestamps use a different clock than the encoder
 		 * on some SoCs (T31), causing A-V sync drift. Synthetic
-		 * timestamps share the encoder's clock source. */
-		int64_t ts = synth_audio_ts;
-		synth_audio_ts += (int64_t)samples * 1000000 / ctrl_ctx.sample_rate;
-
-		/* Slew toward CLOCK_MONOTONIC (see RAD_SYNTH_* above).
-		 * Hard resyncs are gated to live-paced reads: an instant
-		 * return served a chunk the SDK had already buffered (drain
-		 * burst or scheduler batch) and a long-gap return is the
-		 * oldest buffered chunk right after a stall — old audio on
-		 * the old continuous timeline, where wall comparison
-		 * misfires. Drain chunks can trickle as slowly as ~15ms on a
-		 * loaded SoC, so live means close to the 20ms chunk cadence,
-		 * not merely non-instant. At the first live-paced read after a
-		 * stall the residual error is exactly the audio the SDK really
-		 * lost, so the resync inserts a gap of the right size. Nudges are
-		 * NOT gated: during drains they are bounded zero-mean noise,
-		 * but gating them biases which chunks get evaluated and
-		 * skews the long-run rate (measured -1000ppm under a
-		 * +5000ppm test clock; ungated tracks true rate). */
+		 * timestamps share the encoder's clock source; the control
+		 * law slewing them toward CLOCK_MONOTONIC lives in
+		 * rad_clock.c together with the history that shaped it. */
 		int64_t now_us = rss_timestamp_us();
-		int64_t read_gap = now_us - last_read_us;
-		last_read_us = now_us;
-		bool live_paced = read_gap >= 15000 && read_gap <= 150000;
-		int64_t clk_err = now_us - synth_audio_ts;
+		int64_t ts = rad_clock_stamp(&synth_clock, samples, ctrl_ctx.sample_rate, now_us);
 		rad_resync_tick(&resync_log, now_us);
-		if (clk_err > RAD_SYNTH_RESYNC_BEHIND_US || clk_err < -RAD_SYNTH_RESYNC_AHEAD_US) {
-			if (live_paced) {
-				rad_resync_note(&resync_log, now_us, clk_err);
-				synth_audio_ts += clk_err;
-			}
-		} else if (clk_err > RAD_SYNTH_NUDGE_BAND_US) {
-			synth_audio_ts += RAD_SYNTH_NUDGE_US;
-		} else if (clk_err < -RAD_SYNTH_NUDGE_BAND_US) {
-			synth_audio_ts -= RAD_SYNTH_NUDGE_US;
-		}
+		if (synth_clock.resync_us)
+			rad_resync_note(&resync_log, now_us, synth_clock.resync_us);
 
 		const int16_t *pcm = frame.data;
 		int out_len = 0;

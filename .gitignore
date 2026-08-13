@@ -34,6 +34,9 @@ tests/sdp_parse.c
 fuzz/fuzz_sdp
 fuzz/fuzz_stun
 fuzz/fuzz_http_auth
+# Local fuzz runs grow the corpus in place; the committed seed corpus
+# stays tracked (ignore only hides new files). Refresh seeds with add -f.
+fuzz/corpus/
 tests/tools/
 
 # Claude Code worktrees live inside the repo; never commit them
