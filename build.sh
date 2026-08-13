@@ -72,28 +72,34 @@ case "$PLATFORM" in
         CROSS_GLOB="arm"
         ;;
     INFINITY6C)
-        # Either uClibc or glibc, and unlike the other two families that is not
+        # uClibc, glibc or musl, and unlike the other two families that is not
         # a contradiction. This family's vendor blobs declare a libc outright,
-        # and the drop ships the whole MI set twice -- one build needing
-        # libc.so.0 and one needing libc.so.6 -- so the C library is a property
-        # of the image rather than of the chip. Both tuples are searched because
-        # either can be the right answer; what matters is that the toolchain
-        # matches the MI set the image carries, and mismatching it is not a link
-        # error but a loader that never finds a libc the libraries can use.
+        # and the drop ships the whole MI set more than once -- one build
+        # needing libc.so.0 and one needing libc.so.6 -- so the C library is a
+        # property of the image rather than of the chip. All three are searched
+        # because any of them can be the right answer; what matters is that the
+        # toolchain matches the MI set the image carries, and mismatching it is
+        # not a link error but a loader that never finds a libc the libraries
+        # can use.
         #
         # Where Infinity6E is forced to glibc by its 4.9 kernel, this family
-        # runs 5.10 and a uClibc toolchain is buildable against it, which is
-        # what makes the smaller set an option at all.
+        # runs 5.10, so the smaller libcs are buildable against it at all.
+        # musl is here because an OpenIPC base is one: its output carries
+        # arm-buildroot-linux-musleabihf, and every board-verified Infinity6C
+        # daemon so far was built with that toolchain.
         #
         # Only one of these exists in any given Buildroot output, so the search
         # order decides nothing.
         SYSROOT_TUPLES="arm-thingino-linux-uclibcgnueabihf arm-buildroot-linux-uclibcgnueabihf \
                         arm-openipc-linux-uclibcgnueabihf arm-thingino-linux-gnueabihf \
-                        arm-buildroot-linux-gnueabihf arm-openipc-linux-gnueabihf"
+                        arm-buildroot-linux-gnueabihf arm-openipc-linux-gnueabihf \
+                        arm-buildroot-linux-musleabihf arm-openipc-linux-musleabihf \
+                        arm-thingino-linux-musleabihf"
         CROSS_CANDIDATES="arm-thingino-linux-uclibcgnueabihf- \
                           arm-buildroot-linux-uclibcgnueabihf- arm-linux-uclibcgnueabihf- \
                           arm-thingino-linux-gnueabihf- arm-buildroot-linux-gnueabihf- \
-                          arm-linux-gnueabihf-"
+                          arm-linux-gnueabihf- arm-openipc-linux-musleabihf- \
+                          arm-buildroot-linux-musleabihf- arm-linux-musleabihf-"
         CROSS_GLOB="arm"
         ;;
     *)

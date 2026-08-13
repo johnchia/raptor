@@ -224,16 +224,25 @@ address, plus `dmesg`, would settle it.
 ./build.sh infinity6c /path/to/openipc/output <targets>
 ```
 
-`build.sh` searches this family for a **uClibc or a glibc** sysroot tuple, and
-stops naming the tuples it tried if it finds neither, rather than producing a
-clean build of an unrunnable binary. Both are searched because on this family
-the C library belongs to the image rather than to the chip — the vendor drop
-ships the whole MI set twice, one build needing `libc.so.0` and one `libc.so.6`.
+`build.sh` searches this family for a **uClibc, glibc or musl** sysroot tuple,
+and stops naming the tuples it tried if it finds none, rather than producing a
+clean build of an unrunnable binary. All three are searched because on this
+family the C library belongs to the image rather than to the chip — the vendor
+drop ships the whole MI set more than once, one build needing `libc.so.0` and
+one `libc.so.6`.
 
-A **musl** image is a third real case, and the search does not cover it yet: an
-OpenIPC output carries `arm-buildroot-linux-musleabihf`, so `build.sh` reports
-no sysroot and exits even though the cross-compiler beside it is the right one.
-Build standalone against such a tree until a musl tuple joins that list.
+An OpenIPC base is the musl case, and it is the one this backend has actually
+been built and board-verified on. Note that the sysroot and the compiler are
+found by separate searches, and on that tree they disagree by name: the sysroot
+is `arm-buildroot-linux-musleabihf` while the compiler is
+`arm-openipc-linux-musleabihf-`. Both spellings are in both lists.
+
+**Switching platforms needs a HAL clean.** `libraptor_hal_video.a` is
+per-platform, and the objects outlive a change of `PLATFORM` — make sees them
+newer than their sources and keeps them, so the archive ends up mixing one
+backend's `g_ops` with another's implementations and the link fails on
+`star_*` or `i6c_*` symbols that were never compiled. `make -C raptor-hal
+clean` first.
 
 The HAL on its own, which needs no raptor tree:
 
