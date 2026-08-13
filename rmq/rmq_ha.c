@@ -157,6 +157,11 @@ static const char *const opt_daynight[] = {"auto", "day", "night", NULL};
  * shared because these are a different thing: what the interface offers, not
  * what the camera accepts. A control that stops short of the permitted range
  * is a usability choice; one that runs past it produces rejections.
+ *
+ * A box accepts a value only on the min + n*step grid, so `min` is chosen to
+ * put the values anyone actually types on it — 3 Mbit/s, 25 fps, a GOP of 30.
+ * That is why the floors here are round numbers rather than the true minimum
+ * rmq_cmd.c would allow.
  */
 static const ha_control_t controls[] = {
 	{.key = "ircut_mode",
@@ -186,9 +191,9 @@ static const ha_control_t controls[] = {
 	 .owner = RMQ_D_RVD,
 	 .value = "stream0.bitrate",
 	 .cmd_tpl = "{\"cmd\":\"set-bitrate\",\"channel\":0,\"value\":{{ value | int }}}",
-	 .min = 32000,
+	 .min = 100000,
 	 .max = 50000000,
-	 .step = 1000,
+	 .step = 100000,
 	 .unit = "bit/s"},
 	{.key = "stream1_bitrate_set",
 	 .name = "Sub bitrate",
@@ -197,9 +202,9 @@ static const ha_control_t controls[] = {
 	 .owner = RMQ_D_RVD,
 	 .value = "stream1.bitrate",
 	 .cmd_tpl = "{\"cmd\":\"set-bitrate\",\"channel\":1,\"value\":{{ value | int }}}",
-	 .min = 32000,
+	 .min = 100000,
 	 .max = 50000000,
-	 .step = 1000,
+	 .step = 100000,
 	 .unit = "bit/s"},
 
 	{.key = "stream0_fps_set",
@@ -210,9 +215,9 @@ static const ha_control_t controls[] = {
 	 .owner = RMQ_D_RVD,
 	 .value = "stream0.fps",
 	 .cmd_tpl = "{\"cmd\":\"set-fps\",\"channel\":0,\"value\":{{ value | int }}}",
-	 .min = 1,
+	 .min = 5,
 	 .max = 60,
-	 .step = 1,
+	 .step = 5,
 	 .unit = "fps"},
 	{.key = "stream1_fps_set",
 	 .name = "Sub frame rate",
@@ -222,9 +227,9 @@ static const ha_control_t controls[] = {
 	 .owner = RMQ_D_RVD,
 	 .value = "stream1.fps",
 	 .cmd_tpl = "{\"cmd\":\"set-fps\",\"channel\":1,\"value\":{{ value | int }}}",
-	 .min = 1,
+	 .min = 5,
 	 .max = 60,
-	 .step = 1,
+	 .step = 5,
 	 .unit = "fps"},
 
 	{.key = "stream0_gop_set",
@@ -235,9 +240,9 @@ static const ha_control_t controls[] = {
 	 .owner = RMQ_D_RVD,
 	 .value = "stream0.gop",
 	 .cmd_tpl = "{\"cmd\":\"set-gop\",\"channel\":0,\"value\":{{ value | int }}}",
-	 .min = 1,
+	 .min = 5,
 	 .max = 300,
-	 .step = 1},
+	 .step = 5},
 	{.key = "stream1_gop_set",
 	 .name = "Sub GOP",
 	 .kind = CTRL_NUMBER,
@@ -246,9 +251,9 @@ static const ha_control_t controls[] = {
 	 .owner = RMQ_D_RVD,
 	 .value = "stream1.gop",
 	 .cmd_tpl = "{\"cmd\":\"set-gop\",\"channel\":1,\"value\":{{ value | int }}}",
-	 .min = 1,
+	 .min = 5,
 	 .max = 300,
-	 .step = 1},
+	 .step = 5},
 
 	/* Two gain stages, deliberately both exposed: volume is the digital
 	 * trim and gain the analog front end, and only the second one can
