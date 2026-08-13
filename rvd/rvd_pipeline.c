@@ -679,8 +679,11 @@ int rvd_pipeline_init(rvd_state_t *st)
 		int highlight = rss_config_get_int(cfg, img, "highlight_depress", 0);
 		int backlight = rss_config_get_int(cfg, img, "backlight_comp", 0);
 		uint8_t defog = (uint8_t)rss_config_get_int(cfg, img, "defog_strength", 128);
-		int hflip = rss_config_get_int(cfg, img, "hflip", 0);
-		int vflip = rss_config_get_int(cfg, img, "vflip", 0);
+		/* Read as booleans so `true` works as well as the documented
+		 * 1 — a flag written the other spelling is not a number, and
+		 * read as one it falls back to the default without a word. */
+		int hflip = rss_config_get_bool(cfg, img, "hflip", false) ? 1 : 0;
+		int vflip = rss_config_get_bool(cfg, img, "vflip", false) ? 1 : 0;
 		int antiflicker =
 			rss_config_get_int(cfg, multi ? "sensor0" : "sensor", "antiflicker", 2);
 
@@ -745,9 +748,9 @@ int rvd_pipeline_init(rvd_state_t *st)
 			     rss_config_get_int(cfg, img_sect, "temper", 128));
 		RSS_HAL_CALL(st->ops, isp_set_running_mode_n, st->hal_ctx, s, RSS_ISP_DAY);
 		RSS_HAL_CALL(st->ops, isp_set_hflip_n, st->hal_ctx, s,
-			     rss_config_get_int(cfg, img_sect, "hflip", 0));
+			     rss_config_get_bool(cfg, img_sect, "hflip", false) ? 1 : 0);
 		RSS_HAL_CALL(st->ops, isp_set_vflip_n, st->hal_ctx, s,
-			     rss_config_get_int(cfg, img_sect, "vflip", 0));
+			     rss_config_get_bool(cfg, img_sect, "vflip", false) ? 1 : 0);
 		RSS_HAL_CALL(st->ops, isp_set_hue_n, st->hal_ctx, s,
 			     rss_config_get_int(cfg, img_sect, "hue", 128));
 		RSS_HAL_CALL(st->ops, isp_set_ae_comp_n, st->hal_ctx, s,

@@ -1113,6 +1113,47 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 		cJSON_AddNumberToObject(r, "wb_r", (double)wb.r_gain);
 		cJSON_AddNumberToObject(r, "wb_g", (double)wb.g_gain);
 		cJSON_AddNumberToObject(r, "wb_b", (double)wb.b_gain);
+
+		/*
+		 * Which of the above this platform has an operation for. A
+		 * backend publishes no op for a block its ISP does not have, so
+		 * the function pointer is the whole answer — and without it the
+		 * getters above are indistinguishable from a real reading, since
+		 * an absent block reads back a plausible 0.
+		 *
+		 * Says a setter exists, not that a live call will be honoured:
+		 * a part may accept a key only while the ISP channel is being
+		 * created, which is a refusal at the SDK and reported there.
+		 *
+		 * Comma-delimited and comma-terminated, so a membership test is
+		 * a search for ",key," and cannot match "again" inside
+		 * "max_again".
+		 */
+		char settable[320] = ",";
+		size_t sl = 1;
+#define ISP_CAP(fn, name)                                                                          \
+	if (st->ops->fn && sl < sizeof(settable) - 1)                                              \
+	sl += (size_t)snprintf(settable + sl, sizeof(settable) - sl, "%s,", name)
+		ISP_CAP(isp_set_brightness, "brightness");
+		ISP_CAP(isp_set_contrast, "contrast");
+		ISP_CAP(isp_set_saturation, "saturation");
+		ISP_CAP(isp_set_sharpness, "sharpness");
+		ISP_CAP(isp_set_hue, "hue");
+		ISP_CAP(isp_set_sinter_strength, "sinter");
+		ISP_CAP(isp_set_temper_strength, "temper");
+		ISP_CAP(isp_set_hflip, "hflip");
+		ISP_CAP(isp_set_vflip, "vflip");
+		ISP_CAP(isp_set_ae_comp, "ae_comp");
+		ISP_CAP(isp_set_max_again, "max_again");
+		ISP_CAP(isp_set_max_dgain, "max_dgain");
+		ISP_CAP(isp_set_dpc_strength, "dpc_strength");
+		ISP_CAP(isp_set_drc_strength, "drc_strength");
+		ISP_CAP(isp_set_highlight_depress, "highlight_depress");
+		ISP_CAP(isp_set_backlight_comp, "backlight_comp");
+		ISP_CAP(isp_set_defog_strength, "defog_strength");
+#undef ISP_CAP
+		cJSON_AddStringToObject(r, "settable", settable);
+
 		return rss_ctrl_resp_json(resp, resp_size, r);
 	}
 

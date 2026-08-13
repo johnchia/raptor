@@ -587,6 +587,50 @@ TEST live_commands_stay_out_of_the_config_plan(void)
 	PASS();
 }
 
+/*
+ * [image] is split across both tiers: the keys a running ISP channel refuses
+ * are config writes, and every other tuning knob stays a live command. A key
+ * landing in the wrong tier is the failure this guards — a live setter routed
+ * through the file would restart the video to change the brightness, and a
+ * creation-time key left live would report success and change nothing.
+ */
+TEST splits_the_image_section_across_the_two_tiers(void)
+{
+	rmq_cmd_plan_t p;
+
+	ASSERT_ALLOWED("{\"cmd\":\"config-set\",\"section\":\"image\",\"key\":\"hflip\","
+		       "\"value\":1}",
+		       &p);
+	ASSERT_EQ(RMQ_PLAN_CONFIG, p.kind);
+	ASSERT_EQ(RMQ_D_RVD, p.restart_owner);
+	ASSERT_EQ(1, p.write_count);
+	ASSERT_STR_EQ("image", p.writes[0].section);
+	ASSERT_STR_EQ("hflip", p.writes[0].key);
+	ASSERT_STR_EQ("1", p.writes[0].value);
+
+	/*
+	 * Orientation reaches the file as a number, never as `true`. rvd reads
+	 * it with rss_config_get_int, where `true` is not a number and falls
+	 * back to the default — a flip that writes cleanly, restarts the video
+	 * and changes nothing. Typing it as V_BOOL here is what produced that.
+	 */
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"image\",\"key\":\"hflip\","
+		       "\"value\":true}");
+
+	ASSERT_ALLOWED("{\"cmd\":\"config-set\",\"section\":\"image\",\"key\":\"temper\","
+		       "\"value\":200}",
+		       &p);
+	ASSERT_STR_EQ("200", p.writes[0].value);
+
+	/* Brightness is live, so the file is not where it goes. */
+	ASSERT_REFUSED("{\"cmd\":\"config-set\",\"section\":\"image\",\"key\":\"brightness\","
+		       "\"value\":128}");
+	ASSERT_ALLOWED("{\"cmd\":\"set-brightness\",\"value\":128}", &p);
+	ASSERT_EQ(RMQ_PLAN_DAEMON, p.kind);
+	ASSERT_EQ(0, p.write_count);
+	PASS();
+}
+
 SUITE(rmq_cmd_suite)
 {
 	RUN_TEST(refuses_the_named_hazards);
@@ -616,4 +660,5 @@ SUITE(rmq_cmd_suite)
 	RUN_TEST(config_set_needs_a_section_and_a_key);
 	RUN_TEST(every_writable_section_has_an_owner);
 	RUN_TEST(live_commands_stay_out_of_the_config_plan);
+	RUN_TEST(splits_the_image_section_across_the_two_tiers);
 }

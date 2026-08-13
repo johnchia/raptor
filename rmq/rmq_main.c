@@ -311,14 +311,15 @@ static void rmq_poll_cycle(rmq_state_t *st)
 	if (!state)
 		return;
 
-	/* Before discovery, not after: the resolution list is built from this,
-	 * and on the first cycle the geometry and the discovery document arrive
-	 * together. Read afterwards, the camera would advertise an empty list
-	 * until something unrelated forced a republish. */
-	bool geometry_changed = rmq_ha_note_geometry(st, state);
+	/* Before discovery, not after: the entity definitions are built from
+	 * this, and on the first cycle the camera's answers and the discovery
+	 * document arrive together. Read afterwards, the camera would advertise
+	 * an empty resolution list and every image control until something
+	 * unrelated forced a republish. */
+	bool camera_changed = rmq_ha_note_camera(st, state);
 
 	if (st->ha_discovery) {
-		bool changed = !st->discovery_published || geometry_changed ||
+		bool changed = !st->discovery_published || camera_changed ||
 			       rmq_daemons_differ(&daemons, &st->last_daemons);
 		if (changed) {
 			const rmq_daemons_t *prev =

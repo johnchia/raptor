@@ -163,19 +163,19 @@ static const ha_entity_t entities[] = {
 	 .name = "Total gain (raw)",
 	 .value = "ir.total_gain",
 	 .icon = "mdi:brightness-6",
-	 .cat = CAT_DIAGNOSTIC,
+	 .cat = CAT_PRIMARY,
+	 .owner = RMQ_D_RIC},
+	{.key = "ae_luma",
+	 .name = "AE luma",
+	 .value = "ir.ae_luma",
+	 .icon = "mdi:brightness-percent",
+	 .cat = CAT_PRIMARY,
 	 .owner = RMQ_D_RIC},
 	{.key = "exposure_us",
 	 .name = "Exposure",
 	 .value = "ir.exposure_us",
 	 .unit = "µs",
 	 .icon = "mdi:camera-iris",
-	 .cat = CAT_DIAGNOSTIC,
-	 .owner = RMQ_D_RIC},
-	{.key = "ae_luma",
-	 .name = "AE luma",
-	 .value = "ir.ae_luma",
-	 .icon = "mdi:brightness-percent",
 	 .cat = CAT_DIAGNOSTIC,
 	 .owner = RMQ_D_RIC},
 
@@ -251,6 +251,14 @@ typedef struct {
 	 * anywhere to put.
 	 */
 	bool restarts;
+
+	/*
+	 * An [image] key this control needs the platform to have. The entity is
+	 * published only while the camera lists it as settable, because an ISP
+	 * block a SoC does not have still reads back a plausible number: the
+	 * control would look like it worked and change nothing at all.
+	 */
+	const char *cap;
 } ha_control_t;
 
 static const char *const opt_daynight[] = {"auto", "day", "night", NULL};
@@ -359,7 +367,20 @@ static void res_build(res_list_t *l, const struct rmq_state *st)
 	l->opt[l->count] = NULL;
 }
 
-bool rmq_ha_note_geometry(struct rmq_state *st, const cJSON *state)
+/* Membership in the comma-terminated list rvd reports. Empty means the camera
+ * said nothing, which is treated as "everything" — an older rvd that does not
+ * publish the list should not lose every image control. */
+static bool isp_settable(const struct rmq_state *st, const char *key)
+{
+	if (st->isp_settable[0] == '\0')
+		return true;
+
+	char needle[48];
+	snprintf(needle, sizeof(needle), ",%s,", key);
+	return strstr(st->isp_settable, needle) != NULL;
+}
+
+bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 {
 	int w = 0, h = 0;
 	const cJSON *sensor = cJSON_GetObjectItemCaseSensitive(state, "sensor");
@@ -391,6 +412,17 @@ bool rmq_ha_note_geometry(struct rmq_state *st, const cJSON *state)
 		}
 	}
 
+	char settable[sizeof(st->isp_settable)] = "";
+	const cJSON *image = cJSON_GetObjectItemCaseSensitive(state, "image");
+	const cJSON *s = image ? cJSON_GetObjectItemCaseSensitive(image, "settable") : NULL;
+	if (cJSON_IsString(s) && s->valuestring)
+		rss_strlcpy(settable, s->valuestring, sizeof(settable));
+
+	if (strcmp(settable, st->isp_settable) != 0) {
+		rss_strlcpy(st->isp_settable, settable, sizeof(st->isp_settable));
+		changed = true;
+	}
+
 	return changed;
 }
 
@@ -419,11 +451,55 @@ bool rmq_ha_note_geometry(struct rmq_state *st, const cJSON *state)
 	 .icon = ic,                                                                               \
 	 .cat = CAT_PRIMARY,                                                                       \
 	 .owner = RMQ_D_RVD,                                                                       \
+	 .cap = k,                                                                                 \
 	 .value = "image." k,                                                                      \
 	 .cmd_tpl = "{\"cmd\":\"" cmd "\",\"value\":{{ value | int }}}",                           \
 	 .min = 0,                                                                                 \
 	 .max = hi,                                                                                \
 	 .step = 1}
+
+/*
+ * [image] keys some parts take only while the ISP channel is being created.
+ * SigmaStar's SetChnParam carries orientation and the 3DNR level together and
+ * a running channel refuses all three, so these go through the file and a
+ * restart instead — where they are applied at channel creation, which is the
+ * one moment the SDK accepts them.
+ *
+ * Restart tier on every platform, not only the ones that need it. Orientation
+ * is set once when the camera is mounted and noise reduction is not far
+ * behind, so a uniform behaviour is worth more here than saving a restart on
+ * the parts that would take it live.
+ */
+#define IMG_CFG_NUM(k, nm, ic, hi)                                                                 \
+	{.key = "image_" k,                                                                        \
+	 .name = nm,                                                                               \
+	 .kind = CTRL_NUMBER,                                                                      \
+	 .icon = ic,                                                                               \
+	 .cat = CAT_PRIMARY,                                                                       \
+	 .owner = RMQ_D_RVD,                                                                       \
+	 .cap = k,                                                                                 \
+	 .value = "image." k,                                                                      \
+	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"image\",\"key\":\"" k "\","             \
+		    "\"value\":{{ value | int }}}",                                                \
+	 .min = 0,                                                                                 \
+	 .max = hi,                                                                                \
+	 .step = 1,                                                                                \
+	 .restarts = true}
+
+#define IMG_CFG_SW(k, nm, ic)                                                                      \
+	{.key = "image_" k,                                                                        \
+	 .name = nm,                                                                               \
+	 .kind = CTRL_SWITCH,                                                                      \
+	 .icon = ic,                                                                               \
+	 .cat = CAT_PRIMARY,                                                                       \
+	 .owner = RMQ_D_RVD,                                                                       \
+	 .cap = k,                                                                                 \
+	 .value = "image." k,                                                                      \
+	 .payload = "{\"cmd\":\"config-set\",\"section\":\"image\",\"key\":\"" k "\","             \
+		    "\"value\":1}",                                                                \
+	 .payload_off = "{\"cmd\":\"config-set\",\"section\":\"image\",\"key\":\"" k "\","         \
+			"\"value\":0}",                                                            \
+	 .restarts = true}
 
 /* [ircut] thresholds ric applies and records live. */
 #define IRC_LIVE(k, nm, ic, hi)                                                                    \
@@ -622,7 +698,6 @@ static const ha_control_t controls[] = {
 	ISP_NUM("sharpness", "Sharpness", "set-sharpness", "mdi:triangle-outline", 255),
 	ISP_NUM("hue", "Hue", "set-hue", "mdi:palette-swatch", 255),
 	ISP_NUM("sinter", "Spatial noise reduction", "set-sinter", "mdi:blur", 255),
-	ISP_NUM("temper", "Temporal noise reduction", "set-temper", "mdi:blur-linear", 255),
 	ISP_NUM("ae_comp", "AE compensation", "set-ae-comp", "mdi:brightness-auto", 255),
 	ISP_NUM("max_again", "Max analog gain", "set-max-again", "mdi:signal", 160),
 	ISP_NUM("max_dgain", "Max digital gain", "set-max-dgain", "mdi:signal-variant", 160),
@@ -635,24 +710,9 @@ static const ha_control_t controls[] = {
 	ISP_NUM("backlight_comp", "Backlight compensation", "set-backlight-comp",
 		"mdi:brightness-4", 10),
 
-	{.key = "image_hflip",
-	 .name = "Flip horizontally",
-	 .kind = CTRL_SWITCH,
-	 .icon = "mdi:flip-horizontal",
-	 .cat = CAT_PRIMARY,
-	 .owner = RMQ_D_RVD,
-	 .value = "image.hflip",
-	 .payload = "{\"cmd\":\"set-hflip\",\"value\":1}",
-	 .payload_off = "{\"cmd\":\"set-hflip\",\"value\":0}"},
-	{.key = "image_vflip",
-	 .name = "Flip vertically",
-	 .kind = CTRL_SWITCH,
-	 .icon = "mdi:flip-vertical",
-	 .cat = CAT_PRIMARY,
-	 .owner = RMQ_D_RVD,
-	 .value = "image.vflip",
-	 .payload = "{\"cmd\":\"set-vflip\",\"value\":1}",
-	 .payload_off = "{\"cmd\":\"set-vflip\",\"value\":0}"},
+	IMG_CFG_NUM("temper", "Temporal noise reduction", "mdi:blur-linear", 255),
+	IMG_CFG_SW("hflip", "Flip horizontally", "mdi:flip-horizontal"),
+	IMG_CFG_SW("vflip", "Flip vertically", "mdi:flip-vertical"),
 
 	/* ---- Day/night ---- */
 	{.key = "ircut_mode",
@@ -664,12 +724,17 @@ static const ha_control_t controls[] = {
 	 .value = "ir.mode",
 	 .cmd_tpl = "{\"cmd\":\"ircut-mode\",\"value\":\"{{ value }}\"}",
 	 .options = opt_daynight},
+	/* ric reports the trigger it settled on, which need not be the one in
+	 * the file: a platform that reports no EV demotes `photo` to `luma` at
+	 * startup rather than running blind. Showing the setting rather than
+	 * the outcome would hide exactly that. */
 	{.key = "ircut_trigger",
 	 .name = "Day/night trigger",
 	 .kind = CTRL_SELECT,
 	 .icon = "mdi:target",
 	 .cat = CAT_CONFIG,
 	 .owner = RMQ_D_RIC,
+	 .value = "ir.trigger",
 	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"ircut\",\"key\":\"trigger\","
 		    "\"value\":\"{{ value }}\"}",
 	 .options = opt_trigger,
@@ -967,6 +1032,12 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 		 * than offering nothing, so the control waits for a poll that
 		 * knows something. */
 		if (ct->kind == CTRL_SELECT && !ct->options && res.count == 0)
+			live = false;
+
+		/* An ISP block this part does not have. The daemon is up and
+		 * the command would be accepted; it is the silicon underneath
+		 * that has nothing to change. */
+		if (ct->cap && !isp_settable(st, ct->cap))
 			live = false;
 
 		if (live) {

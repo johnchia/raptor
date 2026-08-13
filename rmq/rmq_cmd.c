@@ -332,11 +332,11 @@ static const struct {
 	const char *section;
 	rmq_daemon_t owner;
 } write_owner[] = {
-	{"sensor", RMQ_D_RVD}, {"stream0", RMQ_D_RVD},	 {"stream1", RMQ_D_RVD},
-	{"jpeg", RMQ_D_RVD},   {"audio", RMQ_D_RAD},	 {"rtsp", RMQ_D_RSD},
-	{"http", RMQ_D_RHD},   {"osd", RMQ_D_ROD},	 {"ircut", RMQ_D_RIC},
-	{"motion", RMQ_D_RMD}, {"recording", RMQ_D_RMR}, {"timelapse", RMQ_D_RMR},
-	{NULL, RMQ_D_COUNT},
+	{"sensor", RMQ_D_RVD},	  {"stream0", RMQ_D_RVD}, {"stream1", RMQ_D_RVD},
+	{"image", RMQ_D_RVD},	  {"jpeg", RMQ_D_RVD},	  {"audio", RMQ_D_RAD},
+	{"rtsp", RMQ_D_RSD},	  {"http", RMQ_D_RHD},	  {"osd", RMQ_D_ROD},
+	{"ircut", RMQ_D_RIC},	  {"motion", RMQ_D_RMD},  {"recording", RMQ_D_RMR},
+	{"timelapse", RMQ_D_RMR}, {NULL, RMQ_D_COUNT},
 };
 
 static rmq_daemon_t write_section_owner(const char *section)
@@ -376,6 +376,21 @@ static const cfg_key_t cfg_keys[] = {
 	{"stream1", "profile", V_INT, 0, 2, NULL},
 	{"stream1", "osd_enabled", V_BOOL, 0, 0, NULL},
 	{"stream1", "jpeg", V_BOOL, 0, 0, NULL},
+
+	/* -- Image. Only the keys a part may refuse while its ISP channel is
+	 *    running: SigmaStar carries orientation and the 3DNR level in one
+	 *    creation-time call, and applies them when the channel is built.
+	 *    The rest of [image] is a live command and stays out of here, so
+	 *    tuning by eye costs no interruption. -- */
+	/*
+	 * Orientation is 0/1 and not a boolean, because rvd reads it with
+	 * rss_config_get_int: `true` parses as no number at all and falls back
+	 * to the default, so a flip written that way is silently not applied.
+	 * The type here is the one the owning daemon reads with.
+	 */
+	{"image", "hflip", V_INT, 0, 1, NULL},
+	{"image", "vflip", V_INT, 0, 1, NULL},
+	{"image", "temper", V_INT, 0, 255, NULL},
 
 	/* -- Snapshots -- */
 	{"jpeg", "enabled", V_BOOL, 0, 0, NULL},

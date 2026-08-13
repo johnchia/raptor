@@ -68,13 +68,14 @@ struct rmq_state {
 	rmq_daemons_t last_daemons;
 	bool discovery_published;
 
-	/* Geometry the resolution list is built from, carried over from the
-	 * last poll. Cached rather than asked for at publish time so that the
-	 * options an entity offers and the value it reports come from the same
-	 * document, and cannot disagree. */
+	/* What the camera said about itself at the last poll, for the entity
+	 * definitions that depend on it. Cached rather than asked for at
+	 * publish time so that what an entity offers and what it reports come
+	 * from the same document, and cannot disagree. */
 	int sensor_width;
 	int sensor_height;
 	char stream_res[RMQ_STREAM_COUNT][16];
+	char isp_settable[320]; /* ",key,key," — see rvd's get-isp */
 
 	/* Config writes owed to daemons, deferred so that a burst of commands
 	 * costs one flash write rather than one per command. */

@@ -142,6 +142,17 @@ static void collect_rvd_isp(cJSON *state)
 	if (o) {
 		for (int i = 0; keys[i]; i++)
 			cJSON_AddNumberToObject(o, keys[i], json_int(resp, keys[i], 0));
+
+		/*
+		 * Which of them this platform can actually set. Every key above
+		 * reads back a number whether or not the ISP has the block, so
+		 * without this a subscriber cannot tell a real 0 from an absent
+		 * one — and a control offered for a block that is not there is
+		 * one that does nothing, quietly.
+		 */
+		const cJSON *set = cJSON_GetObjectItemCaseSensitive(resp, "settable");
+		if (cJSON_IsString(set) && set->valuestring)
+			cJSON_AddStringToObject(o, "settable", set->valuestring);
 	}
 
 	cJSON_Delete(resp);
