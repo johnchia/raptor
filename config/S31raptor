@@ -30,14 +30,24 @@ case "$1" in
 		start-stop-daemon -S -b -x /usr/bin/rsd -- -c "$CONF"
 		start-stop-daemon -S -b -x /usr/bin/ric -- -c "$CONF"
 
+		# rmq last: it polls the other daemons over their control sockets and
+		# restarts them for config keys that only apply at bring-up, so it wants
+		# everything it talks to already up. Guarded because the MQTT bridge is
+		# not in every image.
+		if [ -x /usr/bin/rmq ]; then
+			start-stop-daemon -S -b -x /usr/bin/rmq -- -c "$CONF"
+		fi
+
 		echo "Raptor started"
 		;;
 
 	stop)
 		echo "Stopping Raptor..."
 
-		# Stop consumers first, then producers, then HAL owner
-		for d in ric rsd rod rad rvd; do
+		# Stop consumers first, then producers, then HAL owner. rmq leads: it
+		# issues control commands to the rest, so stopping it first keeps it from
+		# restarting a daemon mid-shutdown.
+		for d in rmq ric rsd rod rad rvd; do
 			start-stop-daemon -K -x /usr/bin/$d 2>/dev/null
 		done
 
