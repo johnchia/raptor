@@ -1011,6 +1011,9 @@ fi
 [ "$OPT_TLS" = 1 ] && TARGETS="$TARGETS rwd rsp"
 [ "$OPT_SRT" = 1 ] && TARGETS="$TARGETS rsr"
 [ "$OPT_RSD555" = 1 ] && TARGETS="$TARGETS rsd-555"
+# rmq has no dependency beyond raptor-common/ipc, so it is always built;
+# it exits immediately unless [mqtt] enabled = true.
+TARGETS="$TARGETS rmq"
 
 HAL_VIDEO="$SYSROOT_DIR/usr/lib/libraptor_hal_video.a"
 HAL_AUDIO="$SYSROOT_DIR/usr/lib/libraptor_hal_audio.a"
@@ -1071,7 +1074,7 @@ make -j"$JOBS" \
 
 # Collect binaries
 mkdir -p "$SCRIPT_DIR/build"
-for d in rvd rsd rad rhd rod ric rmr rmd rfs rwc rwd rsp rsr rsd-555 raptorctl ringdump rac rverify; do
+for d in rvd rsd rad rhd rod ric rmr rmd rfs rwc rwd rsp rsr rsd-555 rmq raptorctl ringdump rac rverify; do
     [ -f "$SCRIPT_DIR/$d/$d" ] && cp -f "$SCRIPT_DIR/$d/$d" "$SCRIPT_DIR/build/"
 done
 

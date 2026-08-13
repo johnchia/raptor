@@ -25,6 +25,7 @@ rfs/rfs
 rsp/rsp
 rsr/rsr
 rsd-555/rsd-555
+rmq/rmq
 rlatency/rlatency
 rverify/rverify
 rss_build_info.*

@@ -167,6 +167,7 @@ const struct help_entry help_entries[] = {
 	{"rsp", "stop                                Stop push stream"},
 	{"rsp", "set-url <rtmp://...>                Change target URL (reconnects)"},
 	{"rsr", "clients                             List connected SRT clients"},
+	{"rmq", "status                              Show broker connection and topic prefix"},
 	{NULL, "<daemon> set-affinity <cpu>          Pin daemon to CPU core"},
 	{NULL, "<daemon> get-affinity                Show CPU affinity and sched policy"},
 	{NULL, NULL}};
@@ -214,5 +215,6 @@ void usage(FILE *out)
 		"  -j "
 		"'[{\"daemon\":\"rvd\",\"cmd\":\"...\"},{\"daemon\":\"rad\",\"cmd\":\"...\"}]'\n");
 	fprintf(out,
-		"\nDaemons: rvd, rsd, rad, rod, rhd, ric, rmr, rmd, rwd, rwc, rfs, rsp, rsr\n");
+		"\nDaemons: rvd, rsd, rad, rod, rhd, ric, rmr, rmd, rwd, rwc, rfs, rsp, rsr, "
+		"rmq\n");
 }
