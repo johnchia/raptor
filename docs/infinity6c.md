@@ -48,12 +48,36 @@ Four things about that shape are worth knowing before reading any of the code:
 | Video | H.264 and H.265, main + sub, over RTSP, 25 fps each |
 | Audio | Capture via `rad`, `MI_AI` at 50 periods/s |
 | OSD | Text on the VENC channel, covers on SCL, both streams at full resolution |
-| JPEG / MJPEG | Off the MJPEG VENC device, fed frame-by-frame |
 | Exposure readback | `isp_get_exposure` — shutter, gain, AE luma, AWB gains |
 | Colour | Natural, once the per-sensor IQ binary loads — see below |
+| ISP tuning | Measured moving the picture — see below for which knobs and how far |
+| Media clock | `utc_offset_us` published in the ring, refreshed every 5 s |
 | Restarting `rvd` | Live, with `rad` quiesced around it — see below |
 
-## The ISP tuning surface: written, not board-verified
+## Known broken
+
+**JPEG and MJPEG snapshots do not work on this backend.** Both JPEG channels are
+created and then fail to get a source:
+
+    venc chn 2: cloning SCL port 0 to 2 failed: -5
+    MI_SYS_BindChnPort2(SCL port 0 -> VENC dev 8 chn 2) failed: -1610014702
+    venc chn 3: paired video chn 1 is not bound to an SCL port yet, so there is
+                no geometry to clone -- no snapshots on this stream
+
+The second message is the more interesting one, and it is a consequence of the
+cascade: the sub-stream has no SCL port of its own, so a JPEG channel paired with
+it has nothing to clone. The first says the scaler refused a second port for the
+full-resolution channel. `/snap` and `/mjpeg` are therefore unavailable, the
+`jpeg0` and `jpeg1` rings exist but never advance past write sequence 0, and a
+reader on them blocks forever rather than erroring.
+
+This predates the ISP work — the same four lines appear under earlier builds —
+and it has not been diagnosed. Whoever picks it up should start with whether the
+scaler can serve a snapshot port at all alongside a `HW_RING` leg, since that
+would decide between "clone a port" and "share the video port with a
+transient-depth grab".
+
+## The ISP tuning surface
 
 `hal_isp.c` publishes brightness, contrast, saturation, defog, `ae_comp`,
 antiflicker, day/night, hflip, vflip, temper and the sensor rate. Every ABI
@@ -63,9 +87,24 @@ payload length itself in the descriptor it hands to
 `MI_ISP_GENERAL_SetIspApiData`. `raptor-hal/tests/abi_iq_i6c.c` asserts the
 table against the vendor headers at compile time.
 
-What that does *not* establish is whether a given module's value survives CUS3A,
-and no camera was reachable when this was written. Treat each knob as unverified
-until it has been watched moving the picture.
+Measured on an SSC377QE + IMX335, reading the picture out of the sub-stream ring
+and decoding it, rather than by trusting a return code:
+
+| Knob | Evidence |
+|---|---|
+| brightness | mean luma 110.2 at 30, 144.1 at 128, 198.7 at 230; MI 11 / 50 / 90 of 0..100 |
+| saturation | mean chroma saturation 0.0099 at 20, 0.1522 at 128, 0.2675 at 250; readback exact, and returning to 128 restores 0.1522 to four decimals |
+| day/night | saturation 0.1528 → **0.0000** → 0.1525, i.e. exactly monochrome and fully reversible |
+| antiflicker | raptor 0/1/2 reach MI 0/2/1 — the swap is real, see below |
+| `ae_comp` | 60 → MI −11 → reads back 57, with the neutral learned from the tuning as MI 0 in −20..20 |
+| hflip | NCC 0.985 against the mirrored reference, 0.082 against the original — but only from a restart, see below |
+| temper | reads back 146, which is 3DNR level 4 of 7 — the eight-step quantisation, as designed |
+| sensor rate | `isp_set_sensor_fps` returns OK and rvd logs `sensor0 fps: 25` instead of its "neither settable nor readable" fallback |
+
+**The antiflicker enum is not raptor's.** MI orders 60 Hz before 50 Hz and raptor
+the other way, so the mapping is 0→0, 1→2, 2→1. A straight cast would silently
+set the mains frequency the operator excluded — the one bug in this area that
+would have been invisible in review and in testing, since both values "work".
 
 Three mechanisms sit behind the one op surface, and telling them apart is most
 of understanding the file:
@@ -75,6 +114,21 @@ of understanding the file:
 | brightness, contrast, saturation, defog, `ae_comp`, antiflicker, day/night | the tuning API — one wrapper shape per module, driven from a table |
 | hflip, vflip, temper | fields of the ISP channel's parameter block, `MI_ISP_SetChnParam` |
 | sensor rate | `MI_SNR_SetFps` / `MI_SNR_GetFps` |
+
+**hflip, vflip and temper are config settings, not runtime ones.** The ISP
+channel accepts its parameter block only while being created; a running channel
+returns `-1610121208` for the identical values that bring-up accepts. So:
+
+```sh
+raptorctl config set image hflip 1
+raptorctl rad ai-disable && raptorctl rvd restart && raptorctl rad ai-enable
+```
+
+A live `raptorctl rvd set-hflip 1` answers `failed (-5)` and changes nothing —
+deliberately: the request is rolled back rather than held for the next pipeline
+build, because a command that reports failure and then takes effect minutes later
+is worse than one that plainly fails. The log says so once, naming the config
+route.
 
 **Nothing is applied when rvd asks for it.** rvd drives its whole `[image]`
 block during pipeline construction, which here is before the ISP channel exists
@@ -108,7 +162,7 @@ one band and calling it sharpness would be worse than `RSS_ERR_NOTSUP`.
 | `isp_set_sharpness`, `isp_set_sinter_strength` | per-band arrays, no scalar field — see above |
 | `isp_set_wb`, `isp_set_hue`, DRC, DPC, highlight depress, backlight comp | no counterpart bound yet |
 | `enc_set_color2grey` | grey is one ISP setting every stream draws from, so a per-channel encoder op would grey both and lie about it |
-| `fs_get_frame`, `fs_release_frame` | raw readback needs a user-facing `MI_SYS` output port on the scaler, which nothing in raptor asks for on this part. rvd already answers "raw snap not supported on this SoC" |
+| `fs_get_frame`, `fs_release_frame` | raw readback needs a user-facing `MI_SYS` output port on the scaler. rvd already answers "raw snap not supported on this SoC" — and note the scaler refuses a second port for JPEG too, so the two are probably the same question |
 | `audio_enable_ns` / `agc` / `hpf` / `aec`, `audio_register_encoder` | absent from the silicon's library, not merely unavailable: `libmi_ai.so` exports 22 symbols and not one is `vqe`, `aenc`, `aed`, `iaa` or `src`. The vendor's note: "In 2.19 and later versions of the API, MI_AI no longer includes the associated algorithm functions" |
 | the `ao_*` family | playback; `libmi_ao` is never loaded and this backend is capture-only by design |
 | IVS / motion detection | absent from both SigmaStar backends |
