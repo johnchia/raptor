@@ -37,6 +37,22 @@ static const char *category_name(ha_category_t c)
 	return c == CAT_CONFIG ? "config" : c == CAT_DIAGNOSTIC ? "diagnostic" : NULL;
 }
 
+/*
+ * Diagnostics ship disabled. They are the majority of the entity count and
+ * the minority of what anyone looks at, and every one of them costs a row in
+ * the entity registry and a state write on each poll whether or not it is
+ * ever read. Enabling one is two clicks; wading through thirteen to find the
+ * two that matter is the cost of the other default.
+ *
+ * Home Assistant applies this only when it first creates an entity, so a
+ * camera already discovered keeps whatever it has. Clearing the discovery
+ * topic and letting it republish is what re-applies it.
+ */
+static bool enabled_by_default(ha_category_t c)
+{
+	return c != CAT_DIAGNOSTIC;
+}
+
 typedef struct {
 	const char *key;       /* component key + unique_id suffix */
 	const char *name;      /* entity name, shown under the device name */
@@ -307,6 +323,8 @@ static cJSON *make_common(struct rmq_state *st, const char *key, const char *nam
 		cJSON_AddStringToObject(c, "ic", icon);
 	if (category_name(cat))
 		cJSON_AddStringToObject(c, "ent_cat", category_name(cat));
+	if (!enabled_by_default(cat))
+		cJSON_AddBoolToObject(c, "en", false);
 
 	return c;
 }
