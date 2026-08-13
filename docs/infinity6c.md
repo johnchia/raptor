@@ -220,20 +220,20 @@ address, plus `dmesg`, would settle it.
 
 ## Building
 
-Platform routing for `INFINITY6C` is **not on this branch yet** — `build.sh`
-here does not accept it. The routing (and the two rvd OSD fixes this backend
-needs) is a small set of commits pending a merge; until that lands, build
-against a branch that carries them.
-
-Once it has:
-
 ```sh
 ./build.sh infinity6c /path/to/openipc/output <targets>
 ```
 
-`build.sh` looks for a uClibc sysroot tuple and stops naming the tuples it
-tried if there is none, rather than producing a clean build of an unrunnable
-binary.
+`build.sh` searches this family for a **uClibc or a glibc** sysroot tuple, and
+stops naming the tuples it tried if it finds neither, rather than producing a
+clean build of an unrunnable binary. Both are searched because on this family
+the C library belongs to the image rather than to the chip — the vendor drop
+ships the whole MI set twice, one build needing `libc.so.0` and one `libc.so.6`.
+
+A **musl** image is a third real case, and the search does not cover it yet: an
+OpenIPC output carries `arm-buildroot-linux-musleabihf`, so `build.sh` reports
+no sysroot and exits even though the cross-compiler beside it is the right one.
+Build standalone against such a tree until a musl tuple joins that list.
 
 The HAL on its own, which needs no raptor tree:
 
