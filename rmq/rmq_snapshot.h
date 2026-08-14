@@ -1,42 +1,61 @@
 /*
- * rmq_snapshot.h -- JPEG stills from a ring, published as an MQTT image
+ * rmq_snapshot.h -- The camera's picture, published as the URL rhd serves it
  *
- * rvd already encodes JPEG on demand: the channel runs only while its ring has
- * a reader (rvd_frame_loop.c:119), so opening the ring is what starts the
- * encoder and closing it is what stops it. A snapshot therefore costs an
- * encode while it is being taken and nothing at all the rest of the time,
- * which is what makes this affordable to leave enabled.
+ * rhd serves /snap.jpg and /mjpeg out of the same JPEG rings rvd fills, so the
+ * picture is fetched from the camera rather than pushed through the broker.
+ * What this publishes is a small document of URLs, retained on
+ * <topic_prefix>/snapshot. Home Assistant's image entity refetches whenever a
+ * message lands there, which makes the configured interval the refresh rate
+ * and {"cmd":"snapshot"} a refresh on demand.
  *
- * The alternative was Home Assistant fetching a URL from rhd, which is what
- * the plan assumed. rhd is not in this image, and a picture that needs a
- * second daemon running is a picture that is usually missing.
+ * This file previously read the JPEG ring itself and published the frame. That
+ * cost the broker a retained message the size of the picture — ~600 KB from
+ * the main stream — and every subscriber a copy of it, to deliver something
+ * the camera was already able to serve. It was written that way because rhd
+ * was not in the image; it is now.
+ *
+ * The encode is unchanged either way. rhd acquires a JPEG ring only while a
+ * request is parked on it or an MJPEG client is watching, so rvd's JPEG
+ * channel still runs for the fetch and is stopped the rest of the time.
  */
 
 #ifndef RMQ_SNAPSHOT_H
 #define RMQ_SNAPSHOT_H
 
+#include <rss_common.h>
+
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 struct rmq_state;
 
-/*
- * A ceiling rather than a guess: the main stream at 2560x1920 measures ~600 KB
- * against the sub's ~6 KB, and a frame past this is dropped rather than
- * truncated, because half a JPEG is not a smaller picture.
- */
-#define RMQ_SNAPSHOT_MAX (1024 * 1024)
+/* Scheme, credential, bracketed address, port, path and query. */
+#define RMQ_URL_MAX 320
 
 /*
- * Take one frame and publish it retained. Returns 0 on success.
+ * Build one of rhd's URLs, addressed so that whoever reads the broker can
+ * reach it. Returns 0, or -1 when rhd is not answering — a URL to a port
+ * nothing is listening on is worse than no URL at all.
  *
- * Blocks the serve loop for up to RMQ_SNAPSHOT_WAIT_MS while the encoder
- * spins up and produces a frame — bounded deliberately, since the caller is
- * the same single thread that answers commands.
+ * `with_auth` embeds the [http] credential. Pass it only for a consumer that
+ * has nowhere else to put one: anything a person is meant to read or click
+ * should get the bare URL and supply the credential itself.
  */
-int rmq_snapshot_capture(struct rmq_state *st);
+int rmq_snapshot_url(const struct rmq_state *st, const char *path, bool with_auth, char *out,
+		     size_t outsz);
 
-/* True when an automatic capture is due. */
+/*
+ * Take the [http] credential from a parsed config. Called at startup and
+ * again whenever rmq rewrites the file, since a bridge holding the previous
+ * password would publish a URL that 401s and say nothing about why.
+ */
+void rmq_http_creds(struct rmq_state *st, rss_config_t *cfg);
+
+/* Publish the URL document, retained. Returns 0 on success. */
+int rmq_snapshot_publish(struct rmq_state *st);
+
+/* True when an automatic refresh is due. */
 bool rmq_snapshot_due(const struct rmq_state *st, uint64_t now_ms);
 
 #endif /* RMQ_SNAPSHOT_H */

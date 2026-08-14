@@ -69,6 +69,24 @@ static const struct {
  */
 static const char *const retired_groups[] = {"image", "daynight", NULL};
 
+/*
+ * Components an earlier build published and this one does not, on the camera's
+ * own page. Same reasoning as the groups above and the same remedy: a
+ * component simply absent from the document is left alone, and only an empty
+ * one withdraws it.
+ *
+ * `snapshot_image` was a camera platform fed JPEG bytes over the broker and
+ * `snapshot` the button that pushed them; both are replaced by `picture`,
+ * which Home Assistant fetches from rhd instead. `rtsp_user` and `rtsp_pass`
+ * set one endpoint's account and are replaced by `cam_user` and `cam_pass`,
+ * which set the camera's.
+ *
+ * Deletable once no camera in the fleet still runs a build that published
+ * them — they cost one empty component per discovery publish until then.
+ */
+static const char *const retired_entities[] = {"snapshot", "snapshot_image", "rtsp_user",
+					       "rtsp_pass", NULL};
+
 static const char *category_name(ha_category_t c)
 {
 	return c == CAT_CONFIG ? "config" : c == CAT_DIAGNOSTIC ? "diagnostic" : NULL;
@@ -142,6 +160,32 @@ static const ha_entity_t entities[] = {
 	 .icon = "mdi:account-eye",
 	 .cat = CAT_PRIMARY,
 	 .owner = RMQ_D_RSD},
+	{.key = "mjpeg_clients",
+	 .measurement = true,
+	 .name = "MJPEG viewers",
+	 .value = "http.mjpeg",
+	 .icon = "mdi:account-eye-outline",
+	 .cat = CAT_DIAGNOSTIC,
+	 .owner = RMQ_D_RHD},
+	/*
+	 * The MJPEG endpoint, spelled out rather than left to be worked out.
+	 *
+	 * Home Assistant cannot be given an MJPEG camera over discovery — the
+	 * MQTT camera platform takes an image topic and nothing else, and the
+	 * MJPEG integration is added by hand and asks for a URL. So the useful
+	 * thing the bridge can do is say what to paste: the camera knows its
+	 * own address on the network the broker is on, and whoever is typing
+	 * generally does not.
+	 *
+	 * Without the credential. That integration has its own username and
+	 * password fields, and this value is read by a person.
+	 */
+	{.key = "mjpeg_url",
+	 .name = "MJPEG stream",
+	 .value = "http.mjpeg_url",
+	 .icon = "mdi:link-variant",
+	 .cat = CAT_DIAGNOSTIC,
+	 .owner = RMQ_D_RHD},
 
 	/* -- Diagnostic: video. Anything settable is a control rather than a
 	 *    sensor, so what is left here is only what the camera reports back
@@ -769,13 +813,18 @@ static const ha_control_t controls[] = {
 	 .step = 1,
 	 .restarts = true},
 	/*
-	 * RTSP Digest credentials.
+	 * The camera's account: one username and one password, applied to
+	 * RTSP and to HTTP together. They are separate keys in the config
+	 * file and separate daemons behind it, but two accounts on one camera
+	 * is one account plus a forgotten one, so `credentials-set` writes
+	 * both halves from each field.
 	 *
-	 * rsd turns auth on only when both are set, so clearing either one is
-	 * how it is turned off — and the pair is written one key at a time,
-	 * which means a viewer can be locked out for the moment between two
-	 * edits. Setting the password first and the username second is the
-	 * order that avoids it.
+	 * Both daemons authenticate only when a username and a password are
+	 * both set, so clearing either field turns authentication off — which
+	 * is the only way to turn it off. Each field is still its own command,
+	 * so a viewer can be locked out for the moment between two edits;
+	 * setting the password first and the username second is the order that
+	 * avoids it.
 	 *
 	 * The password reads back empty always: nothing on the camera reports
 	 * it, so an empty box is what it actually knows, and a mask would be a
@@ -783,38 +832,33 @@ static const ha_control_t controls[] = {
 	 * it is applied — letters, digits and '-', '_', '.', '~' — so that a
 	 * credential cannot become a second config directive or a URL that
 	 * parses as something else.
+	 *
+	 * Owned by rsd because rsd is the one that reports the username back.
+	 * A camera running rhd alone still accepts the command; it just has no
+	 * box to type it into, which is the same rule every other control here
+	 * follows.
 	 */
-	{.key = "rtsp_user",
-	 .name = "RTSP username",
+	{.key = "cam_user",
+	 .name = "Camera username",
 	 .kind = CTRL_TEXT,
 	 .icon = "mdi:account",
 	 .cat = CAT_CONFIG,
 	 .owner = RMQ_D_RSD,
 	 .value = "rtsp.username",
-	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"username\","
-		    "\"value\":\"{{ value }}\"}",
+	 .cmd_tpl = "{\"cmd\":\"credentials-set\",\"username\":\"{{ value }}\"}",
 	 .max = 63,
 	 .restarts = true},
-	{.key = "rtsp_pass",
-	 .name = "RTSP password (blank = no auth)",
+	{.key = "cam_pass",
+	 .name = "Camera password (blank = no auth)",
 	 .kind = CTRL_TEXT,
 	 .icon = "mdi:key",
 	 .cat = CAT_CONFIG,
 	 .owner = RMQ_D_RSD,
 	 .value = "rtsp.password",
-	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
-		    "\"value\":\"{{ value }}\"}",
+	 .cmd_tpl = "{\"cmd\":\"credentials-set\",\"password\":\"{{ value }}\"}",
 	 .max = 63,
 	 .restarts = true,
 	 .secret = true},
-	/* Paired with the camera component below, which shows what it takes. */
-	{.key = "snapshot",
-	 .name = "Take snapshot",
-	 .kind = CTRL_BUTTON,
-	 .icon = "mdi:camera",
-	 .cat = CAT_PRIMARY,
-	 .owner = RMQ_D_RVD,
-	 .payload = "{\"cmd\":\"snapshot\"}"},
 	{.key = "request_idr",
 	 .name = "Request keyframe",
 	 .kind = CTRL_BUTTON,
@@ -1115,6 +1159,18 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 	} else {
 		cJSON_AddStringToObject(dev, "ids", st->client_id);
 		cJSON_AddStringToObject(dev, "name", st->device_name);
+
+		/*
+		 * rhd's own page, which Home Assistant renders as "Visit
+		 * device" on the device page — the one place a link to the
+		 * camera itself belongs, and where the MJPEG stream is. Left
+		 * out rather than pointing at a port nothing is listening on
+		 * when rhd is absent, and without the credential because a
+		 * person is going to click it.
+		 */
+		char url[RMQ_URL_MAX];
+		if (rmq_snapshot_url(st, "/", false, url, sizeof(url)) == 0)
+			cJSON_AddStringToObject(dev, "cu", url);
 	}
 	cJSON_AddStringToObject(dev, "mf", "Raptor");
 	cJSON_AddStringToObject(dev, "mdl", st->model);
@@ -1170,18 +1226,30 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 	 * nothing, which is worse than not offering it.
 	 */
 	/*
-	 * The picture. Its own platform rather than a row in either table:
-	 * a camera component carries an image topic and nothing else, with no
-	 * state template, no unit and no command.
+	 * The picture. Its own platform rather than a row in either table: an
+	 * image component carries a URL topic and nothing else, with no state
+	 * template, no unit and no command.
+	 *
+	 * The URL is what travels, not the JPEG — Home Assistant fetches from
+	 * rhd, so the broker carries a couple of hundred bytes on a refresh
+	 * rather than the whole frame, and the picture is as fresh as the
+	 * fetch rather than as fresh as the last publish. It needs rhd for the
+	 * same reason.
 	 */
-	if (g == GRP_CAMERA && st->snapshot_enabled) {
-		cJSON *cam = make_common(st, "snapshot_image", "Snapshot", NULL, CAT_PRIMARY, true,
-					 "camera");
-		if (cam) {
-			cJSON_AddStringToObject(cam, "t", st->topic_snapshot);
-			cJSON_AddItemToObject(cmps, "snapshot_image", cam);
+	if (g == GRP_CAMERA && st->snapshot_enabled && owner_available(RMQ_D_RHD, now)) {
+		cJSON *img = make_common(st, "picture", "Picture", "mdi:camera", CAT_PRIMARY, true,
+					 "image");
+		if (img) {
+			cJSON_AddStringToObject(img, "url_t", st->topic_snapshot);
+			cJSON_AddStringToObject(img, "url_tpl", "{{ value_json.snapshot }}");
+			cJSON_AddItemToObject(cmps, "picture", img);
 			published++;
 		}
+	}
+
+	if (g == GRP_CAMERA) {
+		for (int i = 0; retired_entities[i]; i++)
+			cJSON_AddItemToObject(cmps, retired_entities[i], cJSON_CreateObject());
 	}
 
 	res_list_t res;
@@ -1206,10 +1274,6 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 		 * the command would be accepted; it is the silicon underneath
 		 * that has nothing to change. */
 		if (ct->cap && !isp_settable(st, ct->cap))
-			live = false;
-
-		/* No picture to take one of. */
-		if (strcmp(ct->key, "snapshot") == 0 && !st->snapshot_enabled)
 			live = false;
 
 		if (live) {

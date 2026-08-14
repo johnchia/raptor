@@ -61,7 +61,7 @@ void rmq_restart_stage(struct rmq_state *st, const rmq_cfg_write_t *w, rmq_daemo
 	(void)owner;
 }
 
-int rmq_snapshot_capture(struct rmq_state *st)
+int rmq_snapshot_publish(struct rmq_state *st)
 {
 	(void)st;
 	return 0;

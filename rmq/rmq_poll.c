@@ -3,6 +3,7 @@
  */
 
 #include "rmq_poll.h"
+#include "rmq.h"
 
 #include <rss_common.h>
 #include <rss_ipc.h>
@@ -255,6 +256,47 @@ static void collect_rsd(cJSON *state)
 	cJSON_Delete(resp);
 }
 
+/*
+ * rhd: the HTTP endpoint the picture is fetched from.
+ *
+ * The listener is cached on the bridge as well as reported, because every URL
+ * rmq publishes is built from it — asked for rather than read out of [http],
+ * since the config says what rhd was started with and this says what it is
+ * doing. A port change restarts rhd, so the two agree in the end; between the
+ * write and the restart they do not, and this is the half that is true.
+ */
+static void collect_rhd(struct rmq_state *st, cJSON *state)
+{
+	cJSON *resp = ask("rhd", "{\"cmd\":\"status\"}");
+	if (!resp)
+		return;
+
+	st->http_port = json_int(resp, "port", 0);
+	st->http_tls = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(resp, "tls"));
+
+	cJSON *o = cJSON_AddObjectToObject(state, "http");
+	if (o) {
+		cJSON_AddNumberToObject(o, "port", st->http_port);
+		cJSON_AddNumberToObject(o, "clients", json_int(resp, "clients", 0));
+		cJSON_AddNumberToObject(o, "mjpeg", json_int(resp, "mjpeg", 0));
+
+		/*
+		 * The stream URL, spelled out. Home Assistant cannot be given
+		 * an MJPEG camera over discovery — its MJPEG integration is
+		 * added by hand and asks for the URL — so the useful thing the
+		 * bridge can do is say what to paste, rather than leave it to
+		 * be worked out from an address the camera knows and the
+		 * person reading does not.
+		 */
+		char path[32], url[RMQ_URL_MAX];
+		snprintf(path, sizeof(path), "/mjpeg?stream=%d", st->snapshot_stream);
+		if (rmq_snapshot_url(st, path, false, url, sizeof(url)) == 0)
+			cJSON_AddStringToObject(o, "mjpeg_url", url);
+	}
+
+	cJSON_Delete(resp);
+}
+
 /* ric: day/night decision plus the exposure readings behind it. */
 static void collect_ric(cJSON *state)
 {
@@ -390,7 +432,7 @@ static void collect_system(cJSON *state)
 	}
 }
 
-cJSON *rmq_poll_state(rmq_daemons_t *out)
+cJSON *rmq_poll_state(struct rmq_state *st, rmq_daemons_t *out)
 {
 	cJSON *state = cJSON_CreateObject();
 	if (!state)
@@ -423,6 +465,10 @@ cJSON *rmq_poll_state(rmq_daemons_t *out)
 		collect_rod(state);
 	if (out->up[RMQ_D_RIC])
 		collect_ric(state);
+	if (out->up[RMQ_D_RHD])
+		collect_rhd(st, state);
+	else
+		st->http_port = 0;
 
 	collect_system(state);
 

@@ -183,6 +183,11 @@ static void load_config(rmq_state_t *st)
 	if (st->snapshot_interval_sec < 0)
 		st->snapshot_interval_sec = 0;
 
+	/* rhd's credential, so the picture URL carries one when rhd demands
+	 * one. Kept in step with the file by rmq_restart.c, which is the only
+	 * thing that changes it after this point. */
+	rmq_http_creds(st, c);
+
 	/* Home Assistant discovery */
 	st->ha_discovery = rss_config_get_bool(c, "mqtt", "ha_discovery", true);
 	rss_strlcpy(st->discovery_prefix,
@@ -368,6 +373,12 @@ static int rmq_connect(rmq_state_t *st)
 	 * assume. Forcing it also re-establishes entities after an HA restart
 	 * that cleared them. */
 	st->discovery_published = false;
+
+	/* The picture URL names this connection's local address, which a
+	 * reconnect may have changed — a lease renewal onto a different
+	 * address, or a second interface taking over the route to the broker.
+	 * Republished rather than assumed for the same reason discovery is. */
+	st->snapshot_next_ms = 0;
 	return 0;
 }
 
@@ -380,7 +391,7 @@ static int rmq_connect(rmq_state_t *st)
 static void rmq_poll_cycle(rmq_state_t *st)
 {
 	rmq_daemons_t daemons;
-	cJSON *state = rmq_poll_state(&daemons);
+	cJSON *state = rmq_poll_state(st, &daemons);
 	if (!state)
 		return;
 
@@ -466,7 +477,7 @@ static void serve_loop(rmq_state_t *st)
 		}
 
 		if (rmq_snapshot_due(st, now))
-			rmq_snapshot_capture(st);
+			rmq_snapshot_publish(st);
 
 		if (st->save_due_ms && now >= st->save_due_ms)
 			rmq_cmd_flush_saves(st);

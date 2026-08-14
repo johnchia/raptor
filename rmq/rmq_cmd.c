@@ -309,8 +309,9 @@ static const cmd_def_t *find_command(const char *name)
 /* is listed, and listing it as one of these three types cannot expose  */
 /* free-form text.                                                      */
 /*                                                                     */
-/* V_CRED is the one exception, and it exists for exactly the two RTSP  */
-/* credential keys: a password nobody may choose is not a password. It  */
+/* V_CRED is the one exception, and it exists for exactly the four      */
+/* credential keys — a username and a password for each of [rtsp] and   */
+/* [http]: a password nobody may choose is not a password. It           */
 /* is not a general string type. The grammar is RFC 3986's unreserved   */
 /* set — letters, digits, '-', '_', '.', '~' — which is what an RTSP    */
 /* URL, a Digest header, an INI value and a shell word all accept       */
@@ -341,8 +342,10 @@ typedef struct {
  * (raptorctl_config.c), extended with the sections raptor has gained since.
  *
  * Unlike the readable list above, [rtsp] and [http] appear here: a section
- * that cannot be read in bulk can still have individual keys written, and the
- * password is simply not one of the keys the table names.
+ * that cannot be read in bulk can still have individual keys written. Their
+ * passwords are among those keys — a credential that cannot be set is a
+ * credential that stays at whatever the image shipped with — and the asymmetry
+ * is the point: settable, never reported back.
  */
 static const struct {
 	const char *section;
@@ -421,22 +424,25 @@ static const cfg_key_t cfg_keys[] = {
 	{"audio", "codec", V_ENUM, 0, 0, choices_acodec},
 	{"audio", "bitrate", V_INT, 8000, 320000, NULL},
 
-	/* -- RTSP and HTTP. Both sections hold a username and password, and
-	 *    neither appears among the keys, so the credential is out of
-	 *    reach in the same way an unnamed command is. -- */
+	/* -- RTSP and HTTP. Both sections hold a username and password, both
+	 *    are here, and `credentials-set` writes the pair in one command so
+	 *    the camera has one account rather than two that drift. -- */
 	{"rtsp", "enabled", V_BOOL, 0, 0, NULL},
 	{"rtsp", "port", V_INT, 1, 65535, NULL},
 	{"rtsp", "max_clients", V_INT, 1, 32, NULL},
 	{"rtsp", "session_timeout", V_INT, 10, 3600, NULL},
 	{"rtsp", "idr_on_join", V_BOOL, 0, 0, NULL},
-	/* rsd enables Digest auth only when both are set, so clearing either
-	 * one turns authentication off — which is the only way to turn it off,
-	 * and is why an empty value is accepted here. */
+	/* rsd enables Digest auth, and rhd Basic auth, only when both the
+	 * username and the password are set — so clearing either one turns
+	 * authentication off, which is the only way to turn it off and is why
+	 * an empty value is accepted here. */
 	{"rtsp", "username", V_CRED, 0, 63, NULL},
 	{"rtsp", "password", V_CRED, 0, 63, NULL},
 	{"http", "enabled", V_BOOL, 0, 0, NULL},
 	{"http", "port", V_INT, 1, 65535, NULL},
 	{"http", "max_clients", V_INT, 1, 32, NULL},
+	{"http", "username", V_CRED, 0, 63, NULL},
+	{"http", "password", V_CRED, 0, 63, NULL},
 
 	/* -- OSD -- */
 	{"osd", "enabled", V_BOOL, 0, 0, NULL},
@@ -728,8 +734,31 @@ static int add_write(rmq_cmd_plan_t *out, const char *section, const char *key, 
 	 * reaches raptor.conf is spelled the way this build spells it. */
 	rss_strlcpy(w->section, k->section, sizeof(w->section));
 	rss_strlcpy(w->key, k->key, sizeof(w->key));
+
+	/* Derived from the key's own section rather than from the one the
+	 * payload named, so an edit cannot be staged against a daemon that
+	 * does not own it however the command reached here. */
+	out->write_owner[out->write_count] = write_section_owner(k->section);
 	out->write_count++;
 	return 0;
+}
+
+/* Every daemon the staged edits will bounce, named once each. */
+static void owners_str(const rmq_cmd_plan_t *p, char *out, size_t outsz)
+{
+	size_t n = 0;
+	out[0] = '\0';
+
+	for (int i = 0; i < p->write_count; i++) {
+		const char *name = rmq_daemon_name(p->write_owner[i]);
+		bool seen = false;
+		for (int j = 0; j < i && !seen; j++)
+			seen = p->write_owner[j] == p->write_owner[i];
+		if (seen)
+			continue;
+		n += (size_t)snprintf(out + n, n < outsz ? outsz - n : 0, "%s%s", n ? "," : "",
+				      name);
+	}
 }
 
 /*
@@ -803,8 +832,7 @@ static int plan_config_set(const cJSON *root, rmq_cmd_plan_t *out, char *err, si
 		return -1;
 	}
 
-	out->restart_owner = write_section_owner(sec->valuestring);
-	if (out->restart_owner == RMQ_D_COUNT) {
+	if (write_section_owner(sec->valuestring) == RMQ_D_COUNT) {
 		snprintf(err, errsz, "section is not writable");
 		return -1;
 	}
@@ -840,6 +868,44 @@ static int plan_config_set(const cJSON *root, rmq_cmd_plan_t *out, char *err, si
 }
 
 /*
+ * The camera's account, which the config file holds as two.
+ *
+ * [rtsp] and [http] each carry their own username and password and nothing
+ * makes them agree — but a camera with two passwords is a camera whose second
+ * password is the one nobody remembers, so this writes both from one value.
+ * It is a command of its own rather than a config-set because config-set names
+ * a single section and this deliberately spans two; the writes still go
+ * through the same table, so neither section gains a key it did not already
+ * admit, and each half restarts its own daemon.
+ *
+ * Either field may be given alone — changing the username without retyping the
+ * password is the ordinary case. Both daemons authenticate only when both are
+ * set, so clearing one turns authentication off on both endpoints together,
+ * which is the point of setting them together.
+ */
+static int plan_credentials_set(const cJSON *root, rmq_cmd_plan_t *out, char *err, size_t errsz)
+{
+	static const char *const fields[] = {"username", "password", NULL};
+	static const char *const sections[] = {"rtsp", "http", NULL};
+
+	for (int f = 0; fields[f]; f++) {
+		const cJSON *v = cJSON_GetObjectItemCaseSensitive(root, fields[f]);
+		if (!v || cJSON_IsNull(v))
+			continue;
+		for (int s = 0; sections[s]; s++) {
+			if (add_write(out, sections[s], fields[f], v, err, errsz) < 0)
+				return -1;
+		}
+	}
+
+	if (out->write_count == 0) {
+		snprintf(err, errsz, "credentials-set needs a 'username' or a 'password'");
+		return -1;
+	}
+	return 0;
+}
+
+/*
  * The planner proper, over a payload someone else parsed.
  *
  * Split from rmq_cmd_plan() so the dispatch path parses once: it needs the
@@ -868,9 +934,21 @@ static int plan_parsed(const cJSON *root, rmq_cmd_plan_t *out, char *err, size_t
 		return plan_config_set(root, out, err, errsz);
 	}
 
-	/* Also the bridge's own work: rvd is asked for nothing, since opening
-	 * the JPEG ring is what starts its encoder. No arguments — which ring
-	 * and how often are config, not something a broker client chooses. */
+	/* The same tier, over two sections at once. */
+	if (strcmp(cmd->valuestring, "credentials-set") == 0) {
+		out->kind = RMQ_PLAN_CONFIG;
+		return plan_credentials_set(root, out, err, errsz);
+	}
+
+	/*
+	 * Also the bridge's own work: no daemon is asked for anything, because
+	 * the picture is fetched from rhd by whoever wants it. Republishing
+	 * the URL is what makes Home Assistant fetch again, so this is the
+	 * refresh-now button an image entity does not otherwise have.
+	 *
+	 * No arguments — which stream and how often are config, not something
+	 * a broker client chooses.
+	 */
 	if (strcmp(cmd->valuestring, "snapshot") == 0) {
 		out->kind = RMQ_PLAN_SNAPSHOT;
 		return 0;
@@ -1128,9 +1206,10 @@ void rmq_cmd_handle(rmq_state_t *st, const char *topic, const uint8_t *payload, 
 
 	if (plan.kind == RMQ_PLAN_CONFIG) {
 		for (int i = 0; i < plan.write_count; i++)
-			rmq_restart_stage(st, &plan.writes[i], plan.restart_owner);
+			rmq_restart_stage(st, &plan.writes[i], plan.write_owner[i]);
 
-		const char *owner = rmq_daemon_name(plan.restart_owner);
+		char owner[64];
+		owners_str(&plan, owner, sizeof(owner));
 		RSS_INFO("cmd: staged %d config edit(s) for %s", plan.write_count, owner);
 
 		/*
@@ -1215,12 +1294,12 @@ void rmq_cmd_handle(rmq_state_t *st, const char *topic, const uint8_t *payload, 
 			return;
 		}
 
-		int rc = rmq_snapshot_capture(st);
+		int rc = rmq_snapshot_publish(st);
 		cJSON *r = cJSON_CreateObject();
 		if (r)
-			cJSON_AddStringToObject(r, "status", rc == 0 ? "ok" : "no frame");
+			cJSON_AddStringToObject(r, "status", rc == 0 ? "ok" : "no url");
 		publish_result(st, cmd_name, nonce,
-			       rc == 0 ? NULL : "no JPEG frame arrived — is [jpeg] enabled?", r);
+			       rc == 0 ? NULL : "no picture URL — is rhd running?", r);
 		return;
 	}
 

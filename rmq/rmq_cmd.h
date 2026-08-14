@@ -28,7 +28,7 @@ struct rmq_state;
 typedef enum {
 	RMQ_PLAN_DAEMON = 0, /* a request for one daemon's control socket */
 	RMQ_PLAN_CONFIG,     /* edits to the config file, applied by the bridge */
-	RMQ_PLAN_SNAPSHOT,   /* take a still; the bridge does it, no daemon asked */
+	RMQ_PLAN_SNAPSHOT,   /* republish the picture URL; the bridge does it */
 	RMQ_PLAN_SYSTEM,     /* a setting in /etc rather than in raptor.conf */
 	RMQ_PLAN_REBOOT,     /* reboot the camera, once the answer is out */
 } rmq_plan_kind_t;
@@ -46,10 +46,15 @@ typedef struct {
 	char request[RMQ_CMD_REQ_MAX];
 	bool persists; /* the daemon will dirty its config, so a save is owed */
 
-	/* RMQ_PLAN_CONFIG */
+	/*
+	 * RMQ_PLAN_CONFIG. The owner is per edit rather than per command,
+	 * because one command can span sections: a camera credential is one
+	 * field that lands in both [rtsp] and [http], and rsd and rhd have to
+	 * be restarted for their own halves of it.
+	 */
 	rmq_cfg_write_t writes[RMQ_CFG_SET_MAX];
+	rmq_daemon_t write_owner[RMQ_CFG_SET_MAX];
 	int write_count;
-	rmq_daemon_t restart_owner;
 } rmq_cmd_plan_t;
 
 /*

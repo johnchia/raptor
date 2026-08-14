@@ -351,15 +351,12 @@ TEST every_refusal_explains_itself(void)
 TEST refuses_config_writes_outside_the_key_table(void)
 {
 	static const char *const refused[] = {
-		/* Credentials. The RTSP pair is writable — a password nobody
-		 * may choose is not a password — but only that pair: the same
-		 * key in another section is still unreachable, because what
-		 * grants a write is being named in the table and nothing else.
-		 * The RTSP pair's own cases are in the V_CRED tests below. */
-		"{\"cmd\":\"config-set\",\"section\":\"http\",\"key\":\"password\","
-		"\"value\":\"x\"}",
-		"{\"cmd\":\"config-set\",\"section\":\"http\",\"key\":\"username\","
-		"\"value\":\"x\"}",
+		/* Credentials. The RTSP and HTTP pairs are writable — a
+		 * password nobody may choose is not a password — but only
+		 * those pairs: the same key in another section is still
+		 * unreachable, because what grants a write is being named in
+		 * the table and nothing else. Their own cases are in the
+		 * V_CRED tests below. */
 		"{\"cmd\":\"config-set\",\"section\":\"webrtc\",\"key\":\"password\","
 		"\"value\":\"x\"}",
 
@@ -409,7 +406,7 @@ TEST accepts_a_single_write_and_routes_it(void)
 		       &p);
 	ASSERT_EQ(RMQ_PLAN_CONFIG, p.kind);
 	ASSERT_EQ(1, p.write_count);
-	ASSERT_EQ(RMQ_D_RSD, p.restart_owner);
+	ASSERT_EQ(RMQ_D_RSD, p.write_owner[0]);
 	ASSERT_STR_EQ("rtsp", p.writes[0].section);
 	ASSERT_STR_EQ("port", p.writes[0].key);
 	ASSERT_STR_EQ("5554", p.writes[0].value);
@@ -433,7 +430,7 @@ TEST accepts_rtsp_credentials_within_their_grammar(void)
 		       "\"value\":\"viewer\"}",
 		       &p);
 	ASSERT_EQ(RMQ_PLAN_CONFIG, p.kind);
-	ASSERT_EQ(RMQ_D_RSD, p.restart_owner);
+	ASSERT_EQ(RMQ_D_RSD, p.write_owner[0]);
 	ASSERT_STR_EQ("username", p.writes[0].key);
 	ASSERT_STR_EQ("viewer", p.writes[0].value);
 
@@ -498,6 +495,73 @@ TEST refuses_credentials_that_could_mean_something_else(void)
 		"\"value\":1234}",
 		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
 		"\"value\":true}",
+		NULL,
+	};
+
+	for (int i = 0; refused[i]; i++)
+		ASSERT_REFUSED(refused[i]);
+	PASS();
+}
+
+/*
+ * credentials-set: one field, two sections, two daemons.
+ *
+ * The camera has one account and the config file has two copies of it, so what
+ * is checked here is that a single command produces both — and that each half
+ * is staged against the daemon that reads it, since staging both under one
+ * owner would leave whichever endpoint was not restarted still accepting the
+ * old password.
+ */
+TEST writes_one_credential_into_both_sections(void)
+{
+	rmq_cmd_plan_t p;
+
+	ASSERT_ALLOWED("{\"cmd\":\"credentials-set\",\"password\":\"hunter2\"}", &p);
+	ASSERT_EQ(RMQ_PLAN_CONFIG, p.kind);
+	ASSERT_EQ(2, p.write_count);
+	ASSERT_STR_EQ("rtsp", p.writes[0].section);
+	ASSERT_STR_EQ("password", p.writes[0].key);
+	ASSERT_STR_EQ("hunter2", p.writes[0].value);
+	ASSERT_EQ(RMQ_D_RSD, p.write_owner[0]);
+	ASSERT_STR_EQ("http", p.writes[1].section);
+	ASSERT_STR_EQ("password", p.writes[1].key);
+	ASSERT_STR_EQ("hunter2", p.writes[1].value);
+	ASSERT_EQ(RMQ_D_RHD, p.write_owner[1]);
+
+	/* Both fields at once: four edits, still two daemons. */
+	ASSERT_ALLOWED("{\"cmd\":\"credentials-set\",\"username\":\"viewer\","
+		       "\"password\":\"hunter2\"}",
+		       &p);
+	ASSERT_EQ(4, p.write_count);
+
+	/* Either alone. Changing the username without retyping the password is
+	 * the ordinary case, and clearing one is how authentication is turned
+	 * off on both endpoints together. */
+	ASSERT_ALLOWED("{\"cmd\":\"credentials-set\",\"username\":\"viewer\"}", &p);
+	ASSERT_EQ(2, p.write_count);
+	ASSERT_STR_EQ("username", p.writes[0].key);
+
+	ASSERT_ALLOWED("{\"cmd\":\"credentials-set\",\"password\":\"\"}", &p);
+	ASSERT_EQ(2, p.write_count);
+	ASSERT_STR_EQ("", p.writes[0].value);
+	PASS();
+}
+
+TEST refuses_a_credential_command_that_sets_nothing(void)
+{
+	static const char *const refused[] = {
+		/* Neither field. A command that writes nothing would answer
+		 * "staged, 0 edits", which reads as success. */
+		"{\"cmd\":\"credentials-set\"}",
+		/* The grammar is the same one config-set enforces: this is a
+		 * second door to the same table, not a wider one. */
+		"{\"cmd\":\"credentials-set\",\"password\":\"x\\nenabled = false\"}",
+		"{\"cmd\":\"credentials-set\",\"username\":\"x@evil\"}",
+		"{\"cmd\":\"credentials-set\",\"password\":1234}",
+		/* Nor does it accept the fields config-set takes, which would
+		 * be a way to name a section it does not intend. */
+		"{\"cmd\":\"credentials-set\",\"section\":\"mqtt\",\"key\":\"host\","
+		"\"value\":\"10.0.0.1\"}",
 		NULL,
 	};
 
@@ -587,7 +651,7 @@ TEST applies_a_values_map_all_or_nothing(void)
 		       "{\"width\":1280,\"height\":720}}",
 		       &p);
 	ASSERT_EQ(2, p.write_count);
-	ASSERT_EQ(RMQ_D_RVD, p.restart_owner);
+	ASSERT_EQ(RMQ_D_RVD, p.write_owner[0]);
 	ASSERT_STR_EQ("1280", p.writes[0].value);
 	ASSERT_STR_EQ("720", p.writes[1].value);
 
@@ -674,8 +738,8 @@ TEST every_writable_section_has_an_owner(void)
 	for (int i = 0; cases[i].json; i++) {
 		rmq_cmd_plan_t p;
 		ASSERT_ALLOWED(cases[i].json, &p);
-		ASSERT_EQm(cases[i].json, cases[i].owner, p.restart_owner);
-		ASSERTm(cases[i].json, p.restart_owner != RMQ_D_COUNT);
+		ASSERT_EQm(cases[i].json, cases[i].owner, p.write_owner[0]);
+		ASSERTm(cases[i].json, p.write_owner[0] != RMQ_D_COUNT);
 	}
 	PASS();
 }
@@ -707,7 +771,7 @@ TEST splits_the_image_section_across_the_two_tiers(void)
 		       "\"value\":1}",
 		       &p);
 	ASSERT_EQ(RMQ_PLAN_CONFIG, p.kind);
-	ASSERT_EQ(RMQ_D_RVD, p.restart_owner);
+	ASSERT_EQ(RMQ_D_RVD, p.write_owner[0]);
 	ASSERT_EQ(1, p.write_count);
 	ASSERT_STR_EQ("image", p.writes[0].section);
 	ASSERT_STR_EQ("hflip", p.writes[0].key);
@@ -860,6 +924,8 @@ SUITE(rmq_cmd_suite)
 	RUN_TEST(accepts_a_single_write_and_routes_it);
 	RUN_TEST(accepts_rtsp_credentials_within_their_grammar);
 	RUN_TEST(refuses_credentials_that_could_mean_something_else);
+	RUN_TEST(writes_one_credential_into_both_sections);
+	RUN_TEST(refuses_a_credential_command_that_sets_nothing);
 	RUN_TEST(never_quotes_a_rejected_credential_back);
 	RUN_TEST(renders_every_value_as_the_file_spells_it);
 	RUN_TEST(enforces_types_and_ranges_on_writes);

@@ -322,11 +322,26 @@ static int write_config(rmq_state_t *st)
 	for (int i = 0; i < st->cfg_write_count; i++) {
 		rss_config_set_str(cfg, st->cfg_writes[i].section, st->cfg_writes[i].key,
 				   st->cfg_writes[i].value);
+
+		/* The log is the record of what was changed, not of what it was
+		 * changed to — for a password those are different things, and
+		 * this file is readable by anyone who can read the flash. */
+		bool secret = strcmp(st->cfg_writes[i].key, "password") == 0;
 		RSS_INFO("restart: [%s] %s = %s", st->cfg_writes[i].section, st->cfg_writes[i].key,
-			 st->cfg_writes[i].value);
+			 secret ? "(set)" : st->cfg_writes[i].value);
 	}
 
 	int ret = rss_config_save(cfg, st->config_path);
+
+	/*
+	 * The bridge's own copy of the [http] credential, taken from the file
+	 * it just wrote. rmq never re-reads its config, so without this the
+	 * picture URL would keep carrying the password that was replaced a
+	 * moment ago — and the one moment it has to be right is this one.
+	 */
+	if (ret == 0)
+		rmq_http_creds(st, cfg);
+
 	rss_config_free(cfg);
 	return ret;
 }

@@ -75,13 +75,29 @@ struct rmq_state {
 	int save_debounce_ms;
 	int restart_debounce_ms;
 
-	/* JPEG stills. Off by default: a snapshot is an encode the camera
-	 * would not otherwise do and an image the broker would not otherwise
-	 * carry, so it is asked for rather than assumed. */
+	/* The picture. Off by default: a still is an encode the camera would
+	 * not otherwise do, so it is asked for rather than assumed. The bytes
+	 * no longer cross the broker — what is published is the URL rhd serves
+	 * it from — but the encode is still real. */
 	bool snapshot_enabled;
 	int snapshot_stream;	   /* which JPEG ring, 0 = main and 1 = sub */
-	int snapshot_interval_sec; /* 0 = only when asked */
+	int snapshot_interval_sec; /* 0 = once per broker connection */
 	uint64_t snapshot_next_ms;
+
+	/*
+	 * rhd's listener, as of the last poll, and the credential it demands.
+	 * Together they are the picture URL. Port 0 means rhd is not answering
+	 * and there is no URL to name.
+	 *
+	 * The credential is here rather than read at use because rmq writes
+	 * the config file without re-reading it: the copy loaded at startup
+	 * goes stale exactly when the password is changed over MQTT, so
+	 * rmq_restart.c refreshes these two from the file it just wrote.
+	 */
+	int http_port;
+	bool http_tls;
+	char http_user[64];
+	char http_pass[64];
 
 	/* Derived topics */
 	char topic_status[RMQ_TOPIC_MAX];

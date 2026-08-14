@@ -20,6 +20,8 @@
 
 #include <cJSON.h>
 
+struct rmq_state;
+
 /* Daemons the bridge knows how to ask for state. The order is the order they
  * appear in diagnostics. */
 typedef enum {
@@ -57,7 +59,11 @@ bool rmq_daemons_differ(const rmq_daemons_t *a, const rmq_daemons_t *b);
  * One document rather than a topic per value: MQTT gives no ordering across
  * topics, so a single retained publish keeps every entity mutually consistent
  * and costs one message instead of twenty.
+ *
+ * `st` is written as well as read: rhd's listener is cached there, because it
+ * is what the picture URLs are built from and this is the one place that asks
+ * for it.
  */
-cJSON *rmq_poll_state(rmq_daemons_t *out);
+cJSON *rmq_poll_state(struct rmq_state *st, rmq_daemons_t *out);
 
 #endif /* RMQ_POLL_H */
