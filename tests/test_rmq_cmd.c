@@ -351,19 +351,20 @@ TEST every_refusal_explains_itself(void)
 TEST refuses_config_writes_outside_the_key_table(void)
 {
 	static const char *const refused[] = {
-		/* Credentials, in the two sections that hold them. Neither
-		 * key is in the table, so neither is reachable. */
-		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
-		"\"value\":\"x\"}",
-		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"username\","
-		"\"value\":\"x\"}",
+		/* Credentials. The RTSP pair is writable — a password nobody
+		 * may choose is not a password — but only that pair: the same
+		 * key in another section is still unreachable, because what
+		 * grants a write is being named in the table and nothing else.
+		 * The RTSP pair's own cases are in the V_CRED tests below. */
 		"{\"cmd\":\"config-set\",\"section\":\"http\",\"key\":\"password\","
+		"\"value\":\"x\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"http\",\"key\":\"username\","
 		"\"value\":\"x\"}",
 		"{\"cmd\":\"config-set\",\"section\":\"webrtc\",\"key\":\"password\","
 		"\"value\":\"x\"}",
 
-		/* Paths and key material: no string type exists, so nothing
-		 * that names a file can be written at all. */
+		/* Paths and key material: no type that admits them exists, so
+		 * nothing that names a file can be written at all. */
 		"{\"cmd\":\"config-set\",\"section\":\"recording\",\"key\":\"storage_path\","
 		"\"value\":\"/etc\"}",
 		"{\"cmd\":\"config-set\",\"section\":\"recording\",\"key\":\"sign_key\","
@@ -412,6 +413,110 @@ TEST accepts_a_single_write_and_routes_it(void)
 	ASSERT_STR_EQ("rtsp", p.writes[0].section);
 	ASSERT_STR_EQ("port", p.writes[0].key);
 	ASSERT_STR_EQ("5554", p.writes[0].value);
+	PASS();
+}
+
+/*
+ * V_CRED, the one type that lets caller bytes reach the config file.
+ *
+ * The grammar is the whole protection, so it is tested from the outside in:
+ * what a credential may contain, and then every class of byte that would make
+ * one mean something other than a credential — a second INI directive, a
+ * comment that swallows the rest of the line, a different URL, a shell word,
+ * or a value long enough to reach past the buffer it is rendered into.
+ */
+TEST accepts_rtsp_credentials_within_their_grammar(void)
+{
+	rmq_cmd_plan_t p;
+
+	ASSERT_ALLOWED("{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"username\","
+		       "\"value\":\"viewer\"}",
+		       &p);
+	ASSERT_EQ(RMQ_PLAN_CONFIG, p.kind);
+	ASSERT_EQ(RMQ_D_RSD, p.restart_owner);
+	ASSERT_STR_EQ("username", p.writes[0].key);
+	ASSERT_STR_EQ("viewer", p.writes[0].value);
+
+	/* Every character the set admits, in one value. */
+	ASSERT_ALLOWED("{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+		       "\"value\":\"aZ09-_.~\"}",
+		       &p);
+	ASSERT_STR_EQ("aZ09-_.~", p.writes[0].value);
+
+	/* Empty is how authentication is turned off, so it has to pass. */
+	ASSERT_ALLOWED("{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+		       "\"value\":\"\"}",
+		       &p);
+	ASSERT_STR_EQ("", p.writes[0].value);
+
+	/* At the cap, which is one below the buffer it is rendered into. */
+	ASSERT_ALLOWED("{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+		       "\"value\":\"012345678901234567890123456789012345678901234567890123456789"
+		       "012\"}",
+		       &p);
+	ASSERT_EQ(63, (int)strlen(p.writes[0].value));
+	PASS();
+}
+
+TEST refuses_credentials_that_could_mean_something_else(void)
+{
+	static const char *const refused[] = {
+		/* A second INI directive on the line it is written to. */
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+		"\"value\":\"x\\nenabled = false\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+		"\"value\":\"x\\r\\n[mqtt]\"}",
+		/* A comment, which would swallow whatever followed. */
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+		"\"value\":\"x;y\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+		"\"value\":\"x#y\"}",
+		/* A URL that parses as another host, or another userinfo. */
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"username\","
+		"\"value\":\"x@evil\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"username\","
+		"\"value\":\"x:y\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"username\","
+		"\"value\":\"x/../y\"}",
+		/* A shell word, and a quote that could escape a rendering. */
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+		"\"value\":\"x $(id)\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+		"\"value\":\"x`id`\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+		"\"value\":\"x\\\"y\"}",
+		/* Whitespace at all, which an INI value would not survive. */
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"username\","
+		"\"value\":\"a b\"}",
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"username\","
+		"\"value\":\"a\\tb\"}",
+		/* One past the cap. */
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+		"\"value\":\"0123456789012345678901234567890123456789012345678901234567890123\"}",
+		/* Not a string at all. */
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+		"\"value\":1234}",
+		"{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+		"\"value\":true}",
+		NULL,
+	};
+
+	for (int i = 0; refused[i]; i++)
+		ASSERT_REFUSED(refused[i]);
+	PASS();
+}
+
+/* The refusal names the permitted set, never the value: quoting a rejected
+ * credential back would put it in a log and on the result topic. */
+TEST never_quotes_a_rejected_credential_back(void)
+{
+	rmq_cmd_plan_t p;
+
+	ASSERT_EQ(-1, plan("{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+			   "\"value\":\"hunter2!\"}",
+			   &p));
+	ASSERT(err[0] != '\0');
+	ASSERT(strstr(err, "hunter2") == NULL);
 	PASS();
 }
 
@@ -753,6 +858,9 @@ SUITE(rmq_cmd_suite)
 
 	RUN_TEST(refuses_config_writes_outside_the_key_table);
 	RUN_TEST(accepts_a_single_write_and_routes_it);
+	RUN_TEST(accepts_rtsp_credentials_within_their_grammar);
+	RUN_TEST(refuses_credentials_that_could_mean_something_else);
+	RUN_TEST(never_quotes_a_rejected_credential_back);
 	RUN_TEST(renders_every_value_as_the_file_spells_it);
 	RUN_TEST(enforces_types_and_ranges_on_writes);
 	RUN_TEST(applies_a_values_map_all_or_nothing);

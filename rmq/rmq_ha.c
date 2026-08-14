@@ -179,6 +179,22 @@ static const ha_entity_t entities[] = {
 	 .cat = CAT_DIAGNOSTIC,
 	 .owner = RMQ_D_RIC},
 
+	/* Whether a viewer is actually challenged. Worth an entity of its own
+	 * because setting a password is not the same as auth being on: rsd
+	 * needs both keys and only reads them at start, so the two text
+	 * controls can both look filled in while the server still lets anyone
+	 * in. This is the half that says it took.
+	 *
+	 * Inverted on purpose: device_class lock reads ON as *unlocked*, so
+	 * the expression is true when there is no auth. */
+	{.key = "rtsp_auth",
+	 .name = "RTSP authentication",
+	 .icon = "mdi:lock",
+	 .dev_class = "lock",
+	 .cat = CAT_DIAGNOSTIC,
+	 .owner = RMQ_D_RSD,
+	 .bin_on = "not (value_json.rtsp.auth | default(false))"},
+
 	/* -- Diagnostic: system. Owner RMQ_D_COUNT means "always present". -- */
 	/* Why a control can read back its old value: the restart tier writes
 	 * the file, and nothing changes until the daemon has re-read it. */
@@ -270,6 +286,11 @@ typedef struct {
 	 * the action is drawn — `restart` reads as disruptive where the
 	 * default reads as another press. */
 	const char *dev_class;
+
+	/* CTRL_TEXT: the value is a secret, so the field is drawn masked. It
+	 * is a rendering choice and no part of the protection — what actually
+	 * keeps the value out of sight is that nothing reports it. */
+	bool secret;
 } ha_control_t;
 
 static const char *const opt_daynight[] = {"auto", "day", "night", NULL};
@@ -725,6 +746,45 @@ static const ha_control_t controls[] = {
 	 .max = 65535,
 	 .step = 1,
 	 .restarts = true},
+	/*
+	 * RTSP Digest credentials.
+	 *
+	 * rsd turns auth on only when both are set, so clearing either one is
+	 * how it is turned off — and the pair is written one key at a time,
+	 * which means a viewer can be locked out for the moment between two
+	 * edits. Setting the password first and the username second is the
+	 * order that avoids it.
+	 *
+	 * The password reads back empty always: nothing on the camera reports
+	 * it, so an empty box is what it actually knows, and a mask would be a
+	 * value that could be typed back. What can be typed is narrowed where
+	 * it is applied — letters, digits and '-', '_', '.', '~' — so that a
+	 * credential cannot become a second config directive or a URL that
+	 * parses as something else.
+	 */
+	{.key = "rtsp_user",
+	 .name = "RTSP username",
+	 .kind = CTRL_TEXT,
+	 .icon = "mdi:account",
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_RSD,
+	 .value = "rtsp.username",
+	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"username\","
+		    "\"value\":\"{{ value }}\"}",
+	 .max = 63,
+	 .restarts = true},
+	{.key = "rtsp_pass",
+	 .name = "RTSP password (blank = no auth)",
+	 .kind = CTRL_TEXT,
+	 .icon = "mdi:key",
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_RSD,
+	 .value = "rtsp.password",
+	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"password\","
+		    "\"value\":\"{{ value }}\"}",
+	 .max = 63,
+	 .restarts = true,
+	 .secret = true},
 	/* Paired with the camera component below, which shows what it takes. */
 	{.key = "snapshot",
 	 .name = "Take snapshot",
@@ -963,6 +1023,8 @@ static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct, const r
 		 * discovery document is a convenience for the person typing,
 		 * never the check that matters. */
 		cJSON_AddNumberToObject(c, "max", ct->max);
+		if (ct->secret)
+			cJSON_AddStringToObject(c, "mode", "password");
 		break;
 	case CTRL_SELECT: {
 		const char *const *choices = ct->zones	   ? rmq_system_zone_names()

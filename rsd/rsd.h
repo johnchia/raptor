@@ -226,6 +226,11 @@ typedef struct rsd_server {
 	/* Digest auth (NULL = no auth required) */
 	Compy_Auth *auth;
 
+	/* The account name auth is enabled for, reported so a management client
+	 * can show who has to log in. The password it goes with is held only
+	 * inside `auth` and is never reported anywhere. */
+	char auth_user[128];
+
 	/* Custom endpoint aliases, indexed by stream number.
 	 *   [0] sensor 0 main — config key: endpoint_main
 	 *   [1] sensor 0 sub  — config key: endpoint_sub

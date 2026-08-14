@@ -102,10 +102,12 @@ int main(int argc, char **argv)
 	const char *rtsp_pass = rss_config_get_str(dctx.cfg, "rtsp", "password", "");
 	if (rtsp_user[0] && rtsp_pass[0]) {
 		srv.auth = rsd_auth_new(rtsp_user, rtsp_pass);
-		if (srv.auth)
+		if (srv.auth) {
+			rss_strlcpy(srv.auth_user, rtsp_user, sizeof(srv.auth_user));
 			RSS_INFO("RTSP Digest auth enabled (realm=Raptor)");
-		else
+		} else {
 			RSS_WARN("failed to create auth context");
+		}
 	} else if (rtsp_user[0] || rtsp_pass[0]) {
 		RSS_WARN("RTSP auth requires both username and password — auth disabled");
 	}

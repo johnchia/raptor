@@ -33,9 +33,11 @@ struct rmq_state;
 #define RMQ_CFG_SET_MAX	    16
 #define RMQ_CFG_PENDING_MAX 40
 
+/* Bounds on one rendered edit. Every value fits: the longest is a credential,
+ * capped at 63 by the table entry that admits it. */
 #define RMQ_CFG_SECT_MAX    24
 #define RMQ_CFG_KEY_MAX	    32
-#define RMQ_CFG_VAL_MAX	    48
+#define RMQ_CFG_VAL_MAX	    64
 
 /* One edit, already validated and rendered to the string the file holds. */
 typedef struct {

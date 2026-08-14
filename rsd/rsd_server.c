@@ -525,6 +525,12 @@ static int rsd_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 #else
 		cJSON_AddBoolToObject(cfg, "tls", false);
 #endif
+		/* Whether a viewer needs credentials, and which account. The
+		 * password is not here and has no command that reports it: it
+		 * exists in the config file and in the digest context, and
+		 * nowhere a client can reach. */
+		cJSON_AddBoolToObject(cfg, "auth", srv->auth != NULL);
+		cJSON_AddStringToObject(cfg, "username", srv->auth_user);
 		cJSON_AddStringToObject(cfg, "config_path", srv->config_path);
 		return rss_ctrl_resp_json(resp_buf, resp_buf_size, r);
 	}

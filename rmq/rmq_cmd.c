@@ -9,6 +9,7 @@
 #include <rss_common.h>
 #include <rss_ipc.h>
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -299,25 +300,39 @@ static const cmd_def_t *find_command(const char *name)
 /* Restart tier: these change the file rather than the running daemon,  */
 /* so the owner is restarted to pick them up.                           */
 /*                                                                     */
-/* Every value here is an integer, a boolean or a closed enum. There is */
-/* no string type on purpose — that single omission is what keeps every */
-/* path, format string, endpoint alias and credential in raptor.conf    */
-/* unreachable from the network, without a rule naming any of them. It  */
-/* also bounds what a write can be: no value from outside can be longer */
-/* than the number or the table entry it is checked against.            */
+/* Almost every value here is an integer, a boolean or a closed enum,   */
+/* and for those no byte of the payload reaches the file: what is       */
+/* written is the table's own spelling or a number this file formatted. */
+/* That is what keeps every path, format string and endpoint alias in   */
+/* raptor.conf unreachable from the network without a rule naming any   */
+/* of them, and it is still the default — a key is unwritable until it  */
+/* is listed, and listing it as one of these three types cannot expose  */
+/* free-form text.                                                      */
+/*                                                                     */
+/* V_CRED is the one exception, and it exists for exactly the two RTSP  */
+/* credential keys: a password nobody may choose is not a password. It  */
+/* is not a general string type. The grammar is RFC 3986's unreserved   */
+/* set — letters, digits, '-', '_', '.', '~' — which is what an RTSP    */
+/* URL, a Digest header, an INI value and a shell word all accept       */
+/* unescaped, so a credential cannot become a second config directive,  */
+/* a path, or a URL that parses as something else. Length is capped at  */
+/* the table entry's max. Do not reach for this type for anything but a */
+/* credential: for a path or a template the grammar is no protection at */
+/* all, and the reason those keys are absent is that they are absent.   */
 /* ------------------------------------------------------------------ */
 
 typedef enum {
 	V_INT = 0,
 	V_BOOL,
 	V_ENUM,
+	V_CRED,
 } val_type_t;
 
 typedef struct {
 	const char *section;
 	const char *key;
 	val_type_t type;
-	int min, max;		    /* V_INT */
+	int min, max;		    /* V_INT range; V_CRED length, min 0 */
 	const char *const *choices; /* V_ENUM, NULL-terminated */
 } cfg_key_t;
 
@@ -414,6 +429,11 @@ static const cfg_key_t cfg_keys[] = {
 	{"rtsp", "max_clients", V_INT, 1, 32, NULL},
 	{"rtsp", "session_timeout", V_INT, 10, 3600, NULL},
 	{"rtsp", "idr_on_join", V_BOOL, 0, 0, NULL},
+	/* rsd enables Digest auth only when both are set, so clearing either
+	 * one turns authentication off — which is the only way to turn it off,
+	 * and is why an empty value is accepted here. */
+	{"rtsp", "username", V_CRED, 0, 63, NULL},
+	{"rtsp", "password", V_CRED, 0, 63, NULL},
 	{"http", "enabled", V_BOOL, 0, 0, NULL},
 	{"http", "port", V_INT, 1, 65535, NULL},
 	{"http", "max_clients", V_INT, 1, 32, NULL},
@@ -622,6 +642,35 @@ static int render_value(const cfg_key_t *k, const cJSON *v, char *out, size_t ou
 			return -1;
 		}
 		snprintf(out, outsz, "%d", (int)d);
+		return 0;
+	}
+
+	if (k->type == V_CRED) {
+		if (!cJSON_IsString(v) || !v->valuestring) {
+			snprintf(err, errsz, "'%s' must be a string", k->key);
+			return -1;
+		}
+		const char *s = v->valuestring;
+		size_t n = strlen(s);
+		if (n > (size_t)k->max || n >= outsz) {
+			snprintf(err, errsz, "'%s' is longer than %d characters", k->key, k->max);
+			return -1;
+		}
+		for (size_t i = 0; i < n; i++) {
+			unsigned char c = (unsigned char)s[i];
+			if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
+				continue;
+			/* Naming the permitted set rather than the offending
+			 * byte: the value is a credential and must not be
+			 * quoted back over the wire, not even one character
+			 * of it. */
+			snprintf(err, errsz,
+				 "'%s' may contain only letters, digits, '-', '_', '.' and '~'",
+				 k->key);
+			return -1;
+		}
+		memcpy(out, s, n);
+		out[n] = '\0';
 		return 0;
 	}
 

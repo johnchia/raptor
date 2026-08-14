@@ -222,7 +222,7 @@ static void collect_rvd(cJSON *state)
 	cJSON_Delete(resp);
 }
 
-/* rsd: viewer count and listening port. */
+/* rsd: viewer count, listening port and who has to log in. */
 static void collect_rsd(cJSON *state)
 {
 	cJSON *resp = ask("rsd", "{\"cmd\":\"config-show\"}");
@@ -235,6 +235,20 @@ static void collect_rsd(cJSON *state)
 		if (o) {
 			cJSON_AddNumberToObject(o, "clients", json_int(cfg, "clients", 0));
 			cJSON_AddNumberToObject(o, "port", json_int(cfg, "port", 0));
+
+			/* The account, so the text control shows what is set
+			 * rather than a blank that could mean either. The
+			 * password has no readback at any layer: the control
+			 * that sets it always shows empty, which is the honest
+			 * rendering of a value this bridge cannot see. */
+			const cJSON *u = cJSON_GetObjectItemCaseSensitive(cfg, "username");
+			cJSON_AddStringToObject(o, "username",
+						cJSON_IsString(u) && u->valuestring ? u->valuestring
+										    : "");
+			cJSON_AddStringToObject(o, "password", "");
+			cJSON_AddBoolToObject(
+				o, "auth",
+				cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(cfg, "auth")));
 		}
 	}
 
