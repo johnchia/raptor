@@ -101,6 +101,20 @@ typedef struct {
 	const char *unit;      /* NULL for none */
 	const char *dev_class; /* HA device_class, NULL for none */
 	const char *icon;      /* NULL for none */
+
+	/*
+	 * A number read repeatedly, each reading standing on its own —
+	 * state_class measurement, which is what makes Home Assistant keep
+	 * long-term statistics for it. Without it a reading is recorded only
+	 * in short-term history and vanishes at the recorder's purge, so it
+	 * cannot be graphed over the days that make an exposure or a gain
+	 * curve worth looking at.
+	 *
+	 * Not for a string reading, and not for a binary_sensor: neither has
+	 * a mean worth keeping.
+	 */
+	bool measurement;
+
 	ha_category_t cat;
 	rmq_daemon_t owner; /* component exists only while this daemon runs */
 	ha_group_t group;
@@ -122,6 +136,7 @@ typedef struct {
 static const ha_entity_t entities[] = {
 	/* -- Primary: what an operator actually looks at -- */
 	{.key = "rtsp_clients",
+	 .measurement = true,
 	 .name = "RTSP viewers",
 	 .value = "rtsp.clients",
 	 .icon = "mdi:account-eye",
@@ -133,6 +148,7 @@ static const ha_entity_t entities[] = {
 	 *    and no one sets: what the encoder actually delivered against its
 	 *    target. -- */
 	{.key = "stream0_avg_bitrate",
+	 .measurement = true,
 	 .name = "Bitrate (actual)",
 	 .value = "stream0.avg_bitrate",
 	 .unit = "bit/s",
@@ -141,6 +157,7 @@ static const ha_entity_t entities[] = {
 	 .owner = RMQ_D_RVD,
 	 .group = GRP_MAIN},
 	{.key = "stream1_avg_bitrate",
+	 .measurement = true,
 	 .name = "Bitrate (actual)",
 	 .value = "stream1.avg_bitrate",
 	 .unit = "bit/s",
@@ -160,21 +177,24 @@ static const ha_entity_t entities[] = {
 	 .cat = CAT_PRIMARY,
 	 .owner = RMQ_D_RIC},
 	{.key = "total_gain",
+	 .measurement = true,
 	 .name = "Total gain (raw)",
 	 .value = "ir.total_gain",
 	 .icon = "mdi:brightness-6",
 	 .cat = CAT_PRIMARY,
 	 .owner = RMQ_D_RIC},
 	{.key = "ae_luma",
+	 .measurement = true,
 	 .name = "AE luma",
 	 .value = "ir.ae_luma",
 	 .icon = "mdi:brightness-percent",
 	 .cat = CAT_PRIMARY,
 	 .owner = RMQ_D_RIC},
 	{.key = "exposure_us",
+	 .measurement = true,
 	 .name = "Exposure",
 	 .value = "ir.exposure_us",
-	 .unit = "µs",
+	 .unit = "μs",
 	 .icon = "mdi:camera-iris",
 	 .cat = CAT_DIAGNOSTIC,
 	 .owner = RMQ_D_RIC},
@@ -205,12 +225,14 @@ static const ha_entity_t entities[] = {
 	 .owner = RMQ_D_COUNT,
 	 .bin_on = "value_json.restart.pending | default(false)"},
 	{.key = "daemons_up",
+	 .measurement = true,
 	 .name = "Daemons running",
 	 .value = "daemons_up",
 	 .icon = "mdi:cogs",
 	 .cat = CAT_DIAGNOSTIC,
 	 .owner = RMQ_D_COUNT},
 	{.key = "uptime",
+	 .measurement = true,
 	 .name = "Uptime",
 	 .value = "uptime",
 	 .unit = "s",
@@ -940,6 +962,8 @@ static cJSON *make_component(struct rmq_state *st, const ha_entity_t *e)
 		cJSON_AddStringToObject(c, "unit_of_meas", e->unit);
 	if (e->dev_class)
 		cJSON_AddStringToObject(c, "dev_cla", e->dev_class);
+	if (e->measurement)
+		cJSON_AddStringToObject(c, "stat_cla", "measurement");
 
 	return c;
 }
