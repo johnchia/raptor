@@ -513,7 +513,7 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 	 .restarts = true}
 
 /* [ircut] thresholds ric applies and records live. */
-#define IRC_LIVE(k, nm, ic, hi)                                                                    \
+#define IRC_LIVE(k, nm, ic, hi, un)                                                                \
 	{.key = "ircut_" k,                                                                        \
 	 .name = nm,                                                                               \
 	 .kind = CTRL_NUMBER,                                                                      \
@@ -525,7 +525,8 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 		    "\"value\":{{ value | int }}}",                                                \
 	 .min = 0,                                                                                 \
 	 .max = hi,                                                                                \
-	 .step = 1}
+	 .step = 1,                                                                                \
+	 .unit = un}
 
 /*
  * [ircut] keys ric reads only at startup: a config write and a restart. ric
@@ -632,7 +633,7 @@ static const ha_control_t controls[] = {
 	 * trim and gain the analog front end, and only the second one can
 	 * rescue a quiet microphone. */
 	{.key = "audio_volume_set",
-	 .name = "Mic volume",
+	 .name = "Mic volume (80 = unity)",
 	 .kind = CTRL_NUMBER,
 	 .icon = "mdi:microphone",
 	 .cat = CAT_CONFIG,
@@ -796,11 +797,11 @@ static const ha_control_t controls[] = {
 	 .restarts = true},
 
 	/* The luma thresholds are live: ric applies and records them itself. */
-	IRC_LIVE("night_luma", "Night luma threshold", "mdi:brightness-3", 255),
-	IRC_LIVE("night_gain", "Night gain threshold", "mdi:signal", 1000000),
-	IRC_LIVE("day_gain_pct", "Day gain (% of night)", "mdi:percent", 100),
-	IRC_LIVE("hysteresis_sec", "Hysteresis", "mdi:timer-sand", 300),
-	IRC_LIVE("poll_interval_ms", "Poll interval", "mdi:timer", 60000),
+	IRC_LIVE("night_luma", "Day/night luma threshold", "mdi:brightness-3", 255, NULL),
+	IRC_LIVE("night_gain", "Day/night gain threshold", "mdi:signal", 1000000, NULL),
+	IRC_LIVE("day_gain_pct", "Day/night day gain", "mdi:percent", 100, "%"),
+	IRC_LIVE("hysteresis_sec", "Day/night hysteresis", "mdi:timer-sand", 300, "s"),
+	IRC_LIVE("poll_interval_ms", "Day/night poll interval", "mdi:timer", 60000, "ms"),
 
 	/*
 	 * How the board is wired, which ric reads only at startup. These would
