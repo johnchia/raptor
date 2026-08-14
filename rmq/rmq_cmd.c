@@ -526,6 +526,36 @@ static void err_choices(char *err, size_t errsz, const char *key, const char *co
 		n += snprintf(err + n, errsz - (size_t)n, " %s", choices[i]);
 }
 
+/*
+ * A whole JSON number within [min,max].
+ *
+ * The order matters and is why both tiers call this rather than each keeping
+ * their own copy: the range is checked while the value is still a double,
+ * because a number far outside int wraps into range once narrowed and would
+ * then pass. Narrowing is the caller's, after this returns.
+ */
+static int check_int(const cJSON *v, const char *key, int min, int max, double *out, char *err,
+		     size_t errsz)
+{
+	if (!cJSON_IsNumber(v)) {
+		snprintf(err, errsz, "'%s' must be a number", key);
+		return -1;
+	}
+
+	double d = cJSON_GetNumberValue(v);
+	if (!(d >= (double)min && d <= (double)max)) {
+		snprintf(err, errsz, "'%s' out of range (%d-%d)", key, min, max);
+		return -1;
+	}
+	if (d != (double)(long long)d) {
+		snprintf(err, errsz, "'%s' must be a whole number", key);
+		return -1;
+	}
+
+	*out = d;
+	return 0;
+}
+
 static int add_arg(cJSON *req, const cJSON *in, const cmd_arg_t *a, char *err, size_t errsz)
 {
 	const cJSON *v = cJSON_GetObjectItemCaseSensitive(in, a->key);
@@ -539,21 +569,9 @@ static int add_arg(cJSON *req, const cJSON *in, const cmd_arg_t *a, char *err, s
 	}
 
 	if (a->type == A_INT) {
-		if (!cJSON_IsNumber(v)) {
-			snprintf(err, errsz, "'%s' must be a number", a->key);
+		double d;
+		if (check_int(v, a->key, a->min, a->max, &d, err, errsz) < 0)
 			return -1;
-		}
-		double d = cJSON_GetNumberValue(v);
-		/* Range-checked as a double before narrowing. A value far
-		 * outside int would otherwise wrap into range and pass. */
-		if (!(d >= (double)a->min && d <= (double)a->max)) {
-			snprintf(err, errsz, "'%s' out of range (%d-%d)", a->key, a->min, a->max);
-			return -1;
-		}
-		if (d != (double)(long long)d) {
-			snprintf(err, errsz, "'%s' must be a whole number", a->key);
-			return -1;
-		}
 		cJSON_AddNumberToObject(req, a->key, d);
 		return 0;
 	}
@@ -626,21 +644,9 @@ static int render_value(const cfg_key_t *k, const cJSON *v, char *out, size_t ou
 	}
 
 	if (k->type == V_INT) {
-		if (!cJSON_IsNumber(v)) {
-			snprintf(err, errsz, "'%s' must be a number", k->key);
+		double d;
+		if (check_int(v, k->key, k->min, k->max, &d, err, errsz) < 0)
 			return -1;
-		}
-		double d = cJSON_GetNumberValue(v);
-		/* Range-checked as a double before narrowing, as in add_arg:
-		 * a value far outside int would otherwise wrap into range. */
-		if (!(d >= (double)k->min && d <= (double)k->max)) {
-			snprintf(err, errsz, "'%s' out of range (%d-%d)", k->key, k->min, k->max);
-			return -1;
-		}
-		if (d != (double)(long long)d) {
-			snprintf(err, errsz, "'%s' must be a whole number", k->key);
-			return -1;
-		}
 		snprintf(out, outsz, "%d", (int)d);
 		return 0;
 	}
@@ -833,25 +839,25 @@ static int plan_config_set(const cJSON *root, rmq_cmd_plan_t *out, char *err, si
 			 cJSON_GetObjectItemCaseSensitive(root, "value"), err, errsz);
 }
 
-int rmq_cmd_plan(const char *json, rmq_cmd_plan_t *out, char *err, size_t errsz)
+/*
+ * The planner proper, over a payload someone else parsed.
+ *
+ * Split from rmq_cmd_plan() so the dispatch path parses once: it needs the
+ * nonce and the command name out of the same document, and re-parsing to get
+ * them cost a second pass over every payload.
+ */
+static int plan_parsed(const cJSON *root, rmq_cmd_plan_t *out, char *err, size_t errsz)
 {
 	memset(out, 0, sizeof(*out));
 
-	cJSON *root = cJSON_Parse(json);
-	if (!root) {
-		snprintf(err, errsz, "payload is not JSON");
-		return -1;
-	}
 	if (!cJSON_IsObject(root)) {
 		snprintf(err, errsz, "payload is not a JSON object");
-		cJSON_Delete(root);
 		return -1;
 	}
 
 	const cJSON *cmd = cJSON_GetObjectItemCaseSensitive(root, "cmd");
 	if (!cJSON_IsString(cmd) || !cmd->valuestring) {
 		snprintf(err, errsz, "missing 'cmd'");
-		cJSON_Delete(root);
 		return -1;
 	}
 
@@ -859,9 +865,7 @@ int rmq_cmd_plan(const char *json, rmq_cmd_plan_t *out, char *err, size_t errsz)
 	 * daemon request, and is checked against its own allowlist. */
 	if (strcmp(cmd->valuestring, "config-set") == 0) {
 		out->kind = RMQ_PLAN_CONFIG;
-		int rc = plan_config_set(root, out, err, errsz);
-		cJSON_Delete(root);
-		return rc;
+		return plan_config_set(root, out, err, errsz);
 	}
 
 	/* Also the bridge's own work: rvd is asked for nothing, since opening
@@ -869,7 +873,6 @@ int rmq_cmd_plan(const char *json, rmq_cmd_plan_t *out, char *err, size_t errsz)
 	 * and how often are config, not something a broker client chooses. */
 	if (strcmp(cmd->valuestring, "snapshot") == 0) {
 		out->kind = RMQ_PLAN_SNAPSHOT;
-		cJSON_Delete(root);
 		return 0;
 	}
 
@@ -887,7 +890,6 @@ int rmq_cmd_plan(const char *json, rmq_cmd_plan_t *out, char *err, size_t errsz)
 	 */
 	if (strcmp(cmd->valuestring, "reboot") == 0) {
 		out->kind = RMQ_PLAN_REBOOT;
-		cJSON_Delete(root);
 		return 0;
 	}
 
@@ -895,9 +897,7 @@ int rmq_cmd_plan(const char *json, rmq_cmd_plan_t *out, char *err, size_t errsz)
 	 * table therefore cannot describe. */
 	if (strcmp(cmd->valuestring, "system-set") == 0) {
 		out->kind = RMQ_PLAN_SYSTEM;
-		int rc = plan_system_set(root, out, err, errsz);
-		cJSON_Delete(root);
-		return rc;
+		return plan_system_set(root, out, err, errsz);
 	}
 
 	const cmd_def_t *def = find_command(cmd->valuestring);
@@ -905,14 +905,12 @@ int rmq_cmd_plan(const char *json, rmq_cmd_plan_t *out, char *err, size_t errsz)
 		/* Deny by default. Naming nothing else keeps the refusal from
 		 * doubling as a directory of what would have worked. */
 		snprintf(err, errsz, "command not permitted");
-		cJSON_Delete(root);
 		return -1;
 	}
 
 	cJSON *req = cJSON_CreateObject();
 	if (!req) {
 		snprintf(err, errsz, "out of memory");
-		cJSON_Delete(root);
 		return -1;
 	}
 	cJSON_AddStringToObject(req, "cmd", def->ctrl_cmd ? def->ctrl_cmd : def->name);
@@ -926,7 +924,6 @@ int rmq_cmd_plan(const char *json, rmq_cmd_plan_t *out, char *err, size_t errsz)
 	for (int i = 0; def->args[i].type != A_END; i++) {
 		if (add_arg(req, root, &def->args[i], err, errsz) < 0) {
 			cJSON_Delete(req);
-			cJSON_Delete(root);
 			return -1;
 		}
 	}
@@ -940,13 +937,26 @@ int rmq_cmd_plan(const char *json, rmq_cmd_plan_t *out, char *err, size_t errsz)
 
 	bool fit = cJSON_PrintPreallocated(req, out->request, (int)sizeof(out->request), 0);
 	cJSON_Delete(req);
-	cJSON_Delete(root);
 
 	if (!fit || !out->daemon) {
 		snprintf(err, errsz, "request could not be built");
 		return -1;
 	}
 	return 0;
+}
+
+int rmq_cmd_plan(const char *json, rmq_cmd_plan_t *out, char *err, size_t errsz)
+{
+	cJSON *root = cJSON_Parse(json);
+	if (!root) {
+		memset(out, 0, sizeof(*out));
+		snprintf(err, errsz, "payload is not JSON");
+		return -1;
+	}
+
+	int rc = plan_parsed(root, out, err, errsz);
+	cJSON_Delete(root);
+	return rc;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1075,37 +1085,46 @@ void rmq_cmd_handle(rmq_state_t *st, const char *topic, const uint8_t *payload, 
 	memcpy(json, payload, len);
 	json[len] = '\0';
 
-	/*
-	 * The nonce is read from the raw payload rather than the plan, so a
-	 * refused command still comes back tagged. Without that, a sender
-	 * waiting on its own nonce cannot tell a rejection from a timeout.
-	 */
-	char nonce[NONCE_MAX + 1] = "";
-	char cmd_name[64] = "";
 	cJSON *root = cJSON_Parse(json);
+	free(json);
+
+	/*
+	 * The nonce and the command name are taken from the document rather
+	 * than from the plan, so a refused command still comes back tagged.
+	 * Without that, a sender waiting on its own nonce cannot tell a
+	 * rejection from a timeout.
+	 */
+	char nonce_buf[NONCE_MAX + 1] = "";
+	char cmd_buf[64] = "";
 	if (root) {
 		const cJSON *n = cJSON_GetObjectItemCaseSensitive(root, "nonce");
 		if (cJSON_IsString(n) && n->valuestring)
-			rss_strlcpy(nonce, n->valuestring, sizeof(nonce));
+			rss_strlcpy(nonce_buf, n->valuestring, sizeof(nonce_buf));
 		const cJSON *c = cJSON_GetObjectItemCaseSensitive(root, "cmd");
 		if (cJSON_IsString(c) && c->valuestring)
-			rss_strlcpy(cmd_name, c->valuestring, sizeof(cmd_name));
-		cJSON_Delete(root);
+			rss_strlcpy(cmd_buf, c->valuestring, sizeof(cmd_buf));
 	}
+
+	/* Absent rather than empty, so the result carries no key at all when
+	 * the payload named neither. */
+	const char *nonce = nonce_buf[0] ? nonce_buf : NULL;
+	const char *cmd_name = cmd_buf[0] ? cmd_buf : NULL;
 
 	rmq_cmd_plan_t plan;
 	char err[192];
-	if (rmq_cmd_plan(json, &plan, err, sizeof(err)) < 0) {
+	int rc = root ? plan_parsed(root, &plan, err, sizeof(err)) : -1;
+	if (!root)
+		snprintf(err, sizeof(err), "payload is not JSON");
+	cJSON_Delete(root);
+
+	if (rc < 0) {
 		/* Refusals are logged, not just answered: this topic is the
 		 * camera's whole management surface, so a rejected command is
 		 * the one thing worth being able to find afterwards. */
-		RSS_WARN("cmd: refused '%s': %s", cmd_name[0] ? cmd_name : "(none)", err);
-		publish_result(st, cmd_name[0] ? cmd_name : NULL, nonce[0] ? nonce : NULL, err,
-			       NULL);
-		free(json);
+		RSS_WARN("cmd: refused '%s': %s", cmd_name ? cmd_name : "(none)", err);
+		publish_result(st, cmd_name, nonce, err, NULL);
 		return;
 	}
-	free(json);
 
 	if (plan.kind == RMQ_PLAN_CONFIG) {
 		for (int i = 0; i < plan.write_count; i++)
@@ -1126,7 +1145,7 @@ void rmq_cmd_handle(rmq_state_t *st, const char *topic, const uint8_t *payload, 
 			cJSON_AddNumberToObject(r, "edits", plan.write_count);
 			cJSON_AddStringToObject(r, "restarts", owner);
 		}
-		publish_result(st, cmd_name, nonce[0] ? nonce : NULL, NULL, r);
+		publish_result(st, cmd_name, nonce, NULL, r);
 		return;
 	}
 
@@ -1143,7 +1162,7 @@ void rmq_cmd_handle(rmq_state_t *st, const char *topic, const uint8_t *payload, 
 		cJSON *r = cJSON_CreateObject();
 		if (r)
 			cJSON_AddStringToObject(r, "status", "rebooting");
-		publish_result(st, cmd_name, nonce[0] ? nonce : NULL, NULL, r);
+		publish_result(st, cmd_name, nonce, NULL, r);
 		rmq_mqtt_publish(st->mqtt, st->topic_status, RMQ_STATUS_OFFLINE,
 				 strlen(RMQ_STATUS_OFFLINE), 1, true);
 		rmq_mqtt_loop(st->mqtt, 200);
@@ -1169,8 +1188,7 @@ void rmq_cmd_handle(rmq_state_t *st, const char *topic, const uint8_t *payload, 
 
 		int rc = tz ? rmq_system_set_timezone(v) : rmq_system_set_ntp_server(v);
 		if (rc != 0) {
-			publish_result(st, cmd_name, nonce[0] ? nonce : NULL,
-				       "the file could not be written", NULL);
+			publish_result(st, cmd_name, nonce, "the file could not be written", NULL);
 			return;
 		}
 
@@ -1186,13 +1204,13 @@ void rmq_cmd_handle(rmq_state_t *st, const char *topic, const uint8_t *payload, 
 			if (tz)
 				cJSON_AddStringToObject(r, "applies", "on reboot");
 		}
-		publish_result(st, cmd_name, nonce[0] ? nonce : NULL, NULL, r);
+		publish_result(st, cmd_name, nonce, NULL, r);
 		return;
 	}
 
 	if (plan.kind == RMQ_PLAN_SNAPSHOT) {
 		if (!st->snapshot_enabled) {
-			publish_result(st, cmd_name, nonce[0] ? nonce : NULL,
+			publish_result(st, cmd_name, nonce,
 				       "snapshots are off — set [mqtt] snapshot = true", NULL);
 			return;
 		}
@@ -1201,7 +1219,7 @@ void rmq_cmd_handle(rmq_state_t *st, const char *topic, const uint8_t *payload, 
 		cJSON *r = cJSON_CreateObject();
 		if (r)
 			cJSON_AddStringToObject(r, "status", rc == 0 ? "ok" : "no frame");
-		publish_result(st, cmd_name, nonce[0] ? nonce : NULL,
+		publish_result(st, cmd_name, nonce,
 			       rc == 0 ? NULL : "no JPEG frame arrived — is [jpeg] enabled?", r);
 		return;
 	}
@@ -1213,16 +1231,15 @@ void rmq_cmd_handle(rmq_state_t *st, const char *topic, const uint8_t *payload, 
 	if (!resp)
 		return;
 
-	int rc = rss_ctrl_send_command(sock, plan.request, resp, RESP_MAX, CTRL_TIMEOUT_MS);
-	if (rc < 0) {
+	if (rss_ctrl_send_command(sock, plan.request, resp, RESP_MAX, CTRL_TIMEOUT_MS) < 0) {
 		free(resp);
 		snprintf(err, sizeof(err), "%s is not running or did not answer", plan.daemon);
 		RSS_WARN("cmd: %s", err);
-		publish_result(st, cmd_name, nonce[0] ? nonce : NULL, err, NULL);
+		publish_result(st, cmd_name, nonce, err, NULL);
 		return;
 	}
 
-	RSS_INFO("cmd: %s -> %s: %s", cmd_name, plan.daemon, plan.request);
+	RSS_INFO("cmd: %s -> %s: %s", cmd_name ? cmd_name : "(none)", plan.daemon, plan.request);
 
 	/*
 	 * Daemons answer with either a JSON object or a bare string, so both
@@ -1251,5 +1268,5 @@ void rmq_cmd_handle(rmq_state_t *st, const char *topic, const uint8_t *payload, 
 	if (!fail && plan.persists)
 		owe_save(st, plan.daemon);
 
-	publish_result(st, cmd_name, nonce[0] ? nonce : NULL, fail, dresp);
+	publish_result(st, cmd_name, nonce, fail, dresp);
 }

@@ -1210,8 +1210,13 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 	group_topic(st, g, topic, sizeof(topic));
 
 	int rc = rmq_mqtt_publish(st->mqtt, topic, payload, strlen(payload), 1, true);
-	RSS_INFO("ha: %s discovery published, %d entities, %zu bytes",
-		 groups[g].name ? groups[g].name : "camera", published, strlen(payload));
+	const char *what = groups[g].name ? groups[g].name : "camera";
+
+	if (rc < 0)
+		RSS_WARN("ha: %s discovery not published, %zu bytes", what, strlen(payload));
+	else
+		RSS_INFO("ha: %s discovery published, %d entities, %zu bytes", what, published,
+			 strlen(payload));
 	free(payload);
 
 	return rc;
