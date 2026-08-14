@@ -28,6 +28,7 @@ rsd-555/rsd-555
 rmq/rmq
 rlatency/rlatency
 rverify/rverify
+mdnsprobe/mdnsprobe
 rss_build_info.*
 tests/tests
 tests/sdp_parse.c

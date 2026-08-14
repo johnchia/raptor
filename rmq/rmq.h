@@ -25,6 +25,16 @@
 /* However long a burst of commands runs, a change reaches flash within this. */
 #define RMQ_SAVE_MAX_DELAY_MS 15000
 
+/*
+ * Where to look for a broker when the config names none, and how long to wait.
+ * The wait is spent once at startup and delays nothing else, but it is time the
+ * camera is not bridging, so it is short enough to be unnoticed on a network
+ * that answers and to be tolerable on one that never will.
+ */
+#define RMQ_MDNS_DISCOVER_MS 3000
+#define RMQ_BROKER_FALLBACK  "127.0.0.1"
+#define RMQ_BROKER_PORT	     1883
+
 /* The retained availability payloads, which the Last Will also carries — so
  * they are shared rather than private to whoever publishes them. */
 #define RMQ_STATUS_ONLINE  "online"
@@ -44,6 +54,11 @@ struct rmq_state {
 
 	char host[128];
 	int port;
+	/* `host` came from mDNS rather than the config file. Recorded so the
+	 * status output can say where the broker address came from -- an
+	 * address nobody configured is otherwise indistinguishable from a
+	 * typo'd one. */
+	bool host_discovered;
 	char client_id[64];
 	char username[64];
 	char password[128];

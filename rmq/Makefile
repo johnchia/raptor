@@ -1,4 +1,4 @@
-SRCS := rmq_main.c rmq_mqtt.c rmq_poll.c rmq_ha.c rmq_cmd.c rmq_restart.c rmq_snapshot.c rmq_system.c
+SRCS := rmq_main.c rmq_mqtt.c rmq_poll.c rmq_ha.c rmq_cmd.c rmq_restart.c rmq_snapshot.c rmq_system.c rmq_mdns.c
 OBJS := $(SRCS:.c=.o)
 BIN  := rmq
 

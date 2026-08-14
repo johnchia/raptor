@@ -22,6 +22,7 @@
 #include "rmq.h"
 #include "rmq_cmd.h"
 #include "rmq_ha.h"
+#include "rmq_mdns.h"
 #include "rmq_restart.h"
 
 #include <cJSON.h>
@@ -115,8 +116,13 @@ static void load_config(rmq_state_t *st)
 {
 	rss_config_t *c = st->cfg;
 
-	rss_strlcpy(st->host, rss_config_get_str(c, "mqtt", "host", "127.0.0.1"), sizeof(st->host));
-	st->port = rss_config_get_int(c, "mqtt", "port", 1883);
+	/*
+	 * Both left empty when unset rather than defaulted here, because an
+	 * unset broker is what turns discovery on -- see resolve_broker(). Port
+	 * 0 is the sentinel for "not configured"; no valid port is 0.
+	 */
+	rss_strlcpy(st->host, rss_config_get_str(c, "mqtt", "host", ""), sizeof(st->host));
+	st->port = rss_config_get_int(c, "mqtt", "port", 0);
 	rss_strlcpy(st->username, rss_config_get_str(c, "mqtt", "username", ""),
 		    sizeof(st->username));
 	rss_strlcpy(st->password, rss_config_get_str(c, "mqtt", "password", ""),
@@ -212,6 +218,48 @@ static void load_config(rmq_state_t *st)
 		st->poll_interval_sec = 1;
 }
 
+/*
+ * Settle on a broker address. A configured host always wins and is never
+ * second-guessed, so a camera that names its broker behaves exactly as it did
+ * before discovery existed -- including costing no startup delay, because the
+ * network is not asked at all.
+ *
+ * Only an unset host consults mDNS, and only once. Failing to find anything is
+ * not an error: it falls through to the loopback default, which is what an
+ * unconfigured camera used to get unconditionally.
+ *
+ * A configured port still wins over a discovered one. The pair is not taken
+ * atomically because they are set for different reasons -- a port is pinned
+ * when the broker listens somewhere unusual, and that stays true of whichever
+ * host answers.
+ */
+static void resolve_broker(rmq_state_t *st)
+{
+	char addr[sizeof(st->host)];
+	int port = 0;
+
+	if (st->host[0]) {
+		if (st->port == 0)
+			st->port = RMQ_BROKER_PORT;
+		return;
+	}
+
+	RSS_INFO("rmq: no broker configured, asking mDNS for %s", RMQ_MDNS_MQTT_TYPE);
+
+	if (rmq_mdns_find_broker(addr, sizeof(addr), &port, RMQ_MDNS_DISCOVER_MS) == 0) {
+		rss_strlcpy(st->host, addr, sizeof(st->host));
+		st->host_discovered = true;
+		if (st->port == 0)
+			st->port = port;
+		return;
+	}
+
+	RSS_INFO("rmq: nothing announced a broker, falling back to %s", RMQ_BROKER_FALLBACK);
+	rss_strlcpy(st->host, RMQ_BROKER_FALLBACK, sizeof(st->host));
+	if (st->port == 0)
+		st->port = RMQ_BROKER_PORT;
+}
+
 /* ------------------------------------------------------------------ */
 /* Control socket                                                      */
 /* ------------------------------------------------------------------ */
@@ -232,12 +280,14 @@ static int rmq_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 	if (strcmp(cmd, "status") == 0 || strcmp(cmd, "config-show") == 0) {
 		return rss_ctrl_resp(resp_buf, resp_buf_size,
 				     "{\"status\":\"ok\",\"connected\":%s,\"host\":\"%s\","
+				     "\"host_discovered\":%s,"
 				     "\"port\":%d,\"tls\":%s,\"client_id\":\"%s\","
 				     "\"topic_prefix\":\"%s\",\"commands\":%s,"
 				     "\"save_pending\":%s,\"restart_pending\":%s,"
 				     "\"staged_edits\":%d}",
 				     rmq_mqtt_connected(st->mqtt) ? "true" : "false", st->host,
-				     st->port, st->use_tls ? "true" : "false", st->client_id,
+				     st->host_discovered ? "true" : "false", st->port,
+				     st->use_tls ? "true" : "false", st->client_id,
 				     st->topic_prefix, st->commands_enabled ? "true" : "false",
 				     st->save_due_ms ? "true" : "false",
 				     st->restart_due_ms ? "true" : "false", st->cfg_write_count);
@@ -462,6 +512,10 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
+	/* After the enabled check: a disabled bridge must not spend three
+	 * seconds on the network before deciding to exit. */
+	resolve_broker(&st);
+
 	st.mqtt = rmq_mqtt_new();
 	if (!st.mqtt) {
 		RSS_FATAL("failed to allocate mqtt client");
@@ -472,8 +526,8 @@ int main(int argc, char **argv)
 
 	rmq_mqtt_set_message_cb(st.mqtt, on_message, &st);
 
-	RSS_INFO("rmq: broker %s:%d, client '%s', prefix '%s'", st.host, st.port, st.client_id,
-		 st.topic_prefix);
+	RSS_INFO("rmq: broker %s:%d%s, client '%s', prefix '%s'", st.host, st.port,
+		 st.host_discovered ? " (discovered)" : "", st.client_id, st.topic_prefix);
 	if (st.commands_enabled)
 		RSS_INFO("rmq: commands accepted on %s, results on %s", st.topic_cmd,
 			 st.topic_result);

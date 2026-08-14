@@ -175,6 +175,30 @@ else
 LDFLAGS_SYSROOT :=
 endif
 
+# mDNS service discovery. libmdnsd comes from the same mdnsd package that does
+# the advertising half on the camera, so linking it costs nothing on the device
+# and keeps a second DNS codec out of raptor.
+#
+# The per-package staging directory is searched as well as the assembled
+# sysroot: Buildroot's per-package mode copies a package forward only into the
+# packages that declare a dependency on it, and raptor declares none, so the
+# assembled sysroot can lack libmdnsd on a tree where the camera has it. Set
+# MDNSD_SYSROOT explicitly to override the search.
+#
+# Finding nothing is not an error: rmq_mdns.c then compiles to stubs that
+# report an empty network, and rmq falls back to the configured broker host.
+MDNSD_SYSROOT ?= $(patsubst %/usr/include/libmdnsd/mdnsd.h,%,$(firstword \
+                   $(wildcard $(SYSROOT)/usr/include/libmdnsd/mdnsd.h) \
+                   $(wildcard $(SYSROOT)/../../../per-package/mdnsd*/host/*/sysroot/usr/include/libmdnsd/mdnsd.h)))
+
+ifneq ($(MDNSD_SYSROOT),)
+CFLAGS_MDNS  := -DRMQ_HAS_MDNS -I$(MDNSD_SYSROOT)/usr/include
+LDFLAGS_MDNS := -L$(MDNSD_SYSROOT)/usr/lib -lmdnsd
+else
+CFLAGS_MDNS  :=
+LDFLAGS_MDNS :=
+endif
+
 # libc shim — prefer static archive (eliminates .so from device), fall back to shared
 SHIM_A := $(firstword $(wildcard $(SYSROOT)/usr/lib/libmuslshim.a $(SYSROOT)/lib/libmuslshim.a \
                                  $(SYSROOT)/usr/lib/libuclibcshim.a $(SYSROOT)/lib/libuclibcshim.a))
@@ -267,7 +291,7 @@ LIVE555_LIBS ?= $(LIVE555_SYSROOT)/usr/lib/libliveMedia.a \
 
 # Targets
 DAEMONS := rvd rsd rad rhd rod ric rmr rmd rwd rwc rfs rsp rsr rsd-555 rmq
-TOOLS   := raptorctl ringdump rac rlatency rverify
+TOOLS   := raptorctl ringdump rac rlatency rverify mdnsprobe
 
 .PHONY: all clean libs $(DAEMONS) $(TOOLS) install
 
@@ -442,9 +466,9 @@ rsr: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 
 rmq: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rmq"
-	$(Q)$(MAKE) -C rmq CC="$(CC)" CFLAGS="$(CFLAGS)" \
+	$(Q)$(MAKE) -C rmq CC="$(CC)" CFLAGS="$(CFLAGS) $(CFLAGS_MDNS)" \
 		LIBS="$(LIB_IPC) $(LIB_COMMON) $(RSS_BUILD_LIBS)" \
-		LDFLAGS="$(LDFLAGS) $(LDFLAGS_MOSQUITTO)" Q="$(Q)"
+		LDFLAGS="$(LDFLAGS) $(LDFLAGS_MOSQUITTO) $(LDFLAGS_MDNS)" Q="$(Q)"
 
 # -- Tools --
 
@@ -475,6 +499,12 @@ rverify: $(LIB_COMMON_FILE)
 	@echo "  BUILD   rverify"
 	$(Q)$(MAKE) -C rverify CC="$(CC)" CFLAGS="$(CFLAGS)" \
 		LIBS="$(LIB_COMMON)" LDFLAGS="$(LDFLAGS)" Q="$(Q)"
+
+mdnsprobe: $(LIB_COMMON_FILE)
+	@echo "  BUILD   mdnsprobe"
+	$(Q)$(MAKE) -C mdnsprobe CC="$(CC)" CFLAGS="$(CFLAGS) $(CFLAGS_MDNS)" \
+		LIBS="$(LIB_COMMON)" \
+		LDFLAGS="$(LDFLAGS) $(LDFLAGS_MDNS)" Q="$(Q)"
 
 # -- Collect binaries --
 
