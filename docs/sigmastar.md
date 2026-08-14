@@ -459,7 +459,8 @@ Two general points, both of which cost time here:
 - **An `IQ_FLAT` knob has no auto mode**, so raptor's neutral has to be *made*
   inert. The `IQ_AUTOMAN` knobs get this for free — 128 restores auto and leaves
   the manual field alone — and it is tempting to assume the same of the rest.
-  `raptor-ssc30kq.conf` documented `ae_comp` as one of them and it never was.
+  The board config this platform was brought up with documented `ae_comp` as one
+  of them, and it never was.
 - **A midpoint is not a unity.** `saturation` was already the counter-example in
   this table (0..127 with unity at 32, not 64); EVComp is the second, and the one
   where the wrong guess is invisible because it shifts the picture rather than
@@ -550,8 +551,47 @@ light in frame, where the AE holds gain low while the rest of the picture is
 black. Note that **`ae_luma` is a post-AE measurement**: holding it near target
 is the AE's whole job, so it sits around 45 in a lit room and a dim one alike and
 only falls once the AE has spent its shutter and gain. Both values are readable
-live via `raptorctl ric status`, or on the picture — see the `[osd.uptime]`
-element in `config/raptor-ssc30kq.conf`.
+live via `raptorctl ric status`, or on the picture — the `%ae_luma%` and
+`%total_gain%` tokens documented above `[osd.uptime]` in `config/raptor.conf`.
+
+### IR-cut pins are board wiring, and nothing here can supply them
+
+Worth stating because the surrounding sections are all SoC properties and this
+one is not. The IR-cut and IR-LED GPIOs follow whoever laid the board out: two
+cameras on the same part, from different vendors, have no reason to agree, so
+there is no value raptor can default to and no SoC-keyed file that could carry
+one. `/etc/thingino.json` is a thingino file and does not exist on an OpenIPC
+image, so on this platform the config *is* the pin source and unset pins mean a
+filter that never moves.
+
+The one unit these notes were taken on wanted:
+
+```ini
+[ircut]
+enabled  = true
+gpio_ircut  = 24
+gpio_ircut2 = 23
+gpio_irled  = 60
+gpio_irled2 = 59
+```
+
+Kept as a worked example and a starting point for anyone holding that same
+camera — not as a default, and not as a fact about the SoC.
+
+The filter is motor-driven across an H-bridge pair, so **the order of the two
+`ircut` pins is the polarity**. Swapped, every switch drives the filter the wrong
+way and day mode runs with the filter parked out: IR floods the sensor and
+daylight comes back with a purple cast. If a board shows that cast, swap these
+two before reaching for the white balance.
+
+Confirm the filter is actuating at all first, though. A purple cast from an
+inverted H-bridge and one from a filter that never moves look identical from
+outside, and the second has its own causes — pins left unset, for one.
+
+Both LED pins are listed; only the 850nm one is switched, since ir940 defaults
+off. That unit has no photoresistor and the kernel config has `CONFIG_MS_SAR`
+off, so `trigger = adc` had no device to open on it either — again a property of
+the board and its kernel config rather than of the part.
 
 ## Building
 
