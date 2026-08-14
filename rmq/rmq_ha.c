@@ -214,6 +214,7 @@ typedef enum {
 	CTRL_SELECT,
 	CTRL_SWITCH,
 	CTRL_BUTTON,
+	CTRL_TEXT,
 } ha_ctrl_kind_t;
 
 typedef struct {
@@ -259,6 +260,11 @@ typedef struct {
 	 * control would look like it worked and change nothing at all.
 	 */
 	const char *cap;
+
+	/* CTRL_SELECT: options come from the timezone table rather than from
+	 * `options` above, which would otherwise be forty-odd lines of names
+	 * repeated in a second place. */
+	bool zones;
 } ha_control_t;
 
 static const char *const opt_daynight[] = {"auto", "day", "night", NULL};
@@ -664,6 +670,31 @@ static const ha_control_t controls[] = {
 		    "\"value\":\"{{ value }}\"}",
 	 .options = opt_arate,
 	 .restarts = true},
+	/* ---- System: the two settings that live in /etc ---- *
+	 *
+	 * Owner RMQ_D_COUNT — "always present" — because neither depends on a
+	 * daemon running. They are the camera's, not any one component's.
+	 */
+	{.key = "timezone",
+	 .name = "Timezone (reboot to apply)",
+	 .kind = CTRL_SELECT,
+	 .icon = "mdi:earth",
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_COUNT,
+	 .value = "system.timezone",
+	 .cmd_tpl = "{\"cmd\":\"system-set\",\"key\":\"timezone\",\"value\":\"{{ value }}\"}",
+	 /* .options filled at publish time from the zone table. */
+	 .zones = true},
+	{.key = "ntp_server",
+	 .name = "NTP server",
+	 .kind = CTRL_TEXT,
+	 .icon = "mdi:clock-check",
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_COUNT,
+	 .value = "system.ntp_server",
+	 .cmd_tpl = "{\"cmd\":\"system-set\",\"key\":\"ntp_server\",\"value\":\"{{ value }}\"}",
+	 .max = 63},
+
 	{.key = "rtsp_port_set",
 	 .name = "RTSP port",
 	 .kind = CTRL_NUMBER,
@@ -839,7 +870,7 @@ static cJSON *make_component(struct rmq_state *st, const ha_entity_t *e)
 /* Build one control entry. */
 static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct, const res_list_t *res)
 {
-	static const char *const platforms[] = {"number", "select", "switch", "button"};
+	static const char *const platforms[] = {"number", "select", "switch", "button", "text"};
 
 	/*
 	 * The restart tier says so where it will be read. Home Assistant has no
@@ -907,8 +938,17 @@ static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct, const r
 		if (ct->unit)
 			cJSON_AddStringToObject(c, "unit_of_meas", ct->unit);
 		break;
+	case CTRL_TEXT:
+		/* A length cap and nothing else. What the value may contain is
+		 * enforced where it is applied, not here: a pattern in the
+		 * discovery document is a convenience for the person typing,
+		 * never the check that matters. */
+		cJSON_AddNumberToObject(c, "max", ct->max);
+		break;
 	case CTRL_SELECT: {
-		const char *const *choices = ct->options ? ct->options : res->opt;
+		const char *const *choices = ct->zones	   ? rmq_system_zone_names()
+					     : ct->options ? ct->options
+							   : res->opt;
 		cJSON *opts = cJSON_AddArrayToObject(c, "ops");
 		for (int i = 0; opts && choices[i]; i++)
 			cJSON_AddItemToArray(opts, cJSON_CreateString(choices[i]));

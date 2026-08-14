@@ -15,6 +15,7 @@
 #include "rmq_poll.h"
 #include "rmq_restart.h"
 #include "rmq_snapshot.h"
+#include "rmq_system.h"
 
 /* Derived topics are the prefix plus a suffix, so the prefix is capped low
  * enough that appending the longest suffix cannot truncate. */

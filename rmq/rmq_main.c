@@ -349,6 +349,7 @@ static void rmq_poll_cycle(rmq_state_t *st)
 	/* The bridge's own state, added to the daemons': a pending restart is
 	 * the reason a control can read back the value it had a moment ago. */
 	rmq_restart_report(st, state);
+	rmq_system_report(st, state);
 
 	char *payload = cJSON_PrintUnformatted(state);
 	cJSON_Delete(state);

@@ -34,7 +34,7 @@ CTRL_SRCS = ../rvd/rvd_ctrl.c mock_hal.c \
 # rmq_cmd.c is the MQTT command policy. mock_rmq.c stands in for the broker
 # and the daemon table it would otherwise link against; neither is reached by
 # the part under test.
-RMQ_SRCS = ../rmq/rmq_cmd.c mock_rmq.c
+RMQ_SRCS = ../rmq/rmq_cmd.c ../rmq/rmq_system.c mock_rmq.c
 IPC_SRCS = ../../raptor-ipc/src/rss_ring.c ../../raptor-ipc/src/rss_ctrl.c \
            ../../raptor-ipc/src/rss_osd_shm.c ../../raptor-ipc/src/rss_ipc_log.c
 

@@ -652,6 +652,63 @@ TEST snapshot_is_the_bridges_own_work(void)
 	PASS();
 }
 
+/*
+ * The /etc tier. Its two keys need a string to travel, which is exactly what
+ * the config tier refuses to have a type for — so the check is that each key
+ * carries its own grammar rather than opening a general one.
+ */
+TEST system_set_carries_a_grammar_per_key(void)
+{
+	rmq_cmd_plan_t p;
+
+	ASSERT_ALLOWED("{\"cmd\":\"system-set\",\"key\":\"timezone\","
+		       "\"value\":\"America/New_York\"}",
+		       &p);
+	ASSERT_EQ(RMQ_PLAN_SYSTEM, p.kind);
+	ASSERT_EQ(1, p.write_count);
+	ASSERT_STR_EQ("system", p.writes[0].section);
+	ASSERT_STR_EQ("timezone", p.writes[0].key);
+	ASSERT_STR_EQ("America/New_York", p.writes[0].value);
+
+	/* A timezone is an enum: a POSIX string is not a member even though it
+	 * is what ends up in the file, so nothing free-form reaches /etc/TZ. */
+	ASSERT_REFUSED("{\"cmd\":\"system-set\",\"key\":\"timezone\",\"value\":\"EST5EDT\"}");
+	ASSERT_REFUSED("{\"cmd\":\"system-set\",\"key\":\"timezone\",\"value\":\"Mars/Olympus\"}");
+
+	ASSERT_ALLOWED("{\"cmd\":\"system-set\",\"key\":\"ntp_server\","
+		       "\"value\":\"192.168.1.254\"}",
+		       &p);
+	ASSERT_STR_EQ("192.168.1.254", p.writes[0].value);
+	ASSERT_ALLOWED("{\"cmd\":\"system-set\",\"key\":\"ntp_server\","
+		       "\"value\":\"pool.ntp.org\"}",
+		       &p);
+
+	/*
+	 * The host grammar is the whole defence for the one real string in the
+	 * bridge. It is written into ntp.conf on a line of its own, so a value
+	 * carrying whitespace could add a second directive, and one carrying a
+	 * slash or a quote could become something other than a hostname.
+	 */
+	ASSERT_REFUSED("{\"cmd\":\"system-set\",\"key\":\"ntp_server\","
+		       "\"value\":\"host\\nrestrict default\"}");
+	ASSERT_REFUSED("{\"cmd\":\"system-set\",\"key\":\"ntp_server\",\"value\":\"a b\"}");
+	ASSERT_REFUSED(
+		"{\"cmd\":\"system-set\",\"key\":\"ntp_server\",\"value\":\"../../etc/passwd\"}");
+	ASSERT_REFUSED("{\"cmd\":\"system-set\",\"key\":\"ntp_server\",\"value\":\"h;reboot\"}");
+	ASSERT_REFUSED("{\"cmd\":\"system-set\",\"key\":\"ntp_server\",\"value\":\"$(reboot)\"}");
+	ASSERT_REFUSED("{\"cmd\":\"system-set\",\"key\":\"ntp_server\",\"value\":\"\"}");
+	ASSERT_REFUSED("{\"cmd\":\"system-set\",\"key\":\"ntp_server\",\"value\":\"-lead\"}");
+	ASSERT_REFUSED("{\"cmd\":\"system-set\",\"key\":\"ntp_server\",\"value\":\"trail.\"}");
+
+	/* Nothing else in /etc is reachable — hostname and resolv.conf are out
+	 * of scope, and being out of scope means being absent, not defended. */
+	ASSERT_REFUSED("{\"cmd\":\"system-set\",\"key\":\"hostname\",\"value\":\"cam1\"}");
+	ASSERT_REFUSED("{\"cmd\":\"system-set\",\"key\":\"nameserver\",\"value\":\"1.1.1.1\"}");
+	ASSERT_REFUSED("{\"cmd\":\"system-set\",\"key\":\"timezone\"}");
+	ASSERT_REFUSED("{\"cmd\":\"system-set\",\"value\":\"UTC\"}");
+	PASS();
+}
+
 SUITE(rmq_cmd_suite)
 {
 	RUN_TEST(refuses_the_named_hazards);
@@ -683,4 +740,5 @@ SUITE(rmq_cmd_suite)
 	RUN_TEST(live_commands_stay_out_of_the_config_plan);
 	RUN_TEST(splits_the_image_section_across_the_two_tiers);
 	RUN_TEST(snapshot_is_the_bridges_own_work);
+	RUN_TEST(system_set_carries_a_grammar_per_key);
 }

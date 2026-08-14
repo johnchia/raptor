@@ -682,6 +682,63 @@ static int add_write(rmq_cmd_plan_t *out, const char *section, const char *key, 
  * bad key refuses the lot — because a half-applied section is a configuration
  * nobody chose.
  */
+/*
+ * The /etc settings, whose whole table is two keys.
+ *
+ * They need a string to travel, which the config tier deliberately has no type
+ * for — so each carries its own grammar instead of a shared one. The timezone
+ * is a closed enum, checked against the name list, so nothing free-form
+ * reaches /etc/TZ at all. The NTP server is the one genuine string in the
+ * bridge, and it is narrowed to what a hostname may contain: no slash, space,
+ * quote or shell metacharacter survives, so it cannot become a path or a
+ * second directive on the line it is written to.
+ */
+static int plan_system_set(const cJSON *root, rmq_cmd_plan_t *out, char *err, size_t errsz)
+{
+	const cJSON *jk = cJSON_GetObjectItemCaseSensitive(root, "key");
+	if (!cJSON_IsString(jk) || !jk->valuestring) {
+		snprintf(err, errsz, "system-set needs a 'key'");
+		return -1;
+	}
+	char key[RMQ_CFG_KEY_MAX];
+	rss_strlcpy(key, jk->valuestring, sizeof(key));
+
+	const cJSON *jv = cJSON_GetObjectItemCaseSensitive(root, "value");
+	if (!cJSON_IsString(jv) || !jv->valuestring) {
+		snprintf(err, errsz, "'%s' needs a string value", key);
+		return -1;
+	}
+	char value[RMQ_CFG_VAL_MAX];
+	if (rss_strlcpy(value, jv->valuestring, sizeof(value)) >= sizeof(value)) {
+		snprintf(err, errsz, "'%s' value is too long", key);
+		return -1;
+	}
+
+	if (strcmp(key, "timezone") == 0) {
+		if (!rmq_system_zone_posix(value)) {
+			snprintf(err, errsz, "'%s' is not a timezone this build knows", value);
+			return -1;
+		}
+	} else if (strcmp(key, "ntp_server") == 0) {
+		if (!rmq_system_valid_host(value)) {
+			snprintf(err, errsz, "'%s' is not a hostname or address", value);
+			return -1;
+		}
+	} else {
+		snprintf(err, errsz, "'%s' is not a settable system key", key);
+		return -1;
+	}
+
+	/* Carried in the write slot the config tier already has: same shape,
+	 * one entry, with the section naming where it lands rather than a
+	 * raptor.conf section that does not exist. */
+	rss_strlcpy(out->writes[0].section, "system", sizeof(out->writes[0].section));
+	rss_strlcpy(out->writes[0].key, key, sizeof(out->writes[0].key));
+	rss_strlcpy(out->writes[0].value, value, sizeof(out->writes[0].value));
+	out->write_count = 1;
+	return 0;
+}
+
 static int plan_config_set(const cJSON *root, rmq_cmd_plan_t *out, char *err, size_t errsz)
 {
 	const cJSON *sec = cJSON_GetObjectItemCaseSensitive(root, "section");
@@ -764,6 +821,15 @@ int rmq_cmd_plan(const char *json, rmq_cmd_plan_t *out, char *err, size_t errsz)
 		out->kind = RMQ_PLAN_SNAPSHOT;
 		cJSON_Delete(root);
 		return 0;
+	}
+
+	/* Settings in /etc, which raptor.conf does not hold and the config
+	 * table therefore cannot describe. */
+	if (strcmp(cmd->valuestring, "system-set") == 0) {
+		out->kind = RMQ_PLAN_SYSTEM;
+		int rc = plan_system_set(root, out, err, errsz);
+		cJSON_Delete(root);
+		return rc;
 	}
 
 	const cmd_def_t *def = find_command(cmd->valuestring);
@@ -991,6 +1057,34 @@ void rmq_cmd_handle(rmq_state_t *st, const char *topic, const uint8_t *payload, 
 			cJSON_AddStringToObject(r, "status", "staged");
 			cJSON_AddNumberToObject(r, "edits", plan.write_count);
 			cJSON_AddStringToObject(r, "restarts", owner);
+		}
+		publish_result(st, cmd_name, nonce[0] ? nonce : NULL, NULL, r);
+		return;
+	}
+
+	if (plan.kind == RMQ_PLAN_SYSTEM) {
+		const char *k = plan.writes[0].key;
+		const char *v = plan.writes[0].value;
+		bool tz = strcmp(k, "timezone") == 0;
+
+		int rc = tz ? rmq_system_set_timezone(v) : rmq_system_set_ntp_server(v);
+		if (rc != 0) {
+			publish_result(st, cmd_name, nonce[0] ? nonce : NULL,
+				       "the file could not be written", NULL);
+			return;
+		}
+
+		cJSON *r = cJSON_CreateObject();
+		if (r) {
+			cJSON_AddStringToObject(r, "status", "ok");
+			cJSON_AddStringToObject(r, k, v);
+			/* Said in the answer as well as in the entity name: the
+			 * timezone is exported once at boot and a daemon
+			 * restart re-execs with the environment it already had,
+			 * so nothing short of a reboot moves the clock a
+			 * running daemon renders with. */
+			if (tz)
+				cJSON_AddStringToObject(r, "applies", "on reboot");
 		}
 		publish_result(st, cmd_name, nonce[0] ? nonce : NULL, NULL, r);
 		return;
