@@ -191,10 +191,21 @@ static void load_config(rmq_state_t *st)
 	else
 		rss_strlcpy(st->device_name, st->client_id, sizeof(st->device_name));
 
-	/* Model reported to HA. The build platform is the honest answer and
-	 * costs nothing, being compiled in already. */
-	rss_strlcpy(st->model, &rss_build_platform ? rss_build_platform : "raptor",
-		    sizeof(st->model));
+	/*
+	 * Model reported to HA. The hostname, because on these images it is
+	 * already the answer: S00hostname builds it as vendor-soc-unit, so
+	 * openipc-ssc377qe-4825 names the SoC part more precisely than anything
+	 * the running system can be asked for, and distinguishes two cameras of
+	 * the same build where the platform alone cannot.
+	 *
+	 * The build platform remains the fallback for a host with no name set.
+	 */
+	char host[64] = "";
+	if (gethostname(host, sizeof(host) - 1) == 0 && host[0])
+		rss_strlcpy(st->model, host, sizeof(st->model));
+	else
+		rss_strlcpy(st->model, &rss_build_platform ? rss_build_platform : "raptor",
+			    sizeof(st->model));
 
 	st->poll_interval_sec = rss_config_get_int(c, "mqtt", "poll_interval", 10);
 	if (st->poll_interval_sec < 1)
