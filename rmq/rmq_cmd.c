@@ -757,6 +757,15 @@ int rmq_cmd_plan(const char *json, rmq_cmd_plan_t *out, char *err, size_t errsz)
 		return rc;
 	}
 
+	/* Also the bridge's own work: rvd is asked for nothing, since opening
+	 * the JPEG ring is what starts its encoder. No arguments — which ring
+	 * and how often are config, not something a broker client chooses. */
+	if (strcmp(cmd->valuestring, "snapshot") == 0) {
+		out->kind = RMQ_PLAN_SNAPSHOT;
+		cJSON_Delete(root);
+		return 0;
+	}
+
 	const cmd_def_t *def = find_command(cmd->valuestring);
 	if (!def) {
 		/* Deny by default. Naming nothing else keeps the refusal from
@@ -984,6 +993,22 @@ void rmq_cmd_handle(rmq_state_t *st, const char *topic, const uint8_t *payload, 
 			cJSON_AddStringToObject(r, "restarts", owner);
 		}
 		publish_result(st, cmd_name, nonce[0] ? nonce : NULL, NULL, r);
+		return;
+	}
+
+	if (plan.kind == RMQ_PLAN_SNAPSHOT) {
+		if (!st->snapshot_enabled) {
+			publish_result(st, cmd_name, nonce[0] ? nonce : NULL,
+				       "snapshots are off — set [mqtt] snapshot = true", NULL);
+			return;
+		}
+
+		int rc = rmq_snapshot_capture(st);
+		cJSON *r = cJSON_CreateObject();
+		if (r)
+			cJSON_AddStringToObject(r, "status", rc == 0 ? "ok" : "no frame");
+		publish_result(st, cmd_name, nonce[0] ? nonce : NULL,
+			       rc == 0 ? NULL : "no JPEG frame arrived — is [jpeg] enabled?", r);
 		return;
 	}
 

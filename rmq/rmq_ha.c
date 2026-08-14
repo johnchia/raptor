@@ -677,6 +677,14 @@ static const ha_control_t controls[] = {
 	 .max = 65535,
 	 .step = 1,
 	 .restarts = true},
+	/* Paired with the camera component below, which shows what it takes. */
+	{.key = "snapshot",
+	 .name = "Take snapshot",
+	 .kind = CTRL_BUTTON,
+	 .icon = "mdi:camera",
+	 .cat = CAT_PRIMARY,
+	 .owner = RMQ_D_RVD,
+	 .payload = "{\"cmd\":\"snapshot\"}"},
 	{.key = "request_idr",
 	 .name = "Request keyframe",
 	 .kind = CTRL_BUTTON,
@@ -1016,6 +1024,21 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 	 * that still advertised them would offer a slider that silently does
 	 * nothing, which is worse than not offering it.
 	 */
+	/*
+	 * The picture. Its own platform rather than a row in either table:
+	 * a camera component carries an image topic and nothing else, with no
+	 * state template, no unit and no command.
+	 */
+	if (g == GRP_CAMERA && st->snapshot_enabled) {
+		cJSON *cam = make_common(st, "snapshot_image", "Snapshot", NULL, CAT_PRIMARY, true,
+					 "camera");
+		if (cam) {
+			cJSON_AddStringToObject(cam, "t", st->topic_snapshot);
+			cJSON_AddItemToObject(cmps, "snapshot_image", cam);
+			published++;
+		}
+	}
+
 	res_list_t res;
 	res_build(&res, st);
 
@@ -1038,6 +1061,10 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 		 * the command would be accepted; it is the silicon underneath
 		 * that has nothing to change. */
 		if (ct->cap && !isp_settable(st, ct->cap))
+			live = false;
+
+		/* No picture to take one of. */
+		if (strcmp(ct->key, "snapshot") == 0 && !st->snapshot_enabled)
 			live = false;
 
 		if (live) {

@@ -14,6 +14,7 @@
 #include "rmq_mqtt.h"
 #include "rmq_poll.h"
 #include "rmq_restart.h"
+#include "rmq_snapshot.h"
 
 /* Derived topics are the prefix plus a suffix, so the prefix is capped low
  * enough that appending the longest suffix cannot truncate. */
@@ -53,12 +54,21 @@ struct rmq_state {
 	int save_debounce_ms;
 	int restart_debounce_ms;
 
+	/* JPEG stills. Off by default: a snapshot is an encode the camera
+	 * would not otherwise do and an image the broker would not otherwise
+	 * carry, so it is asked for rather than assumed. */
+	bool snapshot_enabled;
+	int snapshot_stream;	   /* which JPEG ring, 0 = main and 1 = sub */
+	int snapshot_interval_sec; /* 0 = only when asked */
+	uint64_t snapshot_next_ms;
+
 	/* Derived topics */
 	char topic_status[RMQ_TOPIC_MAX];
 	char topic_state[RMQ_TOPIC_MAX];
 	char topic_discovery[RMQ_TOPIC_MAX];
 	char topic_cmd[RMQ_TOPIC_MAX];
 	char topic_result[RMQ_TOPIC_MAX];
+	char topic_snapshot[RMQ_TOPIC_MAX];
 
 	/* Connection */
 	rmq_mqtt_t *mqtt;

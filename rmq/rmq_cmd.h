@@ -28,6 +28,7 @@ struct rmq_state;
 typedef enum {
 	RMQ_PLAN_DAEMON = 0, /* a request for one daemon's control socket */
 	RMQ_PLAN_CONFIG,     /* edits to the config file, applied by the bridge */
+	RMQ_PLAN_SNAPSHOT,   /* take a still; the bridge does it, no daemon asked */
 } rmq_plan_kind_t;
 
 /*

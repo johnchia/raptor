@@ -631,6 +631,27 @@ TEST splits_the_image_section_across_the_two_tiers(void)
 	PASS();
 }
 
+/*
+ * `snapshot` is the bridge's own work, like config-set: it asks no daemon, so
+ * it must not acquire a daemon or a request on the way through. It also takes
+ * no arguments — which ring and how often are config, and a broker client that
+ * could pick the ring could pick the 600 KB one every second.
+ */
+TEST snapshot_is_the_bridges_own_work(void)
+{
+	rmq_cmd_plan_t p;
+
+	ASSERT_ALLOWED("{\"cmd\":\"snapshot\"}", &p);
+	ASSERT_EQ(RMQ_PLAN_SNAPSHOT, p.kind);
+	ASSERT_EQ(0, p.write_count);
+
+	/* Extra fields are dropped rather than honoured, the same as any other
+	 * command — there is no argument that reaches the capture. */
+	ASSERT_ALLOWED("{\"cmd\":\"snapshot\",\"stream\":0,\"channel\":2}", &p);
+	ASSERT_EQ(RMQ_PLAN_SNAPSHOT, p.kind);
+	PASS();
+}
+
 SUITE(rmq_cmd_suite)
 {
 	RUN_TEST(refuses_the_named_hazards);
@@ -661,4 +682,5 @@ SUITE(rmq_cmd_suite)
 	RUN_TEST(every_writable_section_has_an_owner);
 	RUN_TEST(live_commands_stay_out_of_the_config_plan);
 	RUN_TEST(splits_the_image_section_across_the_two_tiers);
+	RUN_TEST(snapshot_is_the_bridges_own_work);
 }

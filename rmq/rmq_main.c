@@ -144,6 +144,7 @@ static void load_config(rmq_state_t *st)
 	snprintf(st->topic_state, sizeof(st->topic_state), "%s/state", st->topic_prefix);
 	snprintf(st->topic_cmd, sizeof(st->topic_cmd), "%s/cmd", st->topic_prefix);
 	snprintf(st->topic_result, sizeof(st->topic_result), "%s/result", st->topic_prefix);
+	snprintf(st->topic_snapshot, sizeof(st->topic_snapshot), "%s/snapshot", st->topic_prefix);
 
 	/* Commands default on: this bridge is the camera's only management
 	 * surface, so a read-only bridge is the unusual case rather than the
@@ -159,6 +160,20 @@ static void load_config(rmq_state_t *st)
 
 	/* Longer than the save window: what it coalesces is a daemon restart,
 	 * and commissioning a section key by key should cost one outage. */
+	/*
+	 * Stills. The sub stream by default because the size difference is not
+	 * marginal — measured on a 2560x1920 sensor, the main JPEG is ~600 KB
+	 * against the sub's ~6 KB, and a dashboard tile is displayed at a few
+	 * hundred pixels either way.
+	 */
+	st->snapshot_enabled = rss_config_get_bool(c, "mqtt", "snapshot", false);
+	st->snapshot_stream = rss_config_get_int(c, "mqtt", "snapshot_stream", 1);
+	if (st->snapshot_stream < 0 || st->snapshot_stream >= RMQ_STREAM_COUNT)
+		st->snapshot_stream = 1;
+	st->snapshot_interval_sec = rss_config_get_int(c, "mqtt", "snapshot_interval", 0);
+	if (st->snapshot_interval_sec < 0)
+		st->snapshot_interval_sec = 0;
+
 	st->restart_debounce_ms = rss_config_get_int(c, "mqtt", "restart_debounce_ms", 5000);
 	if (st->restart_debounce_ms < 0)
 		st->restart_debounce_ms = 0;
@@ -390,6 +405,9 @@ static void serve_loop(rmq_state_t *st)
 			rmq_poll_cycle(st);
 			next_poll_ms = now + (uint64_t)st->poll_interval_sec * 1000;
 		}
+
+		if (rmq_snapshot_due(st, now))
+			rmq_snapshot_capture(st);
 
 		if (st->save_due_ms && now >= st->save_due_ms)
 			rmq_cmd_flush_saves(st);
