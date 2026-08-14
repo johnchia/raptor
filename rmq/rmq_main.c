@@ -26,9 +26,6 @@
 
 #include <cJSON.h>
 
-#define RMQ_STATUS_ONLINE  "online"
-#define RMQ_STATUS_OFFLINE "offline"
-
 /* ------------------------------------------------------------------ */
 /* Identity                                                            */
 /* ------------------------------------------------------------------ */
@@ -160,6 +157,12 @@ static void load_config(rmq_state_t *st)
 
 	/* Longer than the save window: what it coalesces is a daemon restart,
 	 * and commissioning a section key by key should cost one outage. */
+	st->restart_debounce_ms = rss_config_get_int(c, "mqtt", "restart_debounce_ms", 5000);
+	if (st->restart_debounce_ms < 0)
+		st->restart_debounce_ms = 0;
+	if (st->restart_debounce_ms > RMQ_RESTART_MAX_DELAY_MS)
+		st->restart_debounce_ms = RMQ_RESTART_MAX_DELAY_MS;
+
 	/*
 	 * Stills. The sub stream by default because the size difference is not
 	 * marginal — measured on a 2560x1920 sensor, the main JPEG is ~600 KB
@@ -173,12 +176,6 @@ static void load_config(rmq_state_t *st)
 	st->snapshot_interval_sec = rss_config_get_int(c, "mqtt", "snapshot_interval", 0);
 	if (st->snapshot_interval_sec < 0)
 		st->snapshot_interval_sec = 0;
-
-	st->restart_debounce_ms = rss_config_get_int(c, "mqtt", "restart_debounce_ms", 5000);
-	if (st->restart_debounce_ms < 0)
-		st->restart_debounce_ms = 0;
-	if (st->restart_debounce_ms > RMQ_RESTART_MAX_DELAY_MS)
-		st->restart_debounce_ms = RMQ_RESTART_MAX_DELAY_MS;
 
 	/* Home Assistant discovery */
 	st->ha_discovery = rss_config_get_bool(c, "mqtt", "ha_discovery", true);

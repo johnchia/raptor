@@ -25,6 +25,11 @@
 /* However long a burst of commands runs, a change reaches flash within this. */
 #define RMQ_SAVE_MAX_DELAY_MS 15000
 
+/* The retained availability payloads, which the Last Will also carries — so
+ * they are shared rather than private to whoever publishes them. */
+#define RMQ_STATUS_ONLINE  "online"
+#define RMQ_STATUS_OFFLINE "offline"
+
 /* Encoded streams the entity table describes: main and sub. A camera running
  * more is reported in the state document all the same; it just gets no
  * entities for them. */

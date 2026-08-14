@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <cJSON.h>
 
@@ -823,6 +824,24 @@ int rmq_cmd_plan(const char *json, rmq_cmd_plan_t *out, char *err, size_t errsz)
 		return 0;
 	}
 
+	/*
+	 * Reboot the camera. Not the same thing as the `restart` and
+	 * `shutdown` the table refuses: those are relayed to a daemon and stop
+	 * it with nothing left to start it again, whereas this brings the
+	 * whole system back to the configuration it already had. It changes
+	 * nothing about what boots, which is what keeps it out of the class
+	 * the confirm timer exists for.
+	 *
+	 * It is here because the timezone needs it — a setting that applies
+	 * only on reboot, offered by a bridge that could not reboot, would
+	 * send its user to ssh to finish the job.
+	 */
+	if (strcmp(cmd->valuestring, "reboot") == 0) {
+		out->kind = RMQ_PLAN_REBOOT;
+		cJSON_Delete(root);
+		return 0;
+	}
+
 	/* Settings in /etc, which raptor.conf does not hold and the config
 	 * table therefore cannot describe. */
 	if (strcmp(cmd->valuestring, "system-set") == 0) {
@@ -1059,6 +1078,38 @@ void rmq_cmd_handle(rmq_state_t *st, const char *topic, const uint8_t *payload, 
 			cJSON_AddStringToObject(r, "restarts", owner);
 		}
 		publish_result(st, cmd_name, nonce[0] ? nonce : NULL, NULL, r);
+		return;
+	}
+
+	if (plan.kind == RMQ_PLAN_REBOOT) {
+		/*
+		 * Answered before it happens, because afterwards there is
+		 * nothing left to answer with — and the answer is the only
+		 * evidence the button did anything at all. The status topic
+		 * goes to offline first for the same reason: the Last Will
+		 * would eventually say so, but only after the broker's
+		 * keepalive times out, which leaves every entity looking live
+		 * for half a minute while the camera is already down.
+		 */
+		cJSON *r = cJSON_CreateObject();
+		if (r)
+			cJSON_AddStringToObject(r, "status", "rebooting");
+		publish_result(st, cmd_name, nonce[0] ? nonce : NULL, NULL, r);
+		rmq_mqtt_publish(st->mqtt, st->topic_status, RMQ_STATUS_OFFLINE,
+				 strlen(RMQ_STATUS_OFFLINE), 1, true);
+		rmq_mqtt_loop(st->mqtt, 200);
+
+		RSS_WARN("reboot: requested over MQTT");
+
+		/*
+		 * Through init rather than the reboot(2) syscall, so the init
+		 * scripts stop the daemons in their own order and the flash is
+		 * unmounted cleanly. /etc is an overlay over NOR; pulling the
+		 * rug is how a config file ends up half written.
+		 */
+		sync();
+		if (system("/sbin/reboot") != 0)
+			RSS_WARN("reboot: /sbin/reboot did not run");
 		return;
 	}
 

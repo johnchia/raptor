@@ -709,6 +709,28 @@ TEST system_set_carries_a_grammar_per_key(void)
 	PASS();
 }
 
+/*
+ * `reboot` is the bridge's own, and must not be confusable with the daemon
+ * `restart`/`shutdown` the table still refuses. The distinction is the point:
+ * those stop one daemon with nothing left to start it, this brings the whole
+ * camera back to the configuration it already had.
+ */
+TEST reboot_is_the_cameras_and_not_a_daemons(void)
+{
+	rmq_cmd_plan_t p;
+
+	ASSERT_ALLOWED("{\"cmd\":\"reboot\"}", &p);
+	ASSERT_EQ(RMQ_PLAN_REBOOT, p.kind);
+	ASSERT_EQ(0, p.write_count);
+
+	/* Still refused, and still not reachable by spelling. */
+	ASSERT_REFUSED("{\"cmd\":\"restart\"}");
+	ASSERT_REFUSED("{\"cmd\":\"shutdown\"}");
+	ASSERT_REFUSED("{\"cmd\":\"REBOOT\"}");
+	ASSERT_REFUSED("{\"cmd\":\"reboot \"}");
+	PASS();
+}
+
 SUITE(rmq_cmd_suite)
 {
 	RUN_TEST(refuses_the_named_hazards);
@@ -741,4 +763,5 @@ SUITE(rmq_cmd_suite)
 	RUN_TEST(splits_the_image_section_across_the_two_tiers);
 	RUN_TEST(snapshot_is_the_bridges_own_work);
 	RUN_TEST(system_set_carries_a_grammar_per_key);
+	RUN_TEST(reboot_is_the_cameras_and_not_a_daemons);
 }

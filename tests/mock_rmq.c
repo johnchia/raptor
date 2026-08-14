@@ -27,6 +27,13 @@ int rmq_mqtt_publish(rmq_mqtt_t *m, const char *topic, const void *payload, size
 	return 0;
 }
 
+int rmq_mqtt_loop(rmq_mqtt_t *m, int timeout_ms)
+{
+	(void)m;
+	(void)timeout_ms;
+	return 0;
+}
+
 int rmq_mqtt_subscribe(rmq_mqtt_t *m, const char *filter, uint8_t qos)
 {
 	(void)m;

@@ -30,6 +30,7 @@ typedef enum {
 	RMQ_PLAN_CONFIG,     /* edits to the config file, applied by the bridge */
 	RMQ_PLAN_SNAPSHOT,   /* take a still; the bridge does it, no daemon asked */
 	RMQ_PLAN_SYSTEM,     /* a setting in /etc rather than in raptor.conf */
+	RMQ_PLAN_REBOOT,     /* reboot the camera, once the answer is out */
 } rmq_plan_kind_t;
 
 /*

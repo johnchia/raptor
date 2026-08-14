@@ -265,6 +265,11 @@ typedef struct {
 	 * `options` above, which would otherwise be forty-odd lines of names
 	 * repeated in a second place. */
 	bool zones;
+
+	/* HA device_class, NULL for none. On a button it is what decides how
+	 * the action is drawn — `restart` reads as disruptive where the
+	 * default reads as another press. */
+	const char *dev_class;
 } ha_control_t;
 
 static const char *const opt_daynight[] = {"auto", "day", "night", NULL};
@@ -685,6 +690,17 @@ static const ha_control_t controls[] = {
 	 .cmd_tpl = "{\"cmd\":\"system-set\",\"key\":\"timezone\",\"value\":\"{{ value }}\"}",
 	 /* .options filled at publish time from the zone table. */
 	 .zones = true},
+	/* Next to the timezone deliberately: that setting applies on reboot and
+	 * this is the reboot, so the thing needed to finish the job is beside
+	 * the job. device_class restart is what makes Home Assistant draw it as
+	 * the disruptive action it is rather than as another button. */
+	{.key = "reboot",
+	 .name = "Reboot camera",
+	 .kind = CTRL_BUTTON,
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_COUNT,
+	 .dev_class = "restart",
+	 .payload = "{\"cmd\":\"reboot\"}"},
 	{.key = "ntp_server",
 	 .name = "NTP server",
 	 .kind = CTRL_TEXT,
@@ -890,6 +906,8 @@ static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct, const r
 		return NULL;
 
 	cJSON_AddStringToObject(c, "cmd_t", st->topic_cmd);
+	if (ct->dev_class)
+		cJSON_AddStringToObject(c, "dev_cla", ct->dev_class);
 
 	if (ct->value) {
 		char tpl[192];
