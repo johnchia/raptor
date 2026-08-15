@@ -249,6 +249,24 @@ static void resolve_broker(rmq_state_t *st)
 		return;
 	}
 
+	/*
+	 * Said before the fallback rather than folded into it, because the two
+	 * failures need different people. Nothing announcing a broker is a
+	 * question about the network; a build that cannot ask is a question
+	 * about the image, and every symptom on the camera looks like the
+	 * first one -- discovery returns empty either way, and the loopback
+	 * default then refuses connections for the rest of the camera's life.
+	 */
+	if (!rmq_mdns_available()) {
+		RSS_WARN("rmq: no broker configured and this build cannot discover one "
+			 "(no libmdnsd in the sysroot when raptor was built) — set "
+			 "[mqtt] host, or build an image with mdnsd in it");
+		rss_strlcpy(st->host, RMQ_BROKER_FALLBACK, sizeof(st->host));
+		if (st->port == 0)
+			st->port = RMQ_BROKER_PORT;
+		return;
+	}
+
 	RSS_INFO("rmq: no broker configured, asking mDNS for %s", RMQ_MDNS_MQTT_TYPE);
 
 	if (rmq_mdns_find_broker(addr, sizeof(addr), &port, RMQ_MDNS_DISCOVER_MS) == 0) {
@@ -285,13 +303,18 @@ static int rmq_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 	if (strcmp(cmd, "status") == 0 || strcmp(cmd, "config-show") == 0) {
 		return rss_ctrl_resp(resp_buf, resp_buf_size,
 				     "{\"status\":\"ok\",\"connected\":%s,\"host\":\"%s\","
-				     "\"host_discovered\":%s,"
+				     "\"host_discovered\":%s,\"mdns\":%s,"
 				     "\"port\":%d,\"tls\":%s,\"client_id\":\"%s\","
 				     "\"topic_prefix\":\"%s\",\"commands\":%s,"
 				     "\"save_pending\":%s,\"restart_pending\":%s,"
 				     "\"staged_edits\":%d}",
 				     rmq_mqtt_connected(st->mqtt) ? "true" : "false", st->host,
-				     st->host_discovered ? "true" : "false", st->port,
+				     st->host_discovered ? "true" : "false",
+				     /* Whether this build could discover a broker, not
+				      * whether it did. A camera stuck on the loopback
+				      * default answers the question here without anyone
+				      * having to still have the boot log. */
+				     rmq_mdns_available() ? "true" : "false", st->port,
 				     st->use_tls ? "true" : "false", st->client_id,
 				     st->topic_prefix, st->commands_enabled ? "true" : "false",
 				     st->save_due_ms ? "true" : "false",

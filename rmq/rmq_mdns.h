@@ -55,4 +55,17 @@ int rmq_mdns_browse(const char *type, unsigned timeout_ms, rmq_mdns_service_t *o
  */
 int rmq_mdns_find_broker(char *host, size_t hostsz, int *port, unsigned timeout_ms);
 
+/*
+ * Whether this build can query the network at all. False means libmdnsd was
+ * not in the sysroot when raptor was built and the two calls above are stubs.
+ *
+ * Not for branching -- an empty network and a build that cannot ask both mean
+ * "no broker found", which is why the stubs exist. It is for saying so. A
+ * daemon that logs "nothing announced a broker" when it never sent a packet
+ * sends whoever reads that line to look at the network, the responder and the
+ * broker, none of which are the problem; the answer is one line in a
+ * defconfig, and nothing on the camera can point at it unless this does.
+ */
+bool rmq_mdns_available(void);
+
 #endif /* RMQ_MDNS_H */

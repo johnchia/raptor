@@ -401,12 +401,21 @@ int rmq_mdns_find_broker(char *host, size_t hostsz, int *port, unsigned timeout_
 	return -1;
 }
 
+bool rmq_mdns_available(void)
+{
+	return true;
+}
+
 #else /* !RMQ_HAS_MDNS */
 
 /*
  * Built without libmdnsd. The stubs report "found nothing", which is the same
  * answer an empty network gives, so callers need no build-time conditional --
  * they already have to handle discovery coming up empty.
+ *
+ * They do need to be able to say which of the two it was, though, or a camera
+ * that cannot ask is indistinguishable from a network with nothing on it.
+ * rmq_mdns_available() is that, and nothing else.
  */
 
 int rmq_mdns_browse(const char *type, unsigned timeout_ms, rmq_mdns_service_t *out, size_t max)
@@ -425,6 +434,11 @@ int rmq_mdns_find_broker(char *host, size_t hostsz, int *port, unsigned timeout_
 	(void)port;
 	(void)timeout_ms;
 	return -1;
+}
+
+bool rmq_mdns_available(void)
+{
+	return false;
 }
 
 #endif /* RMQ_HAS_MDNS */
