@@ -70,22 +70,32 @@ static const struct {
 static const char *const retired_groups[] = {"image", "daynight", NULL};
 
 /*
- * Components an earlier build published and this one does not, on the camera's
- * own page. Same reasoning as the groups above and the same remedy: a
- * component simply absent from the document is left alone, and only an empty
- * one withdraws it.
+ * There is deliberately no equivalent list for retired *components*.
  *
- * `snapshot_image` was a camera platform fed JPEG bytes over the broker and
- * `snapshot` the button that pushed them; both are replaced by `picture`,
- * which Home Assistant fetches from rhd instead. `rtsp_user` and `rtsp_pass`
- * set one endpoint's account and are replaced by `cam_user` and `cam_pass`,
- * which set the camera's.
+ * The two mechanisms look alike and are not. Withdrawing a sub-device is an
+ * empty payload on its own retained topic, and a topic Home Assistant never
+ * saw simply has nothing to remove — harmless. Withdrawing a component is an
+ * empty object inside this device's document, and Home Assistant rejects the
+ * whole document when it names a component it does not have. Every other
+ * entity in it goes with it: the device is left holding only the stub Home
+ * Assistant creates for a `via_device` target, which is a camera page with the
+ * stream sub-devices under it and not one entity of its own.
  *
- * Deletable once no camera in the fleet still runs a build that published
- * them — they cost one empty component per discovery publish until then.
+ * A fixed list of retired names cannot be that, and not only on a fresh
+ * camera. It is re-sent on every discovery publish, so even where the entities
+ * did exist the first publish removes them and every publish after it names
+ * components Home Assistant no longer has — the document is fine once and
+ * poison from then on, which presents as entities that were working
+ * disappearing at the next reconnect.
+ *
+ * A removal may therefore only name a component this bridge can show it
+ * published *and* has not already withdrawn. That is exactly the `previous`
+ * guard below: it compares against the daemon set of the last document, so it
+ * fires on the transition and not again. An entity renamed between firmware
+ * versions is outside anything that guard can know, and
+ * `raptorctl rmq rediscover` is the answer to it — it drops the device and
+ * rebuilds it, which is what a renamed entity needs anyway.
  */
-static const char *const retired_entities[] = {"snapshot", "snapshot_image", "rtsp_user",
-					       "rtsp_pass", NULL};
 
 static const char *category_name(ha_category_t c)
 {
@@ -1245,11 +1255,6 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 			cJSON_AddItemToObject(cmps, "picture", img);
 			published++;
 		}
-	}
-
-	if (g == GRP_CAMERA) {
-		for (int i = 0; retired_entities[i]; i++)
-			cJSON_AddItemToObject(cmps, retired_entities[i], cJSON_CreateObject());
 	}
 
 	res_list_t res;
