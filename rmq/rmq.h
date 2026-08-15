@@ -75,10 +75,11 @@ struct rmq_state {
 	int save_debounce_ms;
 	int restart_debounce_ms;
 
-	/* The picture. Off by default: a still is an encode the camera would
-	 * not otherwise do, so it is asked for rather than assumed. The bytes
-	 * no longer cross the broker — what is published is the URL rhd serves
-	 * it from — but the encode is still real. */
+	/* The picture. On by default, and withheld when the camera cannot
+	 * serve one rather than when a key says not to: what it costs is a URL
+	 * on the broker and one JPEG encode per fetch, which is not worth
+	 * asking permission for. The key remains an opt-out, because the URL
+	 * carries the [http] credential when one is set. */
 	bool snapshot_enabled;
 	int snapshot_stream;	   /* which JPEG ring, 0 = main and 1 = sub */
 	int snapshot_interval_sec; /* 0 = once per broker connection */
@@ -121,6 +122,7 @@ struct rmq_state {
 	 * from the same document, and cannot disagree. */
 	int sensor_width;
 	int sensor_height;
+	int jpeg_channels; /* rvd's JPEG channels; 0 = no picture to offer */
 	char stream_res[RMQ_STREAM_COUNT][16];
 	char isp_settable[320]; /* ",key,key," — see rvd's get-isp */
 

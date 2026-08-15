@@ -34,14 +34,14 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state);
 
 /*
  * Publish (or republish) the discovery document for the daemons currently
- * running. `previous` is the set published last time so components whose
- * daemon has gone are emitted as empty objects, which is how HA is told to
- * remove an entity. Pass NULL on first publish.
+ * running. Anything the last document carried and this one does not is emitted
+ * as an empty object, which is how HA is told to remove an entity — tracked
+ * from what was published rather than inferred from which daemons are up,
+ * because HA rejects a whole document that withdraws a component it never had.
  *
  * Returns 0 on success.
  */
-int rmq_ha_publish_discovery(struct rmq_state *st, const rmq_daemons_t *now,
-			     const rmq_daemons_t *previous);
+int rmq_ha_publish_discovery(struct rmq_state *st, const rmq_daemons_t *now);
 
 /* Remove the whole device from HA — an empty payload on the discovery topic. */
 int rmq_ha_clear_discovery(struct rmq_state *st);

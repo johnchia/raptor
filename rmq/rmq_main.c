@@ -175,7 +175,16 @@ static void load_config(rmq_state_t *st)
 	 * against the sub's ~6 KB, and a dashboard tile is displayed at a few
 	 * hundred pixels either way.
 	 */
-	st->snapshot_enabled = rss_config_get_bool(c, "mqtt", "snapshot", false);
+	/*
+	 * On by default since the picture stopped crossing the broker. What
+	 * this used to cost was a retained message the size of the frame and a
+	 * copy of it to every subscriber, which is worth asking for; what it
+	 * costs now is a URL, and one JPEG encode whenever Home Assistant
+	 * fetches it — at the default interval, once per connection. The key
+	 * stays so it can be turned off, because the still's URL carries the
+	 * [http] credential and not every install wants that on its broker.
+	 */
+	st->snapshot_enabled = rss_config_get_bool(c, "mqtt", "snapshot", true);
 	st->snapshot_stream = rss_config_get_int(c, "mqtt", "snapshot_stream", 1);
 	if (st->snapshot_stream < 0 || st->snapshot_stream >= RMQ_STREAM_COUNT)
 		st->snapshot_stream = 1;
@@ -428,13 +437,9 @@ static void rmq_poll_cycle(rmq_state_t *st)
 	if (st->ha_discovery) {
 		bool changed = !st->discovery_published || camera_changed ||
 			       rmq_daemons_differ(&daemons, &st->last_daemons);
-		if (changed) {
-			const rmq_daemons_t *prev =
-				st->discovery_published ? &st->last_daemons : NULL;
-			if (rmq_ha_publish_discovery(st, &daemons, prev) == 0) {
-				st->last_daemons = daemons;
-				st->discovery_published = true;
-			}
+		if (changed && rmq_ha_publish_discovery(st, &daemons) == 0) {
+			st->last_daemons = daemons;
+			st->discovery_published = true;
 		}
 	}
 

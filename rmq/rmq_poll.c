@@ -183,12 +183,23 @@ static void collect_rvd(cJSON *state)
 		}
 	}
 
+	/*
+	 * Whether the camera encodes JPEG at all, which is what decides if
+	 * there is a picture to offer. rvd lists its JPEG channels alongside
+	 * the video ones and they vanish from the list when [jpeg] is off, so
+	 * this is the camera's own answer rather than a config key someone has
+	 * to keep in agreement with it.
+	 */
+	int jpeg_channels = 0;
+
 	const cJSON *streams = cJSON_GetObjectItemCaseSensitive(resp, "streams");
 	if (cJSON_IsArray(streams)) {
 		const cJSON *s = NULL;
 		cJSON_ArrayForEach(s, streams)
 		{
 			int codec = json_int(s, "codec", -1);
+			if (codec == 2 || codec == 3)
+				jpeg_channels++;
 			if (codec != 0 && codec != 1)
 				continue; /* skip JPEG/MJPEG channels */
 
@@ -219,6 +230,10 @@ static void collect_rvd(cJSON *state)
 			cJSON_AddNumberToObject(o, "gop", json_int(s, "gop", 0));
 		}
 	}
+
+	cJSON *j = cJSON_AddObjectToObject(state, "jpeg");
+	if (j)
+		cJSON_AddNumberToObject(j, "channels", jpeg_channels);
 
 	cJSON_Delete(resp);
 }

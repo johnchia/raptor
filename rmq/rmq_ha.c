@@ -89,13 +89,67 @@ static const char *const retired_groups[] = {"image", "daynight", NULL};
  * disappearing at the next reconnect.
  *
  * A removal may therefore only name a component this bridge can show it
- * published *and* has not already withdrawn. That is exactly the `previous`
- * guard below: it compares against the daemon set of the last document, so it
- * fires on the transition and not again. An entity renamed between firmware
- * versions is outside anything that guard can know, and
- * `raptorctl rmq rediscover` is the answer to it — it drops the device and
- * rebuilds it, which is what a renamed entity needs anyway.
+ * published and has not already withdrawn, which is what the key set below
+ * records. An entity renamed between firmware versions is outside anything
+ * that record can know, and `raptorctl rmq rediscover` is the answer to it —
+ * it drops the device and rebuilds it, which is what a renamed entity needs
+ * anyway.
  */
+
+/*
+ * What each group's last document actually contained.
+ *
+ * A withdrawal may only name a component Home Assistant is known to have, and
+ * the only thing that knows is a record of what was published. Availability is
+ * not that record: a control can be absent because its daemon is down, but
+ * also because the ISP has no such block, or because the camera reported no
+ * geometry to build a list from — and a document withdrawing one of those has
+ * never been published, so it takes every other entity down with it.
+ *
+ * Module state rather than rmq_state, because it describes this file's own
+ * output rather than anything about the camera. It starts empty after a
+ * restart, which loses the ability to withdraw something that disappeared
+ * across it; that is the harmless direction of the error, and the alternative
+ * is guessing.
+ */
+#define HA_KEYS_MAX 96
+#define HA_KEY_MAX  32
+
+static char published_keys[GRP_COUNT][HA_KEYS_MAX][HA_KEY_MAX];
+static int published_count[GRP_COUNT];
+
+typedef struct {
+	char key[HA_KEYS_MAX][HA_KEY_MAX];
+	int count;
+	bool overflowed;
+} key_set_t;
+
+static void key_add(key_set_t *s, const char *key)
+{
+	/*
+	 * A key that did not fit would read as "not published this time" and
+	 * be withdrawn, which is the failure this whole mechanism exists to
+	 * avoid. Recorded so the withdrawal pass can stand down instead: a
+	 * stale entity is a blemish, a rejected document is every entity.
+	 */
+	if (s->count >= HA_KEYS_MAX) {
+		s->overflowed = true;
+		RSS_WARN("ha: more than %d components in one document, "
+			 "entity removal suspended",
+			 HA_KEYS_MAX);
+		return;
+	}
+	rss_strlcpy(s->key[s->count++], key, HA_KEY_MAX);
+}
+
+static bool key_has(const key_set_t *s, const char *key)
+{
+	for (int i = 0; i < s->count; i++) {
+		if (strcmp(s->key[i], key) == 0)
+			return true;
+	}
+	return false;
+}
 
 static const char *category_name(ha_category_t c)
 {
@@ -518,6 +572,20 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 			rss_strlcpy(st->stream_res[i], res, sizeof(st->stream_res[i]));
 			changed = true;
 		}
+	}
+
+	/* Whether there is a picture to offer at all. A change here adds or
+	 * removes the image component, so it belongs among the facts that
+	 * force a discovery republish. */
+	int jpeg = 0;
+	const cJSON *jc = cJSON_GetObjectItemCaseSensitive(state, "jpeg");
+	const cJSON *jn = jc ? cJSON_GetObjectItemCaseSensitive(jc, "channels") : NULL;
+	if (cJSON_IsNumber(jn))
+		jpeg = jn->valueint;
+
+	if (jpeg != st->jpeg_channels) {
+		st->jpeg_channels = jpeg;
+		changed = true;
 	}
 
 	char settable[sizeof(st->isp_settable)] = "";
@@ -1145,9 +1213,9 @@ static void group_topic(struct rmq_state *st, ha_group_t g, char *out, size_t ou
 			 groups[g].suffix);
 }
 
-static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t *now,
-			 const rmq_daemons_t *previous)
+static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t *now)
 {
+	key_set_t present = {0};
 	cJSON *root = cJSON_CreateObject();
 	if (!root)
 		return -1;
@@ -1214,20 +1282,15 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 		if (e->group != g)
 			continue;
 
-		if (owner_available(e->owner, now)) {
-			cJSON *c = make_component(st, e);
-			if (c) {
-				cJSON_AddItemToObject(cmps, e->key, c);
-				published++;
-			}
+		if (!owner_available(e->owner, now))
 			continue;
-		}
 
-		/* Present last time but not now: an empty component object is
-		 * how HA is told to delete the entity. Without this a stopped
-		 * daemon leaves dead rows showing their last value forever. */
-		if (previous && owner_available(e->owner, previous))
-			cJSON_AddItemToObject(cmps, e->key, cJSON_CreateObject());
+		cJSON *c = make_component(st, e);
+		if (c) {
+			cJSON_AddItemToObject(cmps, e->key, c);
+			key_add(&present, e->key);
+			published++;
+		}
 	}
 
 	/*
@@ -1245,14 +1308,23 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 	 * rather than the whole frame, and the picture is as fresh as the
 	 * fetch rather than as fresh as the last publish. It needs rhd for the
 	 * same reason.
+	 *
+	 * Offered when the camera can actually serve one: rhd listening and
+	 * rvd encoding JPEG. Both are asked rather than assumed, so a camera
+	 * with [jpeg] off gets no tile instead of a tile that 404s, and
+	 * neither has to be restated in [mqtt].
 	 */
-	if (g == GRP_CAMERA && st->snapshot_enabled && owner_available(RMQ_D_RHD, now)) {
-		cJSON *img = make_common(st, "picture", "Picture", "mdi:camera", CAT_PRIMARY, true,
-					 "image");
+	if (g == GRP_CAMERA) {
+		bool offer = st->snapshot_enabled && st->jpeg_channels > 0 &&
+			     owner_available(RMQ_D_RHD, now);
+		cJSON *img = offer ? make_common(st, "picture", "Picture", "mdi:camera",
+						 CAT_PRIMARY, true, "image")
+				   : NULL;
 		if (img) {
 			cJSON_AddStringToObject(img, "url_t", st->topic_snapshot);
 			cJSON_AddStringToObject(img, "url_tpl", "{{ value_json.snapshot }}");
 			cJSON_AddItemToObject(cmps, "picture", img);
+			key_add(&present, "picture");
 			published++;
 		}
 	}
@@ -1281,17 +1353,31 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 		if (ct->cap && !isp_settable(st, ct->cap))
 			live = false;
 
-		if (live) {
-			cJSON *c = make_control(st, ct, &res);
-			if (c) {
-				cJSON_AddItemToObject(cmps, ct->key, c);
-				published++;
-			}
+		if (!live)
 			continue;
-		}
 
-		if (previous && st->commands_enabled && owner_available(ct->owner, previous))
-			cJSON_AddItemToObject(cmps, ct->key, cJSON_CreateObject());
+		cJSON *c = make_control(st, ct, &res);
+		if (c) {
+			cJSON_AddItemToObject(cmps, ct->key, c);
+			key_add(&present, ct->key);
+			published++;
+		}
+	}
+
+	/*
+	 * Everything the last document carried and this one does not. An empty
+	 * object is how Home Assistant is told to drop an entity, and without
+	 * it a daemon that stopped leaves dead rows showing their last value
+	 * forever.
+	 *
+	 * Driven by what was published rather than by why it is gone, which is
+	 * what makes it safe: a component absent because its daemon is down and
+	 * one absent because the silicon never had it are the same thing from
+	 * here, and only the first was ever in a document.
+	 */
+	for (int i = 0; !present.overflowed && i < published_count[g]; i++) {
+		if (!key_has(&present, published_keys[g][i]))
+			cJSON_AddItemToObject(cmps, published_keys[g][i], cJSON_CreateObject());
 	}
 
 	char *payload = cJSON_PrintUnformatted(root);
@@ -1305,18 +1391,25 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 	int rc = rmq_mqtt_publish(st->mqtt, topic, payload, strlen(payload), 1, true);
 	const char *what = groups[g].name ? groups[g].name : "camera";
 
-	if (rc < 0)
+	if (rc < 0) {
 		RSS_WARN("ha: %s discovery not published, %zu bytes", what, strlen(payload));
-	else
+	} else {
 		RSS_INFO("ha: %s discovery published, %d entities, %zu bytes", what, published,
 			 strlen(payload));
+
+		/* Only once it is on the broker. A document that failed to
+		 * publish did not change what Home Assistant holds, and
+		 * recording it would lose the withdrawal for anything dropped
+		 * by the attempt. */
+		memcpy(published_keys[g], present.key, sizeof(published_keys[g]));
+		published_count[g] = present.count;
+	}
 	free(payload);
 
 	return rc;
 }
 
-int rmq_ha_publish_discovery(struct rmq_state *st, const rmq_daemons_t *now,
-			     const rmq_daemons_t *previous)
+int rmq_ha_publish_discovery(struct rmq_state *st, const rmq_daemons_t *now)
 {
 	/*
 	 * One document per group, each its own retained topic. The camera goes
@@ -1325,7 +1418,7 @@ int rmq_ha_publish_discovery(struct rmq_state *st, const rmq_daemons_t *now,
 	 */
 	int rc = 0;
 	for (int g = 0; g < GRP_COUNT; g++) {
-		if (publish_group(st, (ha_group_t)g, now, previous) < 0)
+		if (publish_group(st, (ha_group_t)g, now) < 0)
 			rc = -1;
 	}
 
@@ -1347,6 +1440,15 @@ int rmq_ha_clear_discovery(struct rmq_state *st)
 		group_topic(st, (ha_group_t)g, topic, sizeof(topic));
 		if (rmq_mqtt_publish(st->mqtt, topic, "", 0, 1, true) < 0)
 			rc = -1;
+
+		/*
+		 * Home Assistant now holds nothing for this device, so neither
+		 * does the record of what it holds. Without this the next
+		 * document would withdraw whatever the last one carried and is
+		 * no longer offered — naming components that were just deleted,
+		 * which is precisely what costs the whole document.
+		 */
+		published_count[g] = 0;
 	}
 	return rc;
 }
