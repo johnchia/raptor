@@ -136,6 +136,7 @@ find_or_clone raptor-hal    https://github.com/gtxaspec/raptor-hal.git    HAL_DI
 find_or_clone compy         https://github.com/gtxaspec/compy.git         COMPY_DIR
 find_or_clone libschrift    https://github.com/tomolt/libschrift.git      SCHRIFT_DIR
 find_or_clone faac          https://github.com/knik0/faac.git             FAAC_DIR
+find_or_clone ESP8266Audio  https://github.com/earlephilhower/ESP8266Audio.git ESP8266AUDIO_DIR
 
 # Build mbedTLS from source with DTLS-SRTP enabled
 MBEDTLS_VER="3.6.6"
@@ -242,6 +243,7 @@ $CC $CFLAGS -c "$COMMON_DIR/src/rss_config.c" -o "$OUT/rss_config.o"
 $CC $CFLAGS -c "$COMMON_DIR/src/rss_daemon.c" -o "$OUT/rss_daemon.o"
 $CC $CFLAGS -c "$COMMON_DIR/src/rss_util.c" -o "$OUT/rss_util.o"
 $CC $CFLAGS -c "$COMMON_DIR/src/rss_ctrl_cmds.c" -o "$OUT/rss_ctrl_common.o"
+$CC $CFLAGS -c "$COMMON_DIR/src/rss_ctrl_client.c" -o "$OUT/rss_ctrl_client.o"
 $CC $CFLAGS -c "$COMMON_DIR/src/rss_http.c" -o "$OUT/rss_http.o"
 $CC $CFLAGS -c "$COMMON_DIR/src/rss_ts.c" -o "$OUT/rss_ts.o"
 $CC $CFLAGS -c "$COMMON_DIR/src/rss_sei.c" -o "$OUT/rss_sei.o"
@@ -257,7 +259,7 @@ const char *rss_build_time = "asan-build";
 const char *rss_build_platform = "x86_64";
 BUILDEOF
 $CC $CFLAGS -c "$OUT/rss_build_info.c" -o "$OUT/rss_build_info.o"
-ar rcs "$OUT/librss_common.a" "$OUT"/rss_log.o "$OUT"/rss_config.o "$OUT"/rss_daemon.o "$OUT"/rss_util.o "$OUT"/rss_ctrl_common.o "$OUT"/rss_http.o "$OUT"/rss_ts.o "$OUT"/rss_sei.o "$OUT"/rss_sign.o "$OUT"/rss_jpeg.o "$OUT"/rss_aac.o "$OUT"/monocypher.o "$OUT"/monocypher-ed25519.o "$OUT"/cJSON.o
+ar rcs "$OUT/librss_common.a" "$OUT"/rss_log.o "$OUT"/rss_config.o "$OUT"/rss_daemon.o "$OUT"/rss_util.o "$OUT"/rss_ctrl_common.o "$OUT"/rss_ctrl_client.o "$OUT"/rss_http.o "$OUT"/rss_ts.o "$OUT"/rss_sei.o "$OUT"/rss_sign.o "$OUT"/rss_jpeg.o "$OUT"/rss_aac.o "$OUT"/monocypher.o "$OUT"/monocypher-ed25519.o "$OUT"/cJSON.o
 
 echo "=== raptor-ipc ==="
 $CC $CFLAGS -c "$IPC_DIR/src/rss_ring.c" -o "$OUT/rss_ring.o"
@@ -273,7 +275,9 @@ ar rcs "$OUT/libmock_hal.a" "$OUT/mock_hal.o"
 echo "=== rss_tls ==="
 $CC $CFLAGS $TLS_CFLAGS -c "$COMMON_DIR/src/rss_tls.c" -o "$OUT/rss_tls.o"
 
-LIBS="$OUT/librss_ipc.a $OUT/librss_common.a $OUT/rss_build_info.o"
+# common before ipc: librss_common's ctrl-client helpers call into
+# librss_ipc, and a static archive is only scanned once left-to-right.
+LIBS="$OUT/librss_common.a $OUT/librss_ipc.a $OUT/rss_build_info.o"
 LIBS_HAL="$OUT/libmock_hal.a $LIBS"
 LIBS_TLS="$OUT/rss_tls.o $MBEDTLS_LIBS"
 
@@ -287,12 +291,38 @@ $CC -o "$OUT/rhd" "$OUT/rhd_main.o" "$OUT/rhd_http.o" "$OUT/rhd_audio.o" $LIBS $
 echo "  -> rhd"
 
 echo "=== RSD ==="
-$CC $CFLAGS $COMPY_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_main.c" -o "$OUT/rsd_main.o"
-$CC $CFLAGS $COMPY_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_server.c" -o "$OUT/rsd_server.o"
-$CC $CFLAGS $COMPY_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_session.c" -o "$OUT/rsd_session.o"
-$CC $CFLAGS $COMPY_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_ring_reader.c" -o "$OUT/rsd_ring_reader.o"
-$CC $CFLAGS $COMPY_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_sendq.c" -o "$OUT/rsd_sendq.o"
-$CC -o "$OUT/rsd" "$OUT"/rsd_main.o "$OUT"/rsd_server.o "$OUT"/rsd_session.o "$OUT"/rsd_ring_reader.o "$OUT"/rsd_sendq.o $LIBS "$COMPY_BUILD/libcompy.a" $MBEDTLS_LIBS $LDFLAGS
+# Helix AAC decoder (vendored inside ESP8266Audio) for the backchannel
+# AAC path. Same from-clone treatment as libfaac below; the Arduino
+# headers it expects are stubbed away, and it compiles under the
+# sanitizers on purpose -- this decoder eats network data.
+HELIX_AAC_DIR="$ESP8266AUDIO_DIR/src/libhelix-aac"
+HELIX_BUILD="$OUT/helix-aac-build"
+if [ ! -f "$HELIX_BUILD/libhelix-aac.a" ]; then
+    echo "=== libhelix-aac (from clone) ==="
+    mkdir -p "$HELIX_BUILD/stubs"
+    printf '%s\n' '#ifndef PGMSPACE_H' '#define PGMSPACE_H' '#include <stdint.h>' \
+        '#include <string.h>' '#define PROGMEM' '#define PGM_P const char *' \
+        '#define pgm_read_byte(x) (*(const uint8_t *)(x))' \
+        '#define pgm_read_word(x) (*(const uint16_t *)(x))' \
+        '#define pgm_read_dword(x) (*(const uint32_t *)(x))' \
+        '#define memcpy_P memcpy' '#endif' > "$HELIX_BUILD/stubs/pgmspace.h"
+    printf '%s\n' '#ifndef ARDUINO_H' '#define ARDUINO_H' '#include <stdint.h>' \
+        '#include "pgmspace.h"' '#endif' > "$HELIX_BUILD/stubs/Arduino.h"
+    for f in "$HELIX_AAC_DIR"/*.c; do
+        $CC $CFLAGS -w -DUSE_DEFAULT_STDLIB -I"$HELIX_BUILD/stubs" -I"$HELIX_AAC_DIR" -fPIC \
+            -c "$f" -o "$HELIX_BUILD/$(basename "${f%.c}").o"
+    done
+    ar rcs "$HELIX_BUILD/libhelix-aac.a" "$HELIX_BUILD"/*.o
+    echo "  -> libhelix-aac.a"
+fi
+RSD_CODEC_CFLAGS="-DRAPTOR_OPUS -DRAPTOR_AAC -I$HELIX_AAC_DIR"
+$CC $CFLAGS $COMPY_CFLAGS $RSD_CODEC_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_main.c" -o "$OUT/rsd_main.o"
+$CC $CFLAGS $COMPY_CFLAGS $RSD_CODEC_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_server.c" -o "$OUT/rsd_server.o"
+$CC $CFLAGS $COMPY_CFLAGS $RSD_CODEC_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_session.c" -o "$OUT/rsd_session.o"
+$CC $CFLAGS $COMPY_CFLAGS $RSD_CODEC_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_ring_reader.c" -o "$OUT/rsd_ring_reader.o"
+$CC $CFLAGS $COMPY_CFLAGS $RSD_CODEC_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_sendq.c" -o "$OUT/rsd_sendq.o"
+$CC $CFLAGS $COMPY_CFLAGS $RSD_CODEC_CFLAGS -c "$RAPTOR_DIR/rsd/rsd_backchannel.c" -o "$OUT/rsd_backchannel.o"
+$CC -o "$OUT/rsd" "$OUT"/rsd_main.o "$OUT"/rsd_server.o "$OUT"/rsd_session.o "$OUT"/rsd_ring_reader.o "$OUT"/rsd_sendq.o "$OUT"/rsd_backchannel.o $LIBS "$COMPY_BUILD/libcompy.a" $MBEDTLS_LIBS -lopus "$HELIX_BUILD/libhelix-aac.a" $LDFLAGS
 echo "  -> rsd"
 
 echo "=== RIC ==="
@@ -347,11 +377,12 @@ $CC -o "$OUT/rmr" "$OUT"/rmr_main.o "$OUT"/rmr_mux.o "$OUT"/rmr_nal.o "$OUT"/rmr
 echo "  -> rmr"
 
 echo "=== RSP ==="
-RSP_CFLAGS="$TLS_CFLAGS -I$RAPTOR_DIR/rmr"
+RSP_CFLAGS="$TLS_CFLAGS $COMPY_CFLAGS -I$RAPTOR_DIR/rmr"
 $CC $CFLAGS $RSP_CFLAGS -c "$RAPTOR_DIR/rsp/rsp_main.c" -o "$OUT/rsp_main.o"
 $CC $CFLAGS $RSP_CFLAGS -c "$RAPTOR_DIR/rsp/rsp_rtmp.c" -o "$OUT/rsp_rtmp.o"
 $CC $CFLAGS $RSP_CFLAGS -c "$RAPTOR_DIR/rsp/rsp_audio.c" -o "$OUT/rsp_audio.o"
-$CC -o "$OUT/rsp" "$OUT"/rsp_main.o "$OUT"/rsp_rtmp.o "$OUT"/rsp_audio.o "$OUT"/rmr_nal.o $LIBS $LIBS_TLS $LDFLAGS
+$CC $CFLAGS $RSP_CFLAGS -c "$RAPTOR_DIR/rsp/rsp_net.c" -o "$OUT/rsp_net.o"
+$CC -o "$OUT/rsp" "$OUT"/rsp_main.o "$OUT"/rsp_rtmp.o "$OUT"/rsp_audio.o "$OUT"/rsp_net.o "$OUT"/rmr_nal.o $LIBS "$COMPY_BUILD/libcompy.a" $MBEDTLS_LIBS $LIBS_TLS $LDFLAGS
 echo "  -> rsp"
 
 echo "=== RSR ==="

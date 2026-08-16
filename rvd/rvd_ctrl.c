@@ -78,6 +78,71 @@ static int fmt_hal_result(char *buf, int bufsz, int ret)
 }
 
 /*
+ * Runtime sensor-rate change with coherent encoder follow-through.
+ * Sensor timing is the half that buys exposure headroom (frame period
+ * bounds integration time); it moves first, and a driver rejection
+ * aborts the whole change so nothing is left half-applied. Encoder
+ * rate control then budgets bits per frame from its fps parameter and
+ * counts GOP in frames, so both follow -- otherwise half the target
+ * bitrate evaporates and the IDR interval silently stretches in
+ * seconds, which rmr's segment alignment and the keyframe-first join
+ * depend on. A stream configured slower than the sensor (decimated
+ * substream) keeps its own rate. Nothing here touches enc_cfg or the
+ * config: the override is transient by design, and applying the base
+ * rate through this same path lands every stream back on its
+ * configured values.
+ *
+ * Caveat: a stream restart (set-codec/set-resolution) rebuilds its
+ * encoder from enc_cfg, so a restarted stream runs its configured
+ * rate until the next override call -- benign (RC over-budgets), and
+ * ric re-asserts on mode edges.
+ */
+static int rvd_apply_sensor_fps(rvd_state_t *st, uint32_t num, uint32_t den)
+{
+	if (!st || num < 1 || den < 1 || num / den < 1 || num / den > 120)
+		return RSS_ERR_INVAL;
+
+	int ret;
+	if (st->sensor_count > 1 && st->ops->isp_set_sensor_fps_n) {
+		ret = 0;
+		for (int s = 0; s < st->sensor_count && ret == 0; s++)
+			ret = RSS_HAL_CALL(st->ops, isp_set_sensor_fps_n, st->hal_ctx, s, num, den);
+	} else {
+		ret = RSS_HAL_CALL(st->ops, isp_set_sensor_fps, st->hal_ctx, num, den);
+	}
+	if (ret != 0)
+		return ret;
+
+	uint32_t sensor_fps = (num + den / 2) / den;
+	for (int i = 0; i < st->stream_count; i++) {
+		rvd_stream_t *s = &st->streams[i];
+		if (!s->enabled || s->is_jpeg)
+			continue;
+		uint32_t cfg_den = s->enc_cfg.fps_den ? s->enc_cfg.fps_den : 1;
+		uint32_t cfg_fps = s->enc_cfg.fps_num / cfg_den;
+		if (!cfg_fps)
+			continue;
+		bool limited = sensor_fps < cfg_fps;
+		uint32_t eff_num = limited ? num : s->enc_cfg.fps_num;
+		uint32_t eff_den = limited ? den : cfg_den;
+		uint32_t eff_fps = limited ? sensor_fps : cfg_fps;
+		if (RSS_HAL_CALL(st->ops, enc_set_fps, st->hal_ctx, s->chn, eff_num, eff_den) != 0)
+			RSS_WARN("stream %d: encoder rate %u fps not applied", i, eff_fps);
+		if (s->enc_cfg.gop_length > 0) {
+			uint32_t gop = (s->enc_cfg.gop_length * eff_fps + cfg_fps / 2) / cfg_fps;
+			if (gop < 1)
+				gop = 1;
+			if (RSS_HAL_CALL(st->ops, enc_set_gop, st->hal_ctx, s->chn, gop) != 0)
+				RSS_WARN("stream %d: gop %u not applied", i, gop);
+		}
+		s->active_fps_num = limited ? eff_num : 0;
+		s->active_fps_den = limited ? eff_den : 0;
+		rvd_stream_publish_info(st, i);
+	}
+	return 0;
+}
+
+/*
  * Which config key persists this encoder setting for this stream, or NULL if
  * this stream has nowhere to write it.
  *
@@ -105,6 +170,15 @@ static int handle_encoder_cmd(const char *cmd, const char *cmd_json, rvd_state_t
 	int chn, val, val2;
 
 	if (strcmp(cmd, "request-idr") == 0) {
+		/* Thread contract: this runs on the ctrl thread while each
+		 * encoder thread sits in poll/get_frame on the same channel.
+		 * Serialization is delegated to the codec command layer
+		 * beneath -- the vendor SDK by long production tolerance,
+		 * the AL codec mailbox on the OpenIMP bridge -- so neither
+		 * branch takes a userspace lock. If IDR anomalies ever
+		 * surface, route the request through the encoder thread
+		 * with an atomic flag (the pending_pipeline_reinit
+		 * pattern) instead of adding locking here. */
 		int target = -1;
 		rss_json_get_int(cmd_json, "channel", &target);
 		for (int i = 0; i < st->stream_count; i++) {
@@ -115,7 +189,11 @@ static int handle_encoder_cmd(const char *cmd, const char *cmd_json, rvd_state_t
 			 * ask for, and an encoder may reject the request. */
 			if (st->streams[i].is_jpeg)
 				continue;
-			RSS_HAL_CALL(st->ops, enc_request_idr, st->hal_ctx, st->streams[i].chn);
+			if (st->v4l2_backend)
+				rvd_v4l2_h264_request_idr(st->v4l2);
+			else
+				RSS_HAL_CALL(st->ops, enc_request_idr, st->hal_ctx,
+					     st->streams[i].chn);
 		}
 		return rss_ctrl_resp_ok(resp, resp_size);
 	}
@@ -211,6 +289,10 @@ static int handle_encoder_cmd(const char *cmd, const char *cmd_json, rvd_state_t
 			if (ret == 0) {
 				st->streams[chn].enc_cfg.fps_num = val;
 				st->streams[chn].enc_cfg.fps_den = 1;
+				/* An explicit configured rate supersedes any
+				 * transient sensor-rate override on this stream. */
+				st->streams[chn].active_fps_num = 0;
+				st->streams[chn].active_fps_den = 0;
 				if (key)
 					rss_config_set_int(st->cfg, st->streams[chn].cfg_sect, key,
 							   val);
@@ -249,8 +331,9 @@ static int handle_encoder_cmd(const char *cmd, const char *cmd_json, rvd_state_t
 		if (rss_json_get_int(cmd_json, "channel", &chn) == 0 && chn >= 0 &&
 		    chn < st->stream_count) {
 			uint32_t avg = 0;
-			RSS_HAL_CALL(st->ops, enc_get_avg_bitrate, st->hal_ctx,
-				     st->streams[chn].chn, &avg);
+			if (!st->v4l2_backend)
+				RSS_HAL_CALL(st->ops, enc_get_avg_bitrate, st->hal_ctx,
+					     st->streams[chn].chn, &avg);
 			cJSON *r = cJSON_CreateObject();
 			cJSON_AddStringToObject(r, "status", "ok");
 			cJSON_AddNumberToObject(r, "bitrate",
@@ -264,9 +347,11 @@ static int handle_encoder_cmd(const char *cmd, const char *cmd_json, rvd_state_t
 	if (strcmp(cmd, "get-fps") == 0) {
 		if (rss_json_get_int(cmd_json, "channel", &chn) == 0 && chn >= 0 &&
 		    chn < st->stream_count) {
-			uint32_t num = 0, den = 0;
-			RSS_HAL_CALL(st->ops, enc_get_fps, st->hal_ctx, st->streams[chn].chn, &num,
-				     &den);
+			uint32_t num = st->streams[chn].enc_cfg.fps_num;
+			uint32_t den = st->streams[chn].enc_cfg.fps_den;
+			if (!st->v4l2_backend)
+				RSS_HAL_CALL(st->ops, enc_get_fps, st->hal_ctx,
+					     st->streams[chn].chn, &num, &den);
 			cJSON *r = cJSON_CreateObject();
 			cJSON_AddStringToObject(r, "status", "ok");
 			cJSON_AddNumberToObject(r, "fps_num", (double)num);
@@ -276,12 +361,66 @@ static int handle_encoder_cmd(const char *cmd, const char *cmd_json, rvd_state_t
 		return rss_ctrl_resp_error(resp, resp_size, "need channel");
 	}
 
+	/* Transient sensor-rate override: sensor timing + encoder RC +
+	 * GOP move together (rvd_apply_sensor_fps above), nothing is
+	 * persisted, and value 0 restores the rate captured at pipeline
+	 * init. The exposure ceiling is the point: frame period bounds
+	 * integration time, so ric drops the rate at night for photons
+	 * instead of gain. */
+	if (strcmp(cmd, "set-sensor-fps") == 0) {
+		if (rss_json_get_int(cmd_json, "value", &val) != 0 || val < 0)
+			return rss_ctrl_resp_error(resp, resp_size, "need value (fps, 0=base)");
+		uint32_t num = (uint32_t)val, den = 1;
+		if (val == 0) {
+			if (!st->sensor_base_fps_num)
+				return rss_ctrl_resp_error(resp, resp_size,
+							   "base rate unknown on this backend");
+			num = st->sensor_base_fps_num;
+			den = st->sensor_base_fps_den;
+		}
+		int ret = rvd_apply_sensor_fps(st, num, den);
+		if (ret != 0)
+			return fmt_hal_result(resp, resp_size, ret);
+		cJSON *r = cJSON_CreateObject();
+		cJSON_AddStringToObject(r, "status", "ok");
+		cJSON_AddNumberToObject(r, "fps_num", (double)num);
+		cJSON_AddNumberToObject(r, "fps_den", (double)den);
+		cJSON *streams = cJSON_AddArrayToObject(r, "streams");
+		for (int i = 0; i < st->stream_count; i++) {
+			rvd_stream_t *s = &st->streams[i];
+			if (!s->enabled || s->is_jpeg)
+				continue;
+			cJSON *item = cJSON_CreateObject();
+			cJSON_AddNumberToObject(item, "channel", (double)i);
+			uint32_t fn = s->active_fps_num ? s->active_fps_num : s->enc_cfg.fps_num;
+			uint32_t fd = s->active_fps_num ? s->active_fps_den : s->enc_cfg.fps_den;
+			cJSON_AddNumberToObject(item, "fps", (double)(fd ? fn / fd : fn));
+			cJSON_AddItemToArray(streams, item);
+		}
+		return rss_ctrl_resp_json(resp, resp_size, r);
+	}
+
+	if (strcmp(cmd, "get-sensor-fps") == 0) {
+		uint32_t num = 0, den = 0;
+		int ret = RSS_HAL_CALL(st->ops, isp_get_sensor_fps, st->hal_ctx, &num, &den);
+		if (ret != 0 && !st->sensor_base_fps_num)
+			return fmt_hal_result(resp, resp_size, ret);
+		cJSON *r = cJSON_CreateObject();
+		cJSON_AddStringToObject(r, "status", "ok");
+		cJSON_AddNumberToObject(r, "fps_num", (double)num);
+		cJSON_AddNumberToObject(r, "fps_den", (double)den);
+		cJSON_AddNumberToObject(r, "base_fps_num", (double)st->sensor_base_fps_num);
+		cJSON_AddNumberToObject(r, "base_fps_den", (double)st->sensor_base_fps_den);
+		return rss_ctrl_resp_json(resp, resp_size, r);
+	}
+
 	if (strcmp(cmd, "get-gop") == 0) {
 		if (rss_json_get_int(cmd_json, "channel", &chn) == 0 && chn >= 0 &&
 		    chn < st->stream_count) {
-			uint32_t gop = 0;
-			RSS_HAL_CALL(st->ops, enc_get_gop_attr, st->hal_ctx, st->streams[chn].chn,
-				     &gop);
+			uint32_t gop = st->streams[chn].enc_cfg.gop_length;
+			if (!st->v4l2_backend)
+				RSS_HAL_CALL(st->ops, enc_get_gop_attr, st->hal_ctx,
+					     st->streams[chn].chn, &gop);
 			cJSON *r = cJSON_CreateObject();
 			cJSON_AddStringToObject(r, "status", "ok");
 			cJSON_AddNumberToObject(r, "gop", (double)gop);
@@ -2276,7 +2415,9 @@ static int handle_config_cmd(const char *cmd, const char *cmd_json, rvd_state_t 
 		for (int i = 0; i < st->stream_count; i++) {
 			rvd_stream_t *s = &st->streams[i];
 			uint32_t avg_br = 0;
-			RSS_HAL_CALL(st->ops, enc_get_avg_bitrate, st->hal_ctx, s->chn, &avg_br);
+			if (!st->v4l2_backend)
+				RSS_HAL_CALL(st->ops, enc_get_avg_bitrate, st->hal_ctx, s->chn,
+					     &avg_br);
 			cJSON *item = cJSON_CreateObject();
 			cJSON_AddNumberToObject(item, "chn", (double)s->chn);
 			cJSON_AddNumberToObject(item, "w", (double)s->enc_cfg.width);
@@ -2318,9 +2459,8 @@ static int handle_config_cmd(const char *cmd, const char *cmd_json, rvd_state_t 
 				any_privacy = true;
 		}
 		char rad_resp[64];
-		rss_ctrl_send_command(RSS_RUN_DIR "/rad.sock",
-				      any_privacy ? "{\"cmd\":\"mute\"}" : "{\"cmd\":\"unmute\"}",
-				      rad_resp, sizeof(rad_resp), 1000);
+		rss_ctrl_cmd(RSS_RUN_DIR "/rad.sock", any_privacy ? "mute" : "unmute", rad_resp,
+			     sizeof(rad_resp), 1000);
 
 		cJSON *r = cJSON_CreateObject();
 		cJSON_AddStringToObject(r, "status", "ok");
@@ -2346,8 +2486,9 @@ static int handle_config_cmd(const char *cmd, const char *cmd_json, rvd_state_t 
 		cJSON *arr = cJSON_AddArrayToObject(r, "streams");
 		for (int i = 0; i < st->stream_count; i++) {
 			uint32_t avg_br = 0;
-			RSS_HAL_CALL(st->ops, enc_get_avg_bitrate, st->hal_ctx, st->streams[i].chn,
-				     &avg_br);
+			if (!st->v4l2_backend)
+				RSS_HAL_CALL(st->ops, enc_get_avg_bitrate, st->hal_ctx,
+					     st->streams[i].chn, &avg_br);
 			cJSON *item = cJSON_CreateObject();
 			cJSON_AddNumberToObject(item, "chn", (double)st->streams[i].chn);
 			cJSON_AddNumberToObject(item, "w", (double)st->streams[i].enc_cfg.width);
@@ -2384,6 +2525,17 @@ int rvd_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_size, vo
 	char cmd[64];
 	if (rss_json_get_str(cmd_json, "cmd", cmd, sizeof(cmd)) != 0)
 		return rss_ctrl_resp_error(resp_buf, resp_buf_size, "missing cmd");
+
+	/* The standalone backend has no initialized IMP HAL graph. Keep its small
+	 * control surface explicit so a web/API request cannot fall through to an
+	 * operation on uninitialized SDK state. */
+	if (st->v4l2_backend && strcmp(cmd, "request-idr") != 0 &&
+	    strcmp(cmd, "get-bitrate") != 0 && strcmp(cmd, "get-fps") != 0 &&
+	    strcmp(cmd, "get-gop") != 0 && strcmp(cmd, "get-qp-bounds") != 0 &&
+	    strcmp(cmd, "get-rc-mode") != 0 && strcmp(cmd, "config-show") != 0 &&
+	    strcmp(cmd, "status") != 0)
+		return rss_ctrl_resp_error(resp_buf, resp_buf_size,
+					   "not supported by the V4L2 backend");
 
 	if ((len = handle_encoder_cmd(cmd, cmd_json, st, resp_buf, resp_buf_size)) > 0)
 		return len;

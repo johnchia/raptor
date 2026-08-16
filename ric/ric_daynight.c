@@ -153,8 +153,20 @@ static void rvd_note_failed_query(ric_state_t *st)
 
 static void rvd_note_good_query(ric_state_t *st)
 {
-	if (st->rvd_fail_warned)
-		RSS_INFO("rvd answering again after %ds", fail_secs(st, st->rvd_fail_run));
+	if (st->rvd_fail_run > 0) {
+		if (st->rvd_fail_warned)
+			RSS_INFO("rvd answering again after %ds", fail_secs(st, st->rvd_fail_run));
+		/* Any gap can hide an rvd restart, and the ISP running mode
+		 * lives in rvd: the GPIO half of a night camera survives a
+		 * restart, the ISP half boots back as day and streams
+		 * wrong colors under lit IR until the next transition --
+		 * potentially all night. Re-assert the current mode on
+		 * every recovery; the call is idempotent and recoveries
+		 * are rare. The night sensor rate rides along for the same
+		 * reason: a restarted rvd is back at its boot rate. */
+		ric_set_isp_mode(st->current_mode);
+		ric_apply_night_fps(st, st->current_mode);
+	}
 	st->rvd_fail_run = 0;
 	st->rvd_fail_warned = false;
 }
@@ -233,11 +245,9 @@ void ric_gpio_init(ric_state_t *st)
 void ric_set_isp_mode(ric_mode_t mode)
 {
 	char resp[128];
-	int ret = rss_ctrl_send_command(
-		RSS_RUN_DIR "/rvd.sock",
-		mode == RIC_MODE_NIGHT ? "{\"cmd\":\"set-running-mode\",\"value\":\"night\"}"
-				       : "{\"cmd\":\"set-running-mode\",\"value\":\"day\"}",
-		resp, sizeof(resp), 2000);
+	int ret = rss_ctrl_cmd_str(RSS_RUN_DIR "/rvd.sock", "set-running-mode", "value",
+				   mode == RIC_MODE_NIGHT ? "night" : "day", resp, sizeof(resp),
+				   2000);
 	/* The filter and LEDs have already moved; a failure here is a
 	 * half-finished transition (color at night or B/W in day) that
 	 * otherwise heals only at the next switch. */
@@ -323,6 +333,43 @@ static void ric_set_gpio(ric_state_t *st, ric_mode_t mode)
 }
 
 /*
+ * Optional night sensor rate: entering night applies the configured
+ * rate, entering day restores rvd's boot baseline (value 0). Policy
+ * lives here -- WHEN and TO WHAT -- while rvd's transient
+ * set-sensor-fps knows HOW to move sensor timing, encoder rate
+ * control and GOP together without persisting anything. An
+ * unreachable rvd is transient (the recovery re-assert retries); an
+ * error answer means the backend cannot do rates at all, which is
+ * permanent for this boot: warn once and park the feature.
+ */
+void ric_apply_night_fps(ric_state_t *st, ric_mode_t mode)
+{
+	if (st->settings.night_fps <= 0 || st->night_fps_unusable)
+		return;
+	int value = (mode == RIC_MODE_NIGHT) ? st->settings.night_fps : 0;
+	char resp[512];
+	int ret = rss_ctrl_cmd_int(RSS_RUN_DIR "/rvd.sock", "set-sensor-fps", "value", value, resp,
+				   sizeof(resp), 2000);
+	if (ret < 0) {
+		RSS_WARN("sensor rate %d not applied (rvd unreachable) -- retried on the "
+			 "next recovery or transition",
+			 value ? value : -1);
+		return;
+	}
+	if (!rss_ctrl_resp_is_ok(resp)) {
+		st->night_fps_unusable = true;
+		RSS_WARN("night_fps disabled for this run: rvd cannot set the sensor rate "
+			 "(%.100s)",
+			 resp);
+		return;
+	}
+	if (value)
+		RSS_INFO("night sensor rate %d fps applied", value);
+	else
+		RSS_INFO("day sensor rate restored");
+}
+
+/*
  * A forced mode (raptorctl ric mode day|night) is an explicit hardware
  * assertion, not a state-machine hint. Bench verbs (ircut/ir850/ir940)
  * move rails without touching current_mode, so a force that matches the
@@ -335,6 +382,7 @@ void ric_force_mode(ric_state_t *st, ric_mode_t mode)
 	if (mode == st->current_mode) {
 		ric_set_gpio(st, mode);
 		ric_set_isp_mode(mode);
+		ric_apply_night_fps(st, mode);
 		return;
 	}
 	ric_set_mode(st, mode);
@@ -347,6 +395,7 @@ void ric_set_mode(ric_state_t *st, ric_mode_t mode)
 
 	ric_set_gpio(st, mode);
 	ric_set_isp_mode(mode);
+	ric_apply_night_fps(st, mode);
 	RSS_INFO("switched to %s mode", mode == RIC_MODE_NIGHT ? "NIGHT" : "DAY");
 
 	st->current_mode = mode;
@@ -415,19 +464,22 @@ static uint32_t json_get_uint(const cJSON *root, const char *key)
 /* Poll ISP exposure once and decide the day/night transition. */
 void ric_poll_exposure(ric_state_t *st)
 {
-	if (st->settings.opmode != RIC_AUTO)
-		return;
-
-	/* Query RVD for ISP exposure data via control socket */
+	/* The rvd query doubles as the liveness probe, so it runs in
+	 * every operating mode: a forced-night camera whose rvd restarts
+	 * needs its ISP mode re-asserted exactly as an automatic one
+	 * does, and skipping the query in forced modes would leave that
+	 * restart invisible. */
 	char resp[512];
-	int ret = rss_ctrl_send_command(RSS_RUN_DIR "/rvd.sock", "{\"cmd\":\"get-exposure\"}", resp,
-					sizeof(resp), 1000);
+	int ret = rss_ctrl_cmd(RSS_RUN_DIR "/rvd.sock", "get-exposure", resp, sizeof(resp), 1000);
 	if (ret < 0) {
 		RSS_DEBUG("RVD query failed (%d)", ret);
 		rvd_note_failed_query(st);
 		return;
 	}
 	rvd_note_good_query(st);
+
+	if (st->settings.opmode != RIC_AUTO)
+		return;
 
 	uint32_t total_gain = 0, ae_luma = 0;
 	uint32_t ev = 0;

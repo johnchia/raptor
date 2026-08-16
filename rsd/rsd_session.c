@@ -43,28 +43,13 @@ static int b64_encode(const uint8_t *src, int len, char *dst, int dst_size)
 	return o;
 }
 
-/* ── Backchannel audio receiver (separate type for interface99) ── */
-
-typedef struct {
-	rss_ring_t **speaker_ring_ptr; /* points to client->speaker_ring */
-} rsd_bc_recv_t;
-
-static int16_t ulaw_decode(uint8_t ulaw)
-{
-	ulaw = ~ulaw;
-	int sign = (ulaw & 0x80);
-	int exponent = (ulaw >> 4) & 0x07;
-	int mantissa = ulaw & 0x0f;
-	int magnitude = ((mantissa << 3) + 0x84) << exponent;
-	magnitude -= 0x84;
-	return (int16_t)(sign ? -magnitude : magnitude);
-}
+/* ── Backchannel audio receiver (type lives in rsd.h; decode in
+ * rsd_backchannel.c -- this glue only bridges the compy callback) ── */
 
 static void rsd_bc_recv_t_on_audio(VSelf, uint8_t payload_type, uint32_t timestamp, uint32_t ssrc,
 				   U8Slice99 payload)
 {
 	VSELF(rsd_bc_recv_t);
-	(void)timestamp;
 	(void)ssrc;
 
 	rss_ring_t **ring_ptr = self->speaker_ring_ptr;
@@ -82,28 +67,11 @@ static void rsd_bc_recv_t_on_audio(VSelf, uint8_t payload_type, uint32_t timesta
 			RSS_WARN("backchannel: failed to create speaker ring");
 			return;
 		}
-		rss_ring_set_stream_info(*ring_ptr, 0x11, 0, 0, 0, 16000, 1, 0, 0);
+		rss_ring_set_stream_info(*ring_ptr, 0x11, 0, 0, 0, RSD_BC_RING_RATE, 1, 0, 0);
 		RSS_INFO("backchannel: speaker ring ready");
 	}
 
-	if (payload_type == 0) {
-		/* PCMU/8000 — decode to PCM16 and upsample 8kHz→16kHz.
-		 * Simple 2x interpolation: duplicate each sample.
-		 * Max 480 input samples (60ms ptime) keeps stack under 2KB. */
-		int16_t pcm[960]; /* 480 input samples * 2 */
-		int n = (int)payload.len;
-		if (n > 480)
-			n = 480;
-		for (int i = 0; i < n; i++) {
-			int16_t s = ulaw_decode(payload.ptr[i]);
-			pcm[i * 2] = s;
-			pcm[i * 2 + 1] = s;
-		}
-		rss_ring_publish(*ring_ptr, (const uint8_t *)pcm, n * 4, rss_timestamp_us(), 0, 0);
-	} else {
-		rss_ring_publish(*ring_ptr, payload.ptr, (uint32_t)payload.len, rss_timestamp_us(),
-				 payload_type, 0);
-	}
+	rsd_bc_handle(&self->dec, *ring_ptr, payload_type, timestamp, payload.ptr, payload.len);
 }
 
 static void rsd_bc_recv_t_drop(VSelf)
@@ -127,7 +95,7 @@ static void rsd_client_t_options(VSelf, Compy_Context *ctx, const Compy_Request 
 	(void)req;
 
 	compy_header(ctx, COMPY_HEADER_PUBLIC,
-		     "DESCRIBE, SETUP, PLAY, PAUSE, TEARDOWN, GET_PARAMETER");
+		     "DESCRIBE, SETUP, PLAY, PAUSE, TEARDOWN, GET_PARAMETER, SET_PARAMETER");
 	compy_respond_ok(ctx);
 }
 
@@ -355,7 +323,10 @@ static void rsd_client_t_describe(VSelf, Compy_Context *ctx, const Compy_Request
 		return;
 	}
 
-	char sdp[2048] = {0};
+	/* Worst case stacks H.265 sprop-vps/sps/pps (~600 base64 bytes)
+	 * on the AAC fmtp and the multi-codec backchannel block; the
+	 * string writer does not bound itself, so the headroom must. */
+	char sdp[3072] = {0};
 	Compy_Writer sdp_w = compy_string_writer(sdp);
 	ssize_t ret = 0;
 
@@ -554,10 +525,53 @@ static void rsd_client_t_describe(VSelf, Compy_Context *ctx, const Compy_Request
 	if (rss_config_get_bool(self->srv->cfg, "rtsp", "backchannel", false) &&
 	    compy_require_has_tag(&req->header_map,
 				  CharSlice99_from_str("www.onvif.org/ver20/backchannel"))) {
-		COMPY_SDP_DESCRIBE(ret, sdp_w, (COMPY_SDP_MEDIA, "audio 0 RTP/AVP 0"),
-				   (COMPY_SDP_ATTR, "control:backchannel"),
-				   (COMPY_SDP_ATTR, "rtpmap:0 PCMU/8000"),
-				   (COMPY_SDP_ATTR, "sendonly"));
+		/* One m-line, several payload types (RFC 8866 §5.14): RTSP
+		 * has no SDP answer, so the client signals its pick by just
+		 * sending it and the decoder dispatches on the RTP PT.
+		 * PCMU stays first -- it is ONVIF Profile T's baseline.
+		 * Which of the compiled codecs get offered is
+		 * [rtsp] backchannel_codecs, read per request like the
+		 * enable gate above so set-backchannel-codecs applies to
+		 * the next session without a restart. */
+		uint32_t bc_mask = rsd_bc_enabled_mask(self->srv->cfg);
+		char bc_pts[32];
+		rsd_bc_offer_pts(bc_mask, bc_pts, sizeof(bc_pts));
+		COMPY_SDP_DESCRIBE(ret, sdp_w, (COMPY_SDP_MEDIA, "audio 0 RTP/AVP %s", bc_pts),
+				   (COMPY_SDP_ATTR, "control:backchannel"));
+		if (bc_mask & RSD_BC_CODEC_PCMU)
+			COMPY_SDP_DESCRIBE(ret, sdp_w, (COMPY_SDP_ATTR, "rtpmap:0 PCMU/8000"));
+		if (bc_mask & RSD_BC_CODEC_PCMA)
+			COMPY_SDP_DESCRIBE(ret, sdp_w, (COMPY_SDP_ATTR, "rtpmap:8 PCMA/8000"));
+		if (bc_mask & RSD_BC_CODEC_OPUS) {
+			/* RFC 7587 §7: the rtpmap always reads 48000/2 no
+			 * matter what is actually coded; the fmtp names what
+			 * this side can play so the sender may encode
+			 * narrower. */
+			COMPY_SDP_DESCRIBE(
+				ret, sdp_w,
+				(COMPY_SDP_ATTR, "rtpmap:%d opus/48000/2", RSD_BC_PT_OPUS),
+				(COMPY_SDP_ATTR, "fmtp:%d maxplaybackrate=16000;stereo=0",
+				 RSD_BC_PT_OPUS));
+		}
+		if (bc_mask & RSD_BC_CODEC_AAC) {
+			/* config=1408 is the AudioSpecificConfig for AAC-LC
+			 * at the 16 kHz ring rate, mono -- senders must
+			 * encode what the raw-block decoder was told to
+			 * expect. */
+			COMPY_SDP_DESCRIBE(ret, sdp_w,
+					   (COMPY_SDP_ATTR, "rtpmap:%d MPEG4-GENERIC/%d/1",
+					    RSD_BC_PT_AAC, RSD_BC_RING_RATE),
+					   (COMPY_SDP_ATTR,
+					    "fmtp:%d streamtype=5; profile-level-id=1; "
+					    "mode=AAC-hbr; config=1408; sizeLength=13; "
+					    "indexLength=3; indexDeltaLength=3",
+					    RSD_BC_PT_AAC));
+		}
+		if (bc_mask & RSD_BC_CODEC_L16)
+			COMPY_SDP_DESCRIBE(ret, sdp_w,
+					   (COMPY_SDP_ATTR, "rtpmap:%d L16/%d/1", RSD_BC_PT_L16,
+					    RSD_BC_RING_RATE));
+		COMPY_SDP_DESCRIBE(ret, sdp_w, (COMPY_SDP_ATTR, "sendonly"));
 	}
 
 	(void)ret;
@@ -611,8 +625,14 @@ static void rsd_client_t_setup(VSelf, Compy_Context *ctx, const Compy_Request *r
 	if (is_backchannel && self->backchannel) {
 		VCALL(DYN(Compy_Backchannel, Compy_Droppable, self->backchannel), drop);
 		self->backchannel = NULL;
+		if (self->bc_recv)
+			rsd_bc_dec_deinit(&self->bc_recv->dec);
 		free(self->bc_recv);
 		self->bc_recv = NULL;
+		if (self->bc_has_rtcp_t) {
+			VCALL_SUPER(self->bc_rtcp_t, Compy_Droppable, drop);
+			self->bc_has_rtcp_t = false;
+		}
 	} else if (is_audio) {
 		if (self->audio.rtp) {
 			VCALL(DYN(Compy_RtpTransport, Compy_Droppable, self->audio.rtp), drop);
@@ -698,16 +718,26 @@ static void rsd_client_t_setup(VSelf, Compy_Context *ctx, const Compy_Request *r
 			return;
 		}
 
-		/* Each track owns its UDP pair. A re-SETUP of the same
-		 * track replaces the sockets: close the previous pair
-		 * first, deregistering the RTCP fd from epoll. A leaked
-		 * connected UDP socket whose peer has vanished sits in
-		 * permanent EPOLLERR and spins the epoll loop; closing a
-		 * pair the other track still uses cross-wires the streams
-		 * once the fd numbers get reused. */
-		int *rtp_fd = is_audio ? &self->audio_udp_rtp_fd : &self->udp_rtp_fd;
-		int *rtcp_fd = is_audio ? &self->audio_udp_rtcp_fd : &self->udp_rtcp_fd;
-		bool *rtcp_reg = is_audio ? &self->audio_rtcp_in_epoll : &self->rtcp_in_epoll;
+		/* Each track owns its UDP pair -- the backchannel included,
+		 * which once borrowed the video pointers here and clobbered
+		 * a playing video transport. A re-SETUP of the same track
+		 * replaces the sockets: close the previous pair first,
+		 * deregistering any epoll-registered fd. A leaked connected
+		 * UDP socket whose peer has vanished sits in permanent
+		 * EPOLLERR and spins the epoll loop; closing a pair another
+		 * track still uses cross-wires the streams once the fd
+		 * numbers get reused. */
+		int *rtp_fd = is_backchannel ? &self->bc_udp_rtp_fd
+			      : is_audio     ? &self->audio_udp_rtp_fd
+					     : &self->udp_rtp_fd;
+		int *rtcp_fd = is_backchannel ? &self->bc_udp_rtcp_fd
+			       : is_audio     ? &self->audio_udp_rtcp_fd
+					      : &self->udp_rtcp_fd;
+		bool *rtcp_reg = is_backchannel ? &self->bc_rtcp_in_epoll
+				 : is_audio	? &self->audio_rtcp_in_epoll
+						: &self->rtcp_in_epoll;
+		/* Only the backchannel's RTP fd is a receive path in epoll. */
+		bool *rtp_reg = is_backchannel ? &self->bc_rtp_in_epoll : NULL;
 		if (*rtcp_fd >= 0) {
 			if (*rtcp_reg) {
 				epoll_ctl(self->srv->epoll_fd, EPOLL_CTL_DEL, *rtcp_fd, NULL);
@@ -717,6 +747,10 @@ static void rsd_client_t_setup(VSelf, Compy_Context *ctx, const Compy_Request *r
 			*rtcp_fd = -1;
 		}
 		if (*rtp_fd >= 0) {
+			if (rtp_reg && *rtp_reg) {
+				epoll_ctl(self->srv->epoll_fd, EPOLL_CTL_DEL, *rtp_fd, NULL);
+				*rtp_reg = false;
+			}
 			close(*rtp_fd);
 			*rtp_fd = -1;
 		}
@@ -771,16 +805,33 @@ static void rsd_client_t_setup(VSelf, Compy_Context *ctx, const Compy_Request *r
 		Compy_BackchannelConfig bc_cfg = {.payload_type = 0, .clock_rate = 8000};
 		rsd_bc_recv_t *recv = calloc(1, sizeof(rsd_bc_recv_t));
 		if (!recv) {
+			VCALL_SUPER(rtp_t, Compy_Droppable, drop);
+			VCALL_SUPER(rtcp_t, Compy_Droppable, drop);
 			compy_respond_internal_error(ctx);
 			return;
 		}
 		recv->speaker_ring_ptr = &self->speaker_ring;
+		rsd_bc_dec_init(&recv->dec, rsd_bc_enabled_mask(self->srv->cfg));
 		self->bc_recv = recv;
 		self->backchannel = Compy_Backchannel_new(
 			bc_cfg, DYN(rsd_bc_recv_t, Compy_AudioReceiver, recv));
-		RSS_INFO("client SETUP: backchannel PCMU/8000");
+		/* Keep the RTCP transport for the receiver reports we owe
+		 * the client's sender; the RTP-direction one has no use on
+		 * a receive-only track (both leaked here before). */
+		self->bc_rtcp_t = rtcp_t;
+		self->bc_has_rtcp_t = true;
+		self->bc_last_rr = rss_timestamp_us();
+		VCALL_SUPER(rtp_t, Compy_Droppable, drop);
+		char bc_names[48];
+		RSS_INFO("client SETUP: backchannel ready (%s offered)",
+			 rsd_bc_codec_names(recv->dec.enabled, bc_names, sizeof(bc_names)));
 	} else if (is_audio) {
 		if (!self->srv->has_audio) {
+			/* Built above, consumed by nothing on this return --
+			 * the wrapper pair leaked here whenever a client
+			 * raced rsd's lazy audio-ring attach. */
+			VCALL_SUPER(rtp_t, Compy_Droppable, drop);
+			VCALL_SUPER(rtcp_t, Compy_Droppable, drop);
 			compy_respond(ctx, COMPY_STATUS_NOT_FOUND, "Audio not available");
 			return;
 		}
@@ -815,6 +866,8 @@ static void rsd_client_t_setup(VSelf, Compy_Context *ctx, const Compy_Request *r
 	} else {
 		/* Video SETUP — reject if this stream has no video */
 		if (!self->srv->video[self->stream_idx].last_width) {
+			VCALL_SUPER(rtp_t, Compy_Droppable, drop);
+			VCALL_SUPER(rtcp_t, Compy_Droppable, drop);
 			compy_respond(ctx, COMPY_STATUS_NOT_FOUND, "Video not available");
 			return;
 		}
@@ -965,6 +1018,26 @@ static void rsd_client_t_teardown(VSelf, Compy_Context *ctx, const Compy_Request
 	if (self->audio.rtcp)
 		(void)!Compy_Rtcp_send_bye(self->audio.rtcp);
 
+	/* The RRs made this side a visible RTCP participant on the
+	 * backchannel too; announce the leave the way the sending tracks
+	 * do, ahead of the 200 where it cannot race the connection
+	 * close. Dispatch already holds write_lock. */
+	if (self->backchannel && self->bc_has_rtcp_t) {
+		Compy_RtpReceiver *rcv = Compy_Backchannel_get_receiver(self->backchannel);
+		if (rcv) {
+			uint8_t bye_buf[104];
+			ssize_t n = Compy_RtpReceiver_write_bye(
+				rcv, RSD_BC_REPORTER_SSRC(self->session_id), rss_timestamp_us(),
+				RSD_BC_CNAME, bye_buf, sizeof(bye_buf));
+			if (n > 0) {
+				struct iovec bye_iov[1] = {
+					{.iov_base = bye_buf, .iov_len = (size_t)n}};
+				VCALL(self->bc_rtcp_t, transmit,
+				      (Compy_IoVecSlice)Slice99_typed_from_array(bye_iov));
+			}
+		}
+	}
+
 	compy_respond_ok(ctx);
 	RSS_INFO("client TEARDOWN");
 }
@@ -983,7 +1056,21 @@ static void rsd_client_t_unknown(VSelf, Compy_Context *ctx, const Compy_Request 
 {
 	VSELF(rsd_client_t);
 	(void)self;
-	(void)req;
+
+	/* SET_PARAMETER with no body is the standard keepalive; answer it
+	 * 200 like GET_PARAMETER, because a 501 here makes strict clients
+	 * drop the whole session. Actual parameters are another matter:
+	 * none are understood, and RFC 2326 §10.9 wants 451 for that, not
+	 * a silent 200 pretending they applied. */
+	Compy_Method set_parameter = COMPY_METHOD_SET_PARAMETER;
+	if (Compy_Method_eq(&req->start_line.method, &set_parameter)) {
+		if (CharSlice99_is_empty(req->body))
+			compy_respond_ok(ctx);
+		else
+			compy_respond(ctx, COMPY_STATUS_PARAMETER_NOT_UNDERSTOOD,
+				      "Parameter Not Understood");
+		return;
+	}
 
 	compy_respond(ctx, COMPY_STATUS_NOT_IMPLEMENTED, "Not implemented");
 }
@@ -991,11 +1078,73 @@ static void rsd_client_t_unknown(VSelf, Compy_Context *ctx, const Compy_Request 
 static Compy_ControlFlow rsd_client_t_before(VSelf, Compy_Context *ctx, const Compy_Request *req)
 {
 	VSELF(rsd_client_t);
-	(void)self;
 
 	if (self->srv->auth) {
 		if (compy_auth_check(self->srv->auth, ctx, req) != 0)
 			return Compy_ControlFlow_Break;
+	}
+
+	/* RFC 2326 §12.32: a request whose Require names a feature this
+	 * server cannot honor MUST draw 551 with the unsupported tags in
+	 * an Unsupported header -- silently proceeding tells the client
+	 * its required feature is in effect when it is not. The only tag
+	 * honored here is the ONVIF backchannel, and only while the
+	 * config enables it (an ONVIF client answered 551 re-DESCRIBEs
+	 * without the tag, which is the documented fallback). */
+	CharSlice99 req_tags;
+	if (Compy_HeaderMap_find(&req->header_map, COMPY_HEADER_REQUIRE, &req_tags)) {
+		bool bc_on = rss_config_get_bool(self->srv->cfg, "rtsp", "backchannel", false);
+		bool have_unsup = false;
+		CharSlice99 first_unsup = CharSlice99_from_str("");
+		char unsup[256];
+		size_t un = 0;
+		size_t i = 0;
+		while (i < req_tags.len) {
+			while (i < req_tags.len &&
+			       (req_tags.ptr[i] == ' ' || req_tags.ptr[i] == '\t' ||
+				req_tags.ptr[i] == ','))
+				i++;
+			size_t start = i;
+			while (i < req_tags.len && req_tags.ptr[i] != ',')
+				i++;
+			size_t end = i;
+			while (end > start &&
+			       (req_tags.ptr[end - 1] == ' ' || req_tags.ptr[end - 1] == '\t'))
+				end--;
+			if (end == start)
+				continue;
+			CharSlice99 tag = CharSlice99_new(req_tags.ptr + start, end - start);
+			if (bc_on && CharSlice99_primitive_eq(tag, COMPY_REQUIRE_ONVIF_BACKCHANNEL))
+				continue;
+			if (!have_unsup) {
+				have_unsup = true;
+				first_unsup = tag;
+			}
+			/* Append only whole tags: a partial copy would put a
+			 * tag on the wire that the client never sent, and the
+			 * slice length must never exceed what was written. */
+			size_t sep = (un > 0) ? 2 : 0;
+			if (sep + tag.len <= sizeof(unsup) - un) {
+				if (sep) {
+					unsup[un] = ',';
+					unsup[un + 1] = ' ';
+				}
+				memcpy(unsup + un + sep, tag.ptr, tag.len);
+				un += sep + tag.len;
+			}
+		}
+		if (have_unsup) {
+			if (un == 0) {
+				/* Every unsupported tag was longer than the
+				 * buffer; name a prefix of the first rather
+				 * than sending an empty Unsupported header. */
+				un = first_unsup.len < sizeof(unsup) ? first_unsup.len
+								     : sizeof(unsup);
+				memcpy(unsup, first_unsup.ptr, un);
+			}
+			compy_respond_option_not_supported(ctx, CharSlice99_new(unsup, un));
+			return Compy_ControlFlow_Break;
+		}
 	}
 
 	return Compy_ControlFlow_Continue;
@@ -1043,15 +1192,16 @@ void rsd_handle_rtsp_data(rsd_client_t *client, const char *data, size_t len)
 			Compy_Rtcp_handle_incoming(client->audio.rtcp, (const uint8_t *)data + 4,
 						   frame_len);
 
-		/* Backchannel data */
+		/* Backchannel data. Arrival instants drive the jitter and
+		 * DLSR fields of the receiver reports rsd sends back. */
 		if (client->backchannel) {
 			Compy_RtpReceiver *recv =
 				Compy_Backchannel_get_receiver(client->backchannel);
 			if (recv) {
 				uint8_t ch_type =
 					(channel & 1) ? COMPY_CHANNEL_RTCP : COMPY_CHANNEL_RTP;
-				Compy_RtpReceiver_feed(recv, ch_type, (const uint8_t *)data + 4,
-						       frame_len);
+				Compy_RtpReceiver_feed_at(recv, ch_type, (const uint8_t *)data + 4,
+							  frame_len, rss_timestamp_us());
 			}
 		}
 
@@ -1122,9 +1272,8 @@ void rsd_handle_rtsp_data(rsd_client_t *client, const char *data, size_t len)
 				 * idr_on_join=false trades join latency (up to one
 				 * GOP) for undisturbed existing clients. */
 				char resp[128];
-				rss_ctrl_send_command(RSS_RUN_DIR "/rvd.sock",
-						      "{\"cmd\":\"request-idr\"}", resp,
-						      sizeof(resp), 1000);
+				rss_ctrl_cmd(RSS_RUN_DIR "/rvd.sock", "request-idr", resp,
+					     sizeof(resp), 1000);
 				RSS_DEBUG("client PLAY (IDR requested)");
 			}
 		}

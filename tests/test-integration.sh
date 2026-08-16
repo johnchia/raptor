@@ -198,6 +198,19 @@ mkdir -p "$LOG_DIR/rec"
 
 CONFIG="$LOG_DIR/test.conf"
 
+# Backend-selection variants. The base config intentionally omits [system],
+# exercising the established implicit IMP default.
+{
+    printf '[system]\nvideo_backend = imp\n\n'
+    cat "$CONFIG"
+} > "$LOG_DIR/test-imp.conf"
+{
+    printf '[system]\nvideo_backend = v4l2\nvideo_device = /dev/video0\n\n'
+    cat "$CONFIG"
+} > "$LOG_DIR/test-v4l2.conf"
+IMP_CONFIG="$LOG_DIR/test-imp.conf"
+V4L2_CONFIG="$LOG_DIR/test-v4l2.conf"
+
 # Clean stale state from previous runs
 mkdir -p /var/run/rss 2>/dev/null || { sudo mkdir -p /var/run/rss && sudo chmod 1777 /var/run/rss; }
 rm -f /var/run/rss/*.pid /var/run/rss/*.sock 2>/dev/null
@@ -221,6 +234,36 @@ if ! kill -0 "$RINGS_PID" 2>/dev/null; then
     cat "$LOG_DIR/rings.log"
     exit 1
 fi
+
+echo "=== Backend selection tests ==="
+if "$OUT/rvd" -c "$V4L2_CONFIG" -f -d > "$LOG_DIR/rvd-v4l2-disabled.log" 2>&1; then
+    fail "disabled V4L2 backend is rejected" "rvd unexpectedly exited successfully"
+elif grep -q "V4L2/OpenIMP backend requested but Raptor was built without V4L2_OPENIMP=1" \
+        "$LOG_DIR/rvd-v4l2-disabled.log"; then
+    pass "disabled V4L2 backend is rejected with an explicit message"
+else
+    fail "disabled V4L2 backend is rejected" "explicit diagnostic missing"
+fi
+
+# Start the explicit IMP form far enough to record its initialized topology,
+# then compare it with the normal omitted-key daemon below.
+"$OUT/rvd" -c "$IMP_CONFIG" -f -d > "$LOG_DIR/rvd-imp-explicit.log" 2>&1 &
+IMP_PID=$!
+IMP_PIPELINE=""
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    IMP_PIPELINE=$(sed -n 's/.*\(pipeline ready:.*\)/\1/p' \
+        "$LOG_DIR/rvd-imp-explicit.log" | tail -1)
+    [ -n "$IMP_PIPELINE" ] && break
+    kill -0 "$IMP_PID" 2>/dev/null || break
+    sleep 0.1
+done
+if [ -n "$IMP_PIPELINE" ] && kill -0 "$IMP_PID" 2>/dev/null; then
+    pass "explicit IMP backend initializes"
+else
+    fail "explicit IMP backend initializes" "pipeline did not become ready"
+fi
+kill "$IMP_PID" 2>/dev/null || true
+wait "$IMP_PID" 2>/dev/null || true
 
 echo "=== Starting daemons ==="
 
@@ -257,6 +300,14 @@ start_daemon rmr "$OUT/rmr" -c "$CONFIG" -f -d
 # Let daemons settle
 sleep 2
 
+DEFAULT_PIPELINE=$(sed -n 's/.*\(pipeline ready:.*\)/\1/p' "$LOG_DIR/rvd.log" | tail -1)
+if [ -n "$IMP_PIPELINE" ] && [ "$DEFAULT_PIPELINE" = "$IMP_PIPELINE" ]; then
+    pass "explicit IMP backend matches the omitted-key default"
+else
+    fail "explicit IMP backend matches the omitted-key default" \
+        "explicit='$IMP_PIPELINE' default='$DEFAULT_PIPELINE'"
+fi
+
 # ── Tests ──
 
 echo ""
@@ -281,6 +332,27 @@ check_contains "set-fps" "ok" "$OUT/raptorctl" rvd set-fps 0 30
 check_contains "set-qp-bounds" "ok" "$OUT/raptorctl" rvd set-qp-bounds 0 15 45
 check_contains "set-rc-mode" "ok" "$OUT/raptorctl" rvd set-rc-mode 0 cbr
 check_contains "request-idr" "ok" "$OUT/raptorctl" rvd request-idr
+
+# Pin keyframe truth across the full producer-to-ring path. RSD waits for this
+# bit before releasing a new client, so an IDR NAL marked non-key is a stream
+# outage rather than cosmetic metadata.
+timeout 5 "$OUT/ringdump" main -f -s -n 8 > "$LOG_DIR/keyframe-ring.log" 2>&1 &
+KEY_READER_PID=$!
+sleep 0.2
+"$OUT/ringdump" main -i > /dev/null 2>&1 || true
+wait "$KEY_READER_PID" 2>/dev/null || true
+if grep -q 'nal=H264_IDR.*key=1' "$LOG_DIR/keyframe-ring.log"; then
+    pass "requested H.264 IDR reaches the ring as a keyframe"
+else
+    fail "requested H.264 IDR reaches the ring as a keyframe" \
+        "no H264_IDR/key=1 frame observed"
+fi
+if grep -Eq 'nal=H264_IDR.*key=0|nal=H264_SLICE.*key=1' \
+        "$LOG_DIR/keyframe-ring.log"; then
+    fail "ring key flag agrees with H.264 NAL type" "mismatched frame metadata"
+else
+    pass "ring key flag agrees with H.264 NAL type"
+fi
 
 # Advanced encoder
 check_contains "enc-set gop_mode" "ok" "$OUT/raptorctl" rvd enc-set 0 gop_mode 0
@@ -453,6 +525,147 @@ if [ -n "$FPS_SDP_BEFORE" ]; then
     "$OUT/raptorctl" rvd set-fps 0 "$FPS_SDP_BEFORE" > /dev/null 2>&1
     sleep 1
 fi
+
+# ── RTP over UDP push (rsp net mode) ──
+# [push] url=udp:// sends ring video as RTP datagrams with no session
+# and no handshake: bind a receiver, point rsp at it, and judge the
+# wire. The receiver reassembles fragmented and aggregated NALs, so
+# this pins the packetization (version, PT, a single SSRC, contiguous
+# sequence numbers on loopback) and the keyframe-first join: the full
+# parameter set and an IDR must be the first thing a fresh receiver
+# can decode. Both codecs run, because the NAL walk branches on the
+# header size and each branch deserves its own wire proof.
+cat > "$LOG_DIR/udp-push-listen.py" << 'PYEOF'
+import socket
+import sys
+import time
+
+verdict_path, port, codec = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("127.0.0.1", port))
+sock.settimeout(1.0)
+
+pkts = []
+start = time.time()
+first = None
+while True:
+    now = time.time()
+    if first is not None and now - first > 4.0:
+        break
+    if now - start > 12.0:
+        break
+    try:
+        data, _ = sock.recvfrom(65536)
+    except socket.timeout:
+        continue
+    if first is None:
+        first = time.time()
+    pkts.append(data)
+
+verdict = "FAIL no packets received"
+if pkts:
+    ssrcs = set()
+    seqs = []
+    types = set()
+    bad = 0
+    for p in pkts:
+        if len(p) < 13 or (p[0] >> 6) != 2 or (p[1] & 0x7F) != 96:
+            bad += 1
+            continue
+        ssrcs.add(p[8:12])
+        seqs.append((p[2] << 8) | p[3])
+        b = p[12:]
+        if codec == "h265":
+            t = (b[0] >> 1) & 0x3F
+            if t < 48:
+                types.add(t)
+            elif t == 48:  # aggregation packet
+                i = 2
+                while i + 2 <= len(b):
+                    ln = (b[i] << 8) | b[i + 1]
+                    if i + 2 + ln > len(b) or ln == 0:
+                        break
+                    types.add((b[i + 2] >> 1) & 0x3F)
+                    i += 2 + ln
+            elif t == 49:  # fragmentation unit
+                if len(b) >= 3 and (b[2] & 0x80):
+                    types.add(b[2] & 0x3F)
+        else:
+            t = b[0] & 0x1F
+            if 1 <= t <= 23:
+                types.add(t)
+            elif t == 24:  # STAP-A aggregate
+                i = 1
+                while i + 2 <= len(b):
+                    ln = (b[i] << 8) | b[i + 1]
+                    if i + 2 + ln > len(b) or ln == 0:
+                        break
+                    types.add(b[i + 2] & 0x1F)
+                    i += 2 + ln
+            elif t == 28:  # FU-A fragment
+                if len(b) >= 2 and (b[1] & 0x80):
+                    types.add(b[1] & 0x1F)
+    lost = 0
+    for a, c in zip(seqs, seqs[1:]):
+        lost += ((c - a) & 0xFFFF) - 1
+    # h264: SPS, PPS, IDR. h265: VPS, SPS, PPS (IDR arrives with them
+    # but its exact type varies, 19 or 20, so the params are the pin).
+    need = {32, 33, 34} if codec == "h265" else {7, 8, 5}
+    missing = sorted(need - types)
+    if bad:
+        verdict = f"FAIL {bad}/{len(pkts)} packets not RTP v2 PT96"
+    elif len(ssrcs) != 1:
+        verdict = f"FAIL {len(ssrcs)} SSRCs on one stream"
+    elif lost:
+        verdict = f"FAIL {lost} sequence gaps on loopback"
+    elif len(pkts) < 100:
+        verdict = f"FAIL only {len(pkts)} packets in the window"
+    elif missing:
+        verdict = f"FAIL NAL types missing from join: {missing} (saw {sorted(types)})"
+    else:
+        verdict = (f"PASS {len(pkts)} pkts, 0 lost, one ssrc, "
+                   f"nal types {sorted(types)}")
+with open(verdict_path, "w") as f:
+    f.write(verdict)
+PYEOF
+
+udp_push_leg() {
+    UPL_CODEC="$1"
+    UPL_STREAM="$2"
+    UPL_PORT="$3"
+    UPL_CONF="$LOG_DIR/test-push-$UPL_CODEC.conf"
+    cp "$CONFIG" "$UPL_CONF"
+    {
+        echo ""
+        echo "[push]"
+        echo "enabled = true"
+        echo "url = udp://127.0.0.1:$UPL_PORT"
+        echo "stream = $UPL_STREAM"
+        echo "audio = false"
+        echo "autostart = true"
+    } >> "$UPL_CONF"
+    python3 "$LOG_DIR/udp-push-listen.py" "$LOG_DIR/udp-$UPL_CODEC.verdict" \
+        "$UPL_PORT" "$UPL_CODEC" > "$LOG_DIR/udp-$UPL_CODEC.log" 2>&1 &
+    UPL_LISTEN_PID=$!
+    sleep 0.5
+    start_daemon "rsp-$UPL_CODEC" "$OUT/rsp" -c "$UPL_CONF" -f -d
+    wait "$UPL_LISTEN_PID"
+    UPL_VERDICT=$(cat "$LOG_DIR/udp-$UPL_CODEC.verdict" 2>/dev/null)
+    case "$UPL_VERDICT" in
+        PASS*)
+            pass "udp push $UPL_CODEC delivers decodable RTP from the join (${UPL_VERDICT#PASS })"
+            ;;
+        *)
+            fail "udp push $UPL_CODEC delivers decodable RTP from the join" \
+                "${UPL_VERDICT:-listener wrote no verdict}"
+            ;;
+    esac
+    pkill -f "$OUT/rsp" 2>/dev/null || true
+    sleep 0.5
+}
+
+udp_push_leg h264 0 15998
+udp_push_leg h265 1 15996
 
 # ffprobe (if available — best RTSP test tool)
 if command -v ffprobe > /dev/null 2>&1; then
@@ -694,6 +907,40 @@ if cfg_log_since | grep -q "running config saved"; then
 else
     fail "dirty config save logs the write" \
         "expected 'running config saved' in rvd log"
+fi
+
+# ── A snapshot channel's settings land in a section that is read back ──
+# A JPEG channel is built from its parent video stream and has no
+# section of its own. Given an empty one, a persisted key is written
+# above every [section] header, where no loader will ever read it
+# again -- the file still parses, the daemon still answers ok, and the
+# setting is gone at the next boot. So this goes through the file:
+# set-jpeg-quality is the one command that only accepts a JPEG channel,
+# and the channel index is discovered rather than assumed, since it
+# depends on how many video streams the config declares.
+JQ_CHN=""
+for c in 0 1 2 3 4 5; do
+    if "$OUT/raptorctl" rvd set-jpeg-quality "$c" 60 2>/dev/null | grep -q '"ok"'; then
+        JQ_CHN="$c"
+        break
+    fi
+done
+if [ -z "$JQ_CHN" ]; then
+    skip "jpeg quality persists into a real section" "no JPEG channel accepted set-jpeg-quality"
+else
+    "$OUT/raptorctl" config save > /dev/null 2>&1
+    sleep 1
+    FIRST_SECT=$(grep -n '^\[' "$CONFIG" | head -1 | cut -d: -f1)
+    ORPHANS=$(head -n "$((FIRST_SECT - 1))" "$CONFIG" | grep -c '^[a-z_][a-z_]* *=' || true)
+    if [ "${ORPHANS:-0}" -ne 0 ]; then
+        fail "jpeg quality persists into a real section" \
+            "$ORPHANS key(s) written above the first [section] header"
+    elif sed -n "/^\[stream0\]/,/^\[/p" "$CONFIG" | grep -q '^jpeg_quality *= *60'; then
+        pass "jpeg quality persists into a real section (chn $JQ_CHN -> [stream0])"
+    else
+        fail "jpeg quality persists into a real section" \
+            "jpeg_quality = 60 is not in [stream0]"
+    fi
 fi
 
 echo ""
@@ -1042,6 +1289,516 @@ else
     fail "backchannel speaker ring" "rsd published nothing (write_seq=${BC_SEQ:-none})"
 fi
 
+# ── Backchannel multi-codec offer: every advertised PT must decode ──
+# One TCP session switches codecs mid-stream (legal per RFC 8866: the
+# client may change among the offered formats), and rsd's per-codec
+# "receiving X" line only fires after a SUCCESSFUL decode -- for opus
+# and AAC that is the real decoder speaking, not the depacketizer.
+python3 - > "$LOG_DIR/backchannel-codecs.out" 2>&1 <<'BC2_EOF' &
+import socket, struct, subprocess, sys, time
+
+def rsp(sock, buf):
+    while b"\r\n\r\n" not in buf[0]:
+        d = sock.recv(4096)
+        if not d:
+            return "", buf
+        buf[0] += d
+    head, _, rest = buf[0].partition(b"\r\n\r\n")
+    txt = head.decode(errors="replace")
+    clen = 0
+    for line in txt.split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            clen = int(line.split(":", 1)[1])
+    while len(rest) < clen:
+        rest += sock.recv(4096)
+    body, buf[0] = rest[:clen], rest[clen:]
+    return txt + "\r\n\r\n" + body.decode(errors="replace"), buf
+
+REQ = "Require: www.onvif.org/ver20/backchannel\r\n"
+base = "rtsp://127.0.0.1:15554/stream0"
+s = socket.create_connection(("127.0.0.1", 15554), timeout=10)
+buf = [b""]
+s.sendall(f"DESCRIBE {base} RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n{REQ}\r\n".encode())
+desc, buf = rsp(s, buf)
+bc_sec = next((sec for sec in desc.split("m=")[1:] if "a=sendonly" in sec), "")
+pts = bc_sec.split("\n")[0].split("RTP/AVP", 1)[-1].split()
+for want in ("0", "8", "112", "113", "114"):
+    if want not in pts:
+        print(f"OFFER_MISSING={want}"); sys.exit(0)
+print("OFFER_OK=" + " ".join(pts))
+
+s.sendall(f"SETUP {base}/video RTSP/1.0\r\nCSeq: 2\r\n"
+          f"Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n".encode())
+vs, buf = rsp(s, buf)
+sid = next((l.split(":", 1)[1].split(";")[0].strip()
+            for l in vs.split("\r\n") if l.lower().startswith("session:")), "")
+s.sendall(f"SETUP {base}/backchannel RTSP/1.0\r\nCSeq: 3\r\nSession: {sid}\r\n"
+          f"Transport: RTP/AVP/TCP;unicast;interleaved=4-5\r\n{REQ}\r\n".encode())
+bs, buf = rsp(s, buf)
+if " 200 " not in bs.split("\r\n")[0]:
+    print("SETUP_FAILED"); sys.exit(0)
+s.sendall(f"PLAY {base} RTSP/1.0\r\nCSeq: 4\r\nSession: {sid}\r\nRange: npt=0.000-\r\n\r\n".encode())
+rsp(s, buf)
+
+# AAC AUs from ffmpeg (ADTS stripped): AAC-LC, ring rate, mono, the
+# exact stream the fmtp config advertises.
+aac_aus = []
+try:
+    adts = subprocess.run(
+        ["ffmpeg", "-v", "quiet", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+         "-ar", "16000", "-ac", "1", "-c:a", "aac", "-b:a", "24k", "-f", "adts", "-"],
+        capture_output=True, timeout=20).stdout
+    i = 0
+    while i + 7 <= len(adts) and len(aac_aus) < 12:
+        if adts[i] != 0xFF or (adts[i + 1] & 0xF0) != 0xF0:
+            break
+        flen = ((adts[i + 3] & 0x03) << 11) | (adts[i + 4] << 3) | (adts[i + 5] >> 5)
+        hdr = 7 if (adts[i + 1] & 0x01) else 9
+        if (adts[i + 2] >> 2) & 0xF == 8 and flen > hdr:
+            aac_aus.append(adts[i + hdr:i + flen])
+        i += flen
+except Exception:
+    aac_aus = []
+
+seq = 0
+ssrc = 0x22334455
+
+def send(pt, ts, payload):
+    global seq
+    rtp = struct.pack("!BBHII", 0x80, pt, seq & 0xFFFF, ts, ssrc) + payload
+    s.sendall(b"\x24" + struct.pack("!BH", 4, len(rtp)) + rtp)
+    seq += 1
+    time.sleep(0.005)
+
+ts = 0
+for _ in range(30):                      # PCMA, 20 ms @ 8 kHz
+    send(8, ts, b"\xd5" * 160); ts += 160
+print("SENT_PCMA=30")
+ts = 0
+for _ in range(30):                      # L16/16000, 10 ms
+    send(114, ts, struct.pack("!160h", *([1000] * 160))); ts += 160
+print("SENT_L16=30")
+ts = 0
+for _ in range(30):                      # opus: 1-byte TOC = 20 ms WB mono silence
+    send(112, ts, b"\x08"); ts += 960    # RFC 7587 clock is 48 kHz
+print("SENT_OPUS=30")
+if aac_aus:
+    ts = 0
+    for au in aac_aus:                   # AAC-hbr, one AU per packet
+        hbr = b"\x00\x10" + struct.pack("!H", len(au) << 3) + au
+        send(113, ts, hbr); ts += 1024
+    print(f"SENT_AAC={len(aac_aus)}")
+else:
+    print("AAC_SKIP")
+# rsd owes the sender a receiver report on the interleaved RTCP
+# channel (RFC 3550): scan the incoming stream for a PT 201 frame.
+s.settimeout(2.0)
+got = b""
+deadline = time.time() + 7.0
+while time.time() < deadline:
+    try:
+        d = s.recv(4096)
+    except socket.timeout:
+        continue
+    if not d:
+        break
+    got += d
+    # The socket multiplexes video frames with the RTCP channel, so a
+    # \x24\x05 byte pair can occur INSIDE video payload. Walk every
+    # candidate and demand it actually look like RTCP (version bits +
+    # sane frame length) -- a single find() sticks on the first false
+    # positive forever and never examines the real report behind it.
+    found = False
+    i = got.find(b"\x24\x05")
+    while i >= 0:
+        if len(got) >= i + 6:
+            flen = (got[i + 2] << 8) | got[i + 3]
+            if got[i + 5] == 201 and (got[i + 4] & 0xC0) == 0x80 and 8 <= flen <= 512:
+                found = True
+                break
+        i = got.find(b"\x24\x05", i + 1)
+    if found:
+        print("RR_TCP_OK")
+        break
+
+# The leave compound: TEARDOWN must be preceded on the wire by a BYE
+# for the reporter SSRC (same discipline as the sending tracks). The
+# stream also carries video frames, so a frame only counts when it
+# parses as a complete RTCP compound whose packets all bear RTCP PTs.
+def compound_has_bye(frame):
+    off, seen = 0, False
+    while off + 4 <= len(frame):
+        if (frame[off] >> 6) != 2 or frame[off + 1] not in (200, 201, 202, 203):
+            return False
+        if frame[off + 1] == 203:
+            seen = True
+        off += (((frame[off + 2] << 8) | frame[off + 3]) + 1) * 4
+    return seen and off == len(frame)
+
+s.sendall(f"TEARDOWN {base} RTSP/1.0\r\nCSeq: 5\r\nSession: {sid}\r\n\r\n".encode())
+got2 = got
+deadline = time.time() + 5.0
+bye_at = resp_at = -1
+while time.time() < deadline:
+    try:
+        d = s.recv(4096)
+    except socket.timeout:
+        break
+    if not d:
+        break
+    got2 += d
+    if bye_at < 0:
+        j = 0
+        while True:
+            j = got2.find(b"\x24\x05", j)
+            if j < 0 or len(got2) < j + 4:
+                break
+            ln = (got2[j + 2] << 8) | got2[j + 3]
+            if len(got2) >= j + 4 + ln and compound_has_bye(got2[j + 4:j + 4 + ln]):
+                bye_at = j
+                break
+            j += 2
+    resp_at = got2.rfind(b"RTSP/1.0 200")
+    if bye_at >= 0 and resp_at >= 0:
+        break
+if bye_at >= 0 and resp_at >= 0 and bye_at < resp_at:
+    print("BYE_TCP_OK")
+elif bye_at >= 0:
+    print("BYE_TCP_LATE")
+else:
+    print("BYE_TCP_MISSING")
+s.close()
+BC2_EOF
+BC2_PID=$!
+wait $BC2_PID 2>/dev/null
+BC2_OUT=$(cat "$LOG_DIR/backchannel-codecs.out" 2>/dev/null)
+
+echo "$BC2_OUT" | grep -q "OFFER_OK" \
+    && pass "backchannel offers PCMU/PCMA/opus/AAC/L16 ($(echo "$BC2_OUT" | sed -n 's/OFFER_OK=//p'))" \
+    || fail "backchannel multi-codec offer" "$(echo "$BC2_OUT" | head -1)"
+
+for codec in PCMA L16 opus; do
+    if grep -q "backchannel: receiving $codec" "$LOG_DIR/rsd.log"; then
+        pass "backchannel decodes $codec"
+    else
+        fail "backchannel $codec decode" "no 'receiving $codec' in rsd.log"
+    fi
+done
+if echo "$BC2_OUT" | grep -q "AAC_SKIP"; then
+    skip "backchannel AAC decode (ffmpeg produced no usable AUs)"
+elif grep -q "backchannel: receiving AAC" "$LOG_DIR/rsd.log"; then
+    pass "backchannel decodes AAC (real AUs via ffmpeg)"
+else
+    fail "backchannel AAC decode" "no 'receiving AAC' in rsd.log"
+fi
+
+echo "$BC2_OUT" | grep -q "RR_TCP_OK" \
+    && pass "backchannel receiver report arrives on the interleaved RTCP channel" \
+    || fail "backchannel TCP receiver report" "no PT 201 frame seen"
+
+echo "$BC2_OUT" | grep -q "BYE_TCP_OK" \
+    && pass "backchannel leave compound (RR+SDES+BYE) precedes the TEARDOWN 200" \
+    || fail "backchannel TEARDOWN BYE" "$(echo "$BC2_OUT" | grep BYE_TCP || echo none)"
+
+# ── Backchannel codec selection: config governs offer AND dispatch ──
+# set-backchannel-codecs is read per session, so the flip needs no
+# restart; the restricted server must shrink its m-line and treat a
+# disabled codec's packets exactly like a payload type it never
+# offered.
+check_contains "backchannel codec selection applies live" '"backchannel_codecs":"pcmu,l16"' \
+    "$OUT/raptorctl" rsd set-backchannel-codecs "pcmu,l16"
+check_contains "status names the restricted offer" '"backchannel_codecs":"pcmu,l16"' \
+    "$OUT/raptorctl" rsd status
+check_contains "unknown codec is refused by name" 'g729' \
+    "$OUT/raptorctl" rsd set-backchannel-codecs "pcmu,g729"
+BC4_OUT=$(python3 - <<'BC4_EOF'
+import socket, struct, sys, time
+
+def rsp(sock, buf):
+    while b"\r\n\r\n" not in buf[0]:
+        d = sock.recv(4096)
+        if not d:
+            return "", buf
+        buf[0] += d
+    head, _, rest = buf[0].partition(b"\r\n\r\n")
+    txt = head.decode(errors="replace")
+    clen = 0
+    for line in txt.split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            clen = int(line.split(":", 1)[1])
+    while len(rest) < clen:
+        rest += sock.recv(4096)
+    body, buf[0] = rest[:clen], rest[clen:]
+    return txt + "\r\n\r\n" + body.decode(errors="replace"), buf
+
+REQ = "Require: www.onvif.org/ver20/backchannel\r\n"
+base = "rtsp://127.0.0.1:15554/stream0"
+s = socket.create_connection(("127.0.0.1", 15554), timeout=10)
+buf = [b""]
+s.sendall(f"DESCRIBE {base} RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n{REQ}\r\n".encode())
+desc, buf = rsp(s, buf)
+bc_sec = next((sec for sec in desc.split("m=")[1:] if "a=sendonly" in sec), "")
+pts = bc_sec.split("\n")[0].split("RTP/AVP", 1)[-1].split()
+print("RESTRICTED_OFFER=" + " ".join(pts))
+if pts != ["0", "114"]:
+    sys.exit(0)
+if "rtpmap:112" in bc_sec or "rtpmap:113" in bc_sec or "rtpmap:8 " in bc_sec:
+    print("STRAY_RTPMAP"); sys.exit(0)
+
+s.sendall(f"SETUP {base}/video RTSP/1.0\r\nCSeq: 2\r\n"
+          f"Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n".encode())
+vs, buf = rsp(s, buf)
+sid = next((l.split(":", 1)[1].split(";")[0].strip()
+            for l in vs.split("\r\n") if l.lower().startswith("session:")), "")
+s.sendall(f"SETUP {base}/backchannel RTSP/1.0\r\nCSeq: 3\r\nSession: {sid}\r\n"
+          f"Transport: RTP/AVP/TCP;unicast;interleaved=4-5\r\n{REQ}\r\n".encode())
+rsp(s, buf)
+s.sendall(f"PLAY {base} RTSP/1.0\r\nCSeq: 4\r\nSession: {sid}\r\nRange: npt=0.000-\r\n\r\n".encode())
+rsp(s, buf)
+seq = 0
+for _ in range(20):  # PCMA against a pcmu,l16 offer: must be dropped
+    rtp = struct.pack("!BBHII", 0x80, 8, seq & 0xFFFF, seq * 160, 0x11223344) + b"\xd5" * 160
+    s.sendall(b"\x24" + struct.pack("!BH", 4, len(rtp)) + rtp)
+    seq += 1
+    time.sleep(0.005)
+print("DISABLED_SENT=20", flush=True)
+time.sleep(1.0)
+s.close()
+BC4_EOF
+)
+echo "$BC4_OUT" | grep -q "RESTRICTED_OFFER=0 114" \
+    && pass "restricted offer carries exactly the configured payload types" \
+    || fail "restricted backchannel offer" "$(echo "$BC4_OUT" | head -1)"
+if echo "$BC4_OUT" | grep -q "DISABLED_SENT=20" \
+   && grep -q "backchannel: dropping payload type 8" "$LOG_DIR/rsd.log"; then
+    pass "disabled codec's packets are dropped like a never-offered payload type"
+else
+    fail "disabled codec dispatch" "no 'dropping payload type 8' in rsd.log"
+fi
+check_contains "codec selection restores to the full offer" '"backchannel_codecs":"pcmu,pcma,opus,aac,l16"' \
+    "$OUT/raptorctl" rsd set-backchannel-codecs ""
+
+# ── RTSP option negotiation and SET_PARAMETER conformance ──
+# RFC 2326 §12.32: a Require tag the server cannot honor draws 551
+# naming the tags in Unsupported; §10.9: SET_PARAMETER with no body is
+# the standard keepalive, and parameters nobody understands draw 451.
+# The body case doubles as a framing check: its bytes must not desync
+# the connection for the request behind it.
+CONF_OUT=$(python3 - <<'CONF_EOF'
+import socket
+
+def txn(reqs):
+    s = socket.create_connection(("127.0.0.1", 15554), timeout=5)
+    out, buf = [], b""
+    for r in reqs:
+        s.sendall(r.encode())
+        while b"\r\n\r\n" not in buf:
+            d = s.recv(4096)
+            if not d:
+                break
+            buf += d
+        head, _, buf = buf.partition(b"\r\n\r\n")
+        out.append(head.decode(errors="replace"))
+    s.close()
+    return out
+
+base = "rtsp://127.0.0.1:15554/stream0"
+
+r = txn([f"DESCRIBE {base} RTSP/1.0\r\nCSeq: 1\r\n"
+         f"Require: org.example.fancy\r\n\r\n"])[0]
+print("R551=" + ("yes" if " 551 " in r.splitlines()[0]
+                 and "org.example.fancy" in r else "no"))
+
+r = txn([f"DESCRIBE {base} RTSP/1.0\r\nCSeq: 1\r\n"
+         f"Require: www.onvif.org/ver20/backchannel, org.example.fancy\r\n\r\n"])[0]
+uns = next((l for l in r.splitlines()
+            if l.lower().startswith("unsupported:")), "")
+print("RMIX=" + ("yes" if " 551 " in r.splitlines()[0]
+                 and "org.example.fancy" in uns
+                 and "backchannel" not in uns else "no"))
+
+r = txn([f"DESCRIBE {base} RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n"
+         f"Require: www.onvif.org/ver20/backchannel\r\n\r\n"])[0]
+print("ROK=" + ("yes" if " 200 " in r.splitlines()[0] else "no"))
+
+body = "p: v\r\n"
+rs = txn([
+    f"SET_PARAMETER {base} RTSP/1.0\r\nCSeq: 2\r\n\r\n",
+    f"SET_PARAMETER {base} RTSP/1.0\r\nCSeq: 3\r\n"
+    f"Content-Type: text/parameters\r\n"
+    f"Content-Length: {len(body)}\r\n\r\n{body}",
+    f"OPTIONS {base} RTSP/1.0\r\nCSeq: 4\r\n\r\n",
+])
+print("SPKEEP=" + ("yes" if len(rs) > 0 and " 200 " in rs[0].splitlines()[0] else "no"))
+print("SP451=" + ("yes" if len(rs) > 1 and " 451 " in rs[1].splitlines()[0] else "no"))
+print("SPBODY=" + ("yes" if len(rs) > 2 and " 200 " in rs[2].splitlines()[0]
+                   and "CSeq: 4" in rs[2] else "no"))
+
+# A Require list longer than the server's Unsupported scratch buffer:
+# the 551 must carry only whole tags the client actually sent (never
+# a length that outruns what was written), and the connection must
+# stay usable for the request behind it.
+tags = ["org.example.longlist%02d" % n for n in range(40)]
+rs = txn([f"DESCRIBE {base} RTSP/1.0\r\nCSeq: 5\r\n"
+          f"Require: {', '.join(tags)}\r\n\r\n",
+          f"OPTIONS {base} RTSP/1.0\r\nCSeq: 6\r\n\r\n"])
+uns = next((l for l in rs[0].splitlines()
+            if l.lower().startswith("unsupported:")), "")
+listed = [t.strip() for t in uns.split(":", 1)[1].split(",")] if uns else []
+print("RLONG=" + ("yes" if " 551 " in rs[0].splitlines()[0]
+                  and listed and all(t in tags for t in listed)
+                  and len(rs) > 1 and " 200 " in rs[1].splitlines()[0]
+                  and "CSeq: 6" in rs[1] else "no"))
+
+# A single tag longer than the buffer: the header names a prefix of it
+# rather than arriving empty or with stack garbage.
+giant = "org.example." + "x" * 400
+rs = txn([f"DESCRIBE {base} RTSP/1.0\r\nCSeq: 7\r\n"
+          f"Require: {giant}\r\n\r\n",
+          f"OPTIONS {base} RTSP/1.0\r\nCSeq: 8\r\n\r\n"])
+uns = next((l for l in rs[0].splitlines()
+            if l.lower().startswith("unsupported:")), "")
+val = uns.split(":", 1)[1].strip() if uns else ""
+print("RGIANT=" + ("yes" if " 551 " in rs[0].splitlines()[0]
+                   and val and giant.startswith(val)
+                   and len(rs) > 1 and " 200 " in rs[1].splitlines()[0] else "no"))
+CONF_EOF
+)
+echo "$CONF_OUT" | grep -q "R551=yes" \
+    && pass "unknown Require tag draws 551 with Unsupported naming it" \
+    || fail "Require 551" "$(echo "$CONF_OUT" | grep R551)"
+echo "$CONF_OUT" | grep -q "RMIX=yes" \
+    && pass "mixed Require list 551s naming only the stranger" \
+    || fail "Require mixed list" "$(echo "$CONF_OUT" | grep RMIX)"
+echo "$CONF_OUT" | grep -q "ROK=yes" \
+    && pass "the supported Require tag alone still serves" \
+    || fail "Require supported tag" "$(echo "$CONF_OUT" | grep ROK)"
+echo "$CONF_OUT" | grep -q "SPKEEP=yes" \
+    && pass "SET_PARAMETER keepalive answers 200" \
+    || fail "SET_PARAMETER keepalive" "$(echo "$CONF_OUT" | grep SPKEEP)"
+echo "$CONF_OUT" | grep -q "SP451=yes" \
+    && pass "SET_PARAMETER with a parameter draws 451" \
+    || fail "SET_PARAMETER 451" "$(echo "$CONF_OUT" | grep SP451)"
+echo "$CONF_OUT" | grep -q "SPBODY=yes" \
+    && pass "a request body does not desync the connection (CSeq echoes through)" \
+    || fail "body framing" "$(echo "$CONF_OUT" | grep SPBODY)"
+echo "$CONF_OUT" | grep -q "RLONG=yes" \
+    && pass "overlong Require list 551s with only whole client-sent tags" \
+    || fail "Require overlong list" "$(echo "$CONF_OUT" | grep RLONG)"
+echo "$CONF_OUT" | grep -q "RGIANT=yes" \
+    && pass "oversized single Require tag 551s naming a prefix of it" \
+    || fail "Require oversized tag" "$(echo "$CONF_OUT" | grep RGIANT)"
+
+# ── Backchannel over UDP: its own socket pair, actually read ──
+# Regression shape: the backchannel SETUP used to borrow the VIDEO
+# track's UDP fd slots, so with a video UDP SETUP in the same session
+# the backchannel audio landed on sockets nobody read. The write_seq
+# delta below is measured across ONLY this probe.
+BC3_BEFORE=$(timeout 5 "$OUT/ringdump" speaker 2>&1 |
+             sed -n 's/.*Write seq: *\([0-9]*\).*/\1/p' | head -1)
+python3 - > "$LOG_DIR/backchannel-udp.out" 2>&1 <<'BC3_EOF' &
+import socket, struct, sys, time
+
+def rsp(sock, buf):
+    while b"\r\n\r\n" not in buf[0]:
+        d = sock.recv(4096)
+        if not d:
+            return "", buf
+        buf[0] += d
+    head, _, rest = buf[0].partition(b"\r\n\r\n")
+    txt = head.decode(errors="replace")
+    clen = 0
+    for line in txt.split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            clen = int(line.split(":", 1)[1])
+    while len(rest) < clen:
+        rest += sock.recv(4096)
+    body, buf[0] = rest[:clen], rest[clen:]
+    return txt + "\r\n\r\n" + body.decode(errors="replace"), buf
+
+REQ = "Require: www.onvif.org/ver20/backchannel\r\n"
+base = "rtsp://127.0.0.1:15554/stream0"
+s = socket.create_connection(("127.0.0.1", 15554), timeout=10)
+buf = [b""]
+s.sendall(f"DESCRIBE {base} RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n{REQ}\r\n".encode())
+rsp(s, buf)
+
+def udp_pair():
+    a = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    b = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    a.bind(("127.0.0.1", 0)); b.bind(("127.0.0.1", 0))
+    return a, b, a.getsockname()[1], b.getsockname()[1]
+
+v_rtp, v_rtcp, vp1, vp2 = udp_pair()
+b_rtp, b_rtcp, bp1, bp2 = udp_pair()
+
+s.sendall(f"SETUP {base}/video RTSP/1.0\r\nCSeq: 2\r\n"
+          f"Transport: RTP/AVP;unicast;client_port={vp1}-{vp2}\r\n\r\n".encode())
+vs, buf = rsp(s, buf)
+if " 200 " not in vs.split("\r\n")[0]:
+    print("VIDEO_UDP_SETUP_FAILED"); sys.exit(0)
+sid = next((l.split(":", 1)[1].split(";")[0].strip()
+            for l in vs.split("\r\n") if l.lower().startswith("session:")), "")
+
+s.sendall(f"SETUP {base}/backchannel RTSP/1.0\r\nCSeq: 3\r\nSession: {sid}\r\n"
+          f"Transport: RTP/AVP;unicast;client_port={bp1}-{bp2}\r\n{REQ}\r\n".encode())
+bs, buf = rsp(s, buf)
+if " 200 " not in bs.split("\r\n")[0]:
+    print("BC_UDP_SETUP_FAILED"); sys.exit(0)
+srv_port = 0
+for line in bs.split("\r\n"):
+    if line.lower().startswith("transport:") and "server_port=" in line:
+        srv_port = int(line.split("server_port=")[1].split("-")[0].split(";")[0])
+if not srv_port:
+    print("NO_SERVER_PORT"); sys.exit(0)
+print(f"BC_UDP_SETUP_OK={srv_port}")
+
+s.sendall(f"PLAY {base} RTSP/1.0\r\nCSeq: 4\r\nSession: {sid}\r\nRange: npt=0.000-\r\n\r\n".encode())
+rsp(s, buf)
+
+seq = ts = 0
+for _ in range(30):
+    rtp = struct.pack("!BBHII", 0x80, 0, seq & 0xFFFF, ts, 0x778899AA) + b"\xff" * 160
+    b_rtp.sendto(rtp, ("127.0.0.1", srv_port))
+    seq += 1; ts += 160
+    time.sleep(0.005)
+print("UDP_SENT=30", flush=True)
+# The receiver report comes back on the backchannel RTCP pair.
+b_rtcp.settimeout(8.0)
+try:
+    rr, _ = b_rtcp.recvfrom(2048)
+    if len(rr) >= 8 and rr[1] == 201:
+        print("RR_UDP_OK")
+except socket.timeout:
+    pass
+time.sleep(2.0)
+s.close()
+BC3_EOF
+BC3_PID=$!
+BC3_SEQ=0
+for _ in $(seq 1 40); do
+    BC3_SEQ=$(timeout 5 "$OUT/ringdump" speaker 2>&1 |
+              sed -n 's/.*Write seq: *\([0-9]*\).*/\1/p' | head -1)
+    [ "${BC3_SEQ:-0}" -gt "${BC3_BEFORE:-0}" ] 2>/dev/null && break
+    sleep 0.25
+done
+wait $BC3_PID 2>/dev/null
+BC3_OUT=$(cat "$LOG_DIR/backchannel-udp.out" 2>/dev/null)
+
+echo "$BC3_OUT" | grep -q "BC_UDP_SETUP_OK" \
+    && pass "backchannel UDP SETUP gets its own server port" \
+    || fail "backchannel UDP SETUP" "$(echo "$BC3_OUT" | head -1)"
+
+if [ "${BC3_SEQ:-0}" -gt "${BC3_BEFORE:-0}" ] 2>/dev/null; then
+    pass "backchannel UDP audio reaches the speaker ring ($((BC3_SEQ - BC3_BEFORE)) frames, video UDP pair intact)"
+else
+    fail "backchannel UDP receive" "write_seq stuck at ${BC3_SEQ:-none} (before=${BC3_BEFORE:-none})"
+fi
+
+echo "$BC3_OUT" | grep -q "RR_UDP_OK" \
+    && pass "backchannel receiver report arrives on the UDP RTCP pair" \
+    || fail "backchannel UDP receiver report" "no PT 201 datagram on client rtcp port"
+
 # ── Producer restart under a lingering client ──
 # A playing client whose media goes unread (stalled player, dead NVR
 # that still ACKs) must not pin the ring reader to a dead producer's
@@ -1190,6 +1947,211 @@ if [ "$KEEP" = "1" ]; then
     echo "  RSD: rtsp://127.0.0.1:15554/stream0"
     echo "  raptorctl: $OUT/raptorctl"
     wait
+fi
+
+# ── A geometry change drops the clients holding the old SDP ──
+# The picture size is answered in the SDP -- the SPS rides in
+# sprop-parameter-sets and carries the dimensions -- and RTSP cannot
+# renegotiate it mid-session, so a client left in place is told one size
+# while being sent another. rvd reuses the ring across an encoder restart
+# and rewrites its stream info in place: nothing is closed, nothing is
+# reopened, and no reconnect event carries the news, so the reader has to
+# see it on the live header. A rate change in the same session is the
+# control: a framerate is advisory, and refreshing it must disconnect
+# nobody. Runs late, beside the recovery legs, because set-resolution
+# rebuilds the encoder and the legs above are entitled to a stream that
+# has not been restarted under them.
+GEO_OUT=$(python3 - "$OUT/raptorctl" <<'GEO_EOF'
+import socket, subprocess, sys, time
+
+def req(sock, buf, method, url, cseq, extra=""):
+    sock.sendall(f"{method} {url} RTSP/1.0\r\nCSeq: {cseq}\r\n{extra}\r\n".encode())
+    while b"\r\n\r\n" not in buf[0]:
+        d = sock.recv(4096)
+        if not d:
+            return ""
+        buf[0] += d
+    head, _, rest = buf[0].partition(b"\r\n\r\n")
+    headers = head.decode(errors="replace")
+    clen = 0
+    for line in headers.split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            clen = int(line.split(":", 1)[1])
+    while len(rest) < clen:
+        rest += sock.recv(4096)
+    buf[0] = rest[clen:]
+    return headers
+
+def ctl(*args):
+    r = subprocess.run([sys.argv[1]] + list(args), capture_output=True,
+                       text=True, timeout=20)
+    return r.stdout
+
+def media(sock, seconds):
+    """Interleaved bytes read inside the window, or None once the server closes."""
+    end = time.time() + seconds
+    got = 0
+    while True:
+        left = end - time.time()
+        if left <= 0:
+            return got
+        sock.settimeout(left)
+        try:
+            d = sock.recv(65536)
+        except socket.timeout:
+            return got
+        if not d:
+            return None
+        got += len(d)
+
+base = "rtsp://127.0.0.1:15554/stream0"
+s = socket.create_connection(("127.0.0.1", 15554), timeout=5)
+buf = [b""]
+req(s, buf, "DESCRIBE", base, 1, "Accept: application/sdp\r\n")
+setup = req(s, buf, "SETUP", base + "/video", 2,
+            "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n")
+sid = ""
+for line in setup.split("\r\n"):
+    if line.lower().startswith("session:"):
+        sid = line.split(":", 1)[1].split(";")[0].strip()
+sess = f"Session: {sid}\r\n"
+play = req(s, buf, "PLAY", base, 3, sess + "Range: npt=0.000-\r\n")
+if " 200 " not in play.split("\r\n")[0] + " ":
+    print("PLAY_FAILED")
+    sys.exit(0)
+if not media(s, 3.0):
+    print("NO_MEDIA")
+    sys.exit(0)
+
+# Control: the rate is a cache refresh, and every client plays on.
+ctl("rvd", "set-fps", "0", "12")
+print("FPS_KEPT=" + ("1" if media(s, 3.0) else "0"))
+ctl("rvd", "set-fps", "0", "25")
+
+res = ctl("rvd", "set-resolution", "0", "1280", "720")
+print("SETRES_OK=" + ("1" if '"ok"' in res else "0"))
+print("DROPPED=" + ("1" if media(s, 10.0) is None else "0"))
+s.close()
+
+# Hand the following legs back the geometry they had, and prove the
+# server survived the disconnect it just made.
+ctl("rvd", "set-resolution", "0", "1920", "1080")
+time.sleep(2)
+s2 = socket.create_connection(("127.0.0.1", 15554), timeout=5)
+alive = req(s2, [b""], "DESCRIBE", base, 1, "Accept: application/sdp\r\n")
+print("ALIVE=" + ("1" if " 200 " in alive.split("\r\n")[0] + " " else "0"))
+s2.close()
+GEO_EOF
+)
+if echo "$GEO_OUT" | grep -qE "PLAY_FAILED|NO_MEDIA"; then
+    skip "resolution change disconnects the stream's clients" \
+        "no playing session to test ($GEO_OUT)"
+elif echo "$GEO_OUT" | grep -q "SETRES_OK=0"; then
+    skip "resolution change disconnects the stream's clients" "set-resolution was refused"
+else
+    if echo "$GEO_OUT" | grep -q "FPS_KEPT=1"; then
+        pass "a rate change leaves playing clients alone"
+    else
+        fail "a rate change leaves playing clients alone" \
+            "the client stopped receiving after set-fps"
+    fi
+    if echo "$GEO_OUT" | grep -q "DROPPED=1"; then
+        pass "resolution change disconnects the stream's clients"
+    else
+        fail "resolution change disconnects the stream's clients" \
+            "still connected 10s after set-resolution"
+    fi
+    if echo "$GEO_OUT" | grep -q "ALIVE=1"; then
+        pass "rsd answers DESCRIBE after dropping a client"
+    else
+        fail "rsd answers DESCRIBE after dropping a client" "$GEO_OUT"
+    fi
+fi
+
+# ── A PAUSEd client holds the stale SDP too ──
+# PAUSE keeps the session and its negotiated SDP; a geometry change
+# while paused would otherwise resume the client straight onto frames
+# its SDP does not describe. The drop must reach everyone with a SETUP
+# transport, playing or not.
+PAUSE_OUT=$(python3 - "$OUT/raptorctl" <<'PAUSE_EOF'
+import socket, subprocess, sys, time
+
+def req(sock, buf, method, url, cseq, extra=""):
+    sock.sendall(f"{method} {url} RTSP/1.0\r\nCSeq: {cseq}\r\n{extra}\r\n".encode())
+    while b"\r\n\r\n" not in buf[0]:
+        d = sock.recv(4096)
+        if not d:
+            return ""
+        buf[0] += d
+    head, _, rest = buf[0].partition(b"\r\n\r\n")
+    headers = head.decode(errors="replace")
+    clen = 0
+    for line in headers.split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            clen = int(line.split(":", 1)[1])
+    while len(rest) < clen:
+        rest += sock.recv(4096)
+    buf[0] = rest[clen:]
+    return headers
+
+def ctl(*args):
+    r = subprocess.run([sys.argv[1]] + list(args), capture_output=True,
+                       text=True, timeout=20)
+    return r.stdout
+
+def eof_within(sock, seconds):
+    """True once the server closes; drains interleaved bytes meanwhile."""
+    end = time.time() + seconds
+    while True:
+        left = end - time.time()
+        if left <= 0:
+            return False
+        sock.settimeout(left)
+        try:
+            d = sock.recv(65536)
+        except socket.timeout:
+            return False
+        if not d:
+            return True
+
+base = "rtsp://127.0.0.1:15554/stream0"
+s = socket.create_connection(("127.0.0.1", 15554), timeout=5)
+buf = [b""]
+req(s, buf, "DESCRIBE", base, 1, "Accept: application/sdp\r\n")
+setup = req(s, buf, "SETUP", base + "/video", 2,
+            "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n")
+sid = ""
+for line in setup.split("\r\n"):
+    if line.lower().startswith("session:"):
+        sid = line.split(":", 1)[1].split(";")[0].strip()
+sess = f"Session: {sid}\r\n"
+play = req(s, buf, "PLAY", base, 3, sess + "Range: npt=0.000-\r\n")
+if " 200 " not in play.split("\r\n")[0] + " ":
+    print("PLAY_FAILED")
+    sys.exit(0)
+time.sleep(1.5)
+pause = req(s, buf, "PAUSE", base, 4, sess)
+if " 200 " not in pause.split("\r\n")[0] + " ":
+    print("PAUSE_FAILED")
+    sys.exit(0)
+
+res = ctl("rvd", "set-resolution", "0", "1280", "720")
+print("SETRES_OK=" + ("1" if '"ok"' in res else "0"))
+print("PAUSED_DROPPED=" + ("1" if eof_within(s, 10.0) else "0"))
+s.close()
+ctl("rvd", "set-resolution", "0", "1920", "1080")
+time.sleep(2)
+PAUSE_EOF
+)
+if echo "$PAUSE_OUT" | grep -qE "PLAY_FAILED|PAUSE_FAILED"; then
+    skip "geometry change drops a PAUSEd client" "no paused session to test ($PAUSE_OUT)"
+elif echo "$PAUSE_OUT" | grep -q "SETRES_OK=0"; then
+    skip "geometry change drops a PAUSEd client" "set-resolution was refused"
+elif echo "$PAUSE_OUT" | grep -q "PAUSED_DROPPED=1"; then
+    pass "geometry change drops a PAUSEd client"
+else
+    fail "geometry change drops a PAUSEd client" \
+        "paused client still connected 10s after set-resolution"
 fi
 
 # ── Recovery invariants: RTP through disturbances ──

@@ -42,6 +42,16 @@ static rsd_client_t *find_client_by_rtcp_fd(rsd_server_t *srv, int fd)
 	return NULL;
 }
 
+static rsd_client_t *find_client_by_bc_fd(rsd_server_t *srv, int fd)
+{
+	for (int i = 0; i < srv->client_count; i++) {
+		rsd_client_t *c = srv->clients[i];
+		if (c && (c->bc_udp_rtp_fd == fd || c->bc_udp_rtcp_fd == fd))
+			return c;
+	}
+	return NULL;
+}
+
 static void remove_client(rsd_server_t *srv, rsd_client_t *client)
 {
 	if (!client)
@@ -125,8 +135,14 @@ static void remove_client(rsd_server_t *srv, rsd_client_t *client)
 		VCALL(DYN(Compy_Backchannel, Compy_Droppable, client->backchannel), drop);
 		client->backchannel = NULL;
 	}
+	if (client->bc_recv)
+		rsd_bc_dec_deinit(&client->bc_recv->dec);
 	free(client->bc_recv);
 	client->bc_recv = NULL;
+	if (client->bc_has_rtcp_t) {
+		VCALL_SUPER(client->bc_rtcp_t, Compy_Droppable, drop);
+		client->bc_has_rtcp_t = false;
+	}
 	if (client->speaker_ring) {
 		rss_ring_destroy(client->speaker_ring);
 		client->speaker_ring = NULL;
@@ -146,6 +162,16 @@ static void remove_client(rsd_server_t *srv, rsd_client_t *client)
 		if (client->audio_rtcp_in_epoll)
 			epoll_ctl(srv->epoll_fd, EPOLL_CTL_DEL, client->audio_udp_rtcp_fd, NULL);
 		close(client->audio_udp_rtcp_fd);
+	}
+	if (client->bc_udp_rtp_fd >= 0) {
+		if (client->bc_rtp_in_epoll)
+			epoll_ctl(srv->epoll_fd, EPOLL_CTL_DEL, client->bc_udp_rtp_fd, NULL);
+		close(client->bc_udp_rtp_fd);
+	}
+	if (client->bc_udp_rtcp_fd >= 0) {
+		if (client->bc_rtcp_in_epoll)
+			epoll_ctl(srv->epoll_fd, EPOLL_CTL_DEL, client->bc_udp_rtcp_fd, NULL);
+		close(client->bc_udp_rtcp_fd);
 	}
 
 	/* TLS shutdown and cleanup */
@@ -193,6 +219,8 @@ static void accept_client(rsd_server_t *srv)
 	client->udp_rtcp_fd = -1;
 	client->audio_udp_rtp_fd = -1;
 	client->audio_udp_rtcp_fd = -1;
+	client->bc_udp_rtp_fd = -1;
+	client->bc_udp_rtcp_fd = -1;
 	client->video_rtcp_ch = 0xFF; /* invalid until SETUP sets it */
 	client->audio_rtcp_ch = 0xFF;
 
@@ -552,7 +580,23 @@ static int rsd_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 			cJSON_AddStringToObject(item, "transport", c->is_tcp ? "tcp" : "udp");
 			cJSON_AddBoolToObject(item, "video", c->video.playing);
 			cJSON_AddBoolToObject(item, "audio", c->audio.playing);
-			cJSON_AddBoolToObject(item, "backchannel", c->backchannel != NULL);
+			/* The client picks its backchannel codec by sending
+			 * it, so the decoder's last accepted PT is the only
+			 * truthful answer to "which one is in use". */
+			if (c->backchannel && c->bc_recv) {
+				cJSON *bc = cJSON_CreateObject();
+				if (c->bc_recv->dec.have_pt)
+					cJSON_AddStringToObject(
+						bc, "codec",
+						rsd_bc_pt_name(c->bc_recv->dec.last_pt));
+				else
+					cJSON_AddNullToObject(bc, "codec");
+				cJSON_AddNumberToObject(bc, "unknown_dropped",
+							c->bc_recv->dec.unknown_pt_count);
+				cJSON_AddItemToObject(item, "backchannel", bc);
+			} else {
+				cJSON_AddBoolToObject(item, "backchannel", false);
+			}
 			/* Include RTCP RR stats if available */
 			const Compy_RtcpReportBlock *rr = NULL;
 			if (c->video.rtcp)
@@ -569,6 +613,39 @@ static int rsd_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 		return rss_ctrl_resp_json(resp_buf, resp_buf_size, r);
 	}
 
+	if (strcmp(cmd, "set-backchannel-codecs") == 0) {
+		char val[96];
+		if (rss_json_get_str(cmd_json, "value", val, sizeof(val)) != 0)
+			return rss_ctrl_resp_error(resp_buf, resp_buf_size,
+						   "need value, e.g. pcmu,opus (empty = all)");
+		char unknown[24];
+		uint32_t req = rsd_bc_codecs_parse(val, unknown, sizeof(unknown));
+		if (unknown[0]) {
+			char err[96];
+			snprintf(err, sizeof(err),
+				 "unknown codec \"%s\" (know: pcmu,pcma,opus,aac,l16)", unknown);
+			return rss_ctrl_resp_error(resp_buf, resp_buf_size, err);
+		}
+		if (val[0] && !(req & rsd_bc_codecs_available()))
+			return rss_ctrl_resp_error(resp_buf, resp_buf_size,
+						   "none of those codecs are in this build");
+		uint32_t eff = rsd_bc_codecs_effective(req);
+		/* The offer and dispatch read the config per session, so
+		 * this applies to the next SETUP without a restart;
+		 * connected backchannels keep the offer they negotiated. */
+		rss_config_set_str(srv->cfg, "rtsp", "backchannel_codecs", val);
+		char names[48];
+		rsd_bc_codec_names(eff, names, sizeof(names));
+		if (!(eff & RSD_BC_CODEC_PCMU))
+			RSS_WARN("backchannel_codecs excludes PCMU, the ONVIF Profile T "
+				 "baseline -- conforming ONVIF clients may fail to talk back");
+		RSS_INFO("backchannel codecs set to %s", names);
+		cJSON *r = cJSON_CreateObject();
+		cJSON_AddStringToObject(r, "status", "ok");
+		cJSON_AddStringToObject(r, "backchannel_codecs", names);
+		return rss_ctrl_resp_json(resp_buf, resp_buf_size, r);
+	}
+
 	/* Default: status */
 	cJSON *r = cJSON_CreateObject();
 	cJSON_AddStringToObject(r, "status", "ok");
@@ -579,6 +656,12 @@ static int rsd_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 #else
 	cJSON_AddBoolToObject(r, "tls", false);
 #endif
+	{
+		char names[48];
+		cJSON_AddStringToObject(
+			r, "backchannel_codecs",
+			rsd_bc_codec_names(rsd_bc_enabled_mask(srv->cfg), names, sizeof(names)));
+	}
 	return rss_ctrl_resp_json(resp_buf, resp_buf_size, r);
 }
 
@@ -624,6 +707,30 @@ void rsd_server_run(rsd_server_t *srv)
 			} else if (fd == ctrl_fd) {
 				rss_ctrl_accept_and_handle(srv->ctrl, rsd_ctrl_handler, srv);
 			} else {
+				/* Backchannel UDP: both fds of the pair are
+				 * receive paths into the compy demuxer. */
+				rsd_client_t *bc = find_client_by_bc_fd(srv, fd);
+				if (bc) {
+					uint8_t ch = (fd == bc->bc_udp_rtcp_fd) ? COMPY_CHANNEL_RTCP
+										: COMPY_CHANNEL_RTP;
+					uint8_t pkt[2048];
+					ssize_t rn;
+					while ((rn = recv(fd, pkt, sizeof(pkt), 0)) > 0) {
+						if (bc->backchannel) {
+							Compy_RtpReceiver *rcv =
+								Compy_Backchannel_get_receiver(
+									bc->backchannel);
+							if (rcv)
+								Compy_RtpReceiver_feed_at(
+									rcv, ch, pkt, (size_t)rn,
+									rss_timestamp_us());
+						}
+						/* A talking client is alive even
+						 * if it never PLAYs. */
+						bc->last_activity = rss_timestamp_us();
+					}
+					continue;
+				}
 				/* Check if this is a UDP RTCP fd */
 				rsd_client_t *rc = find_client_by_rtcp_fd(srv, fd);
 				if (rc) {
@@ -669,6 +776,52 @@ void rsd_server_run(rsd_server_t *srv)
 					      &rtcp_ev) == 0)
 					c->audio_rtcp_in_epoll = true;
 			}
+			if (c && c->bc_udp_rtp_fd >= 0 && !c->bc_rtp_in_epoll) {
+				fcntl(c->bc_udp_rtp_fd, F_SETFL,
+				      fcntl(c->bc_udp_rtp_fd, F_GETFL) | O_NONBLOCK);
+				struct epoll_event bc_ev = {.events = EPOLLIN,
+							    .data.fd = c->bc_udp_rtp_fd};
+				if (epoll_ctl(srv->epoll_fd, EPOLL_CTL_ADD, c->bc_udp_rtp_fd,
+					      &bc_ev) == 0)
+					c->bc_rtp_in_epoll = true;
+			}
+			if (c && c->bc_udp_rtcp_fd >= 0 && !c->bc_rtcp_in_epoll) {
+				fcntl(c->bc_udp_rtcp_fd, F_SETFL,
+				      fcntl(c->bc_udp_rtcp_fd, F_GETFL) | O_NONBLOCK);
+				struct epoll_event bc_ev = {.events = EPOLLIN,
+							    .data.fd = c->bc_udp_rtcp_fd};
+				if (epoll_ctl(srv->epoll_fd, EPOLL_CTL_ADD, c->bc_udp_rtcp_fd,
+					      &bc_ev) == 0)
+					c->bc_rtcp_in_epoll = true;
+			}
+		}
+
+		/* Receiver reports for backchannel audio (RFC 3550 §6.4.2),
+		 * on the SR cadence. The client is the sender on that track,
+		 * so the reporting duty lands here; the write_lock is the
+		 * same discipline every RTCP send on the connection takes. */
+		int64_t rr_now = rss_timestamp_us();
+		for (int i = 0; i < srv->client_count; i++) {
+			rsd_client_t *c = srv->clients[i];
+			if (!c || !c->backchannel || !c->bc_has_rtcp_t)
+				continue;
+			if (rr_now - c->bc_last_rr < RSD_SR_INTERVAL_US)
+				continue;
+			c->bc_last_rr = rr_now;
+			Compy_RtpReceiver *rcv = Compy_Backchannel_get_receiver(c->backchannel);
+			if (!rcv)
+				continue;
+			uint8_t rr_buf[96];
+			ssize_t rr_len = Compy_RtpReceiver_write_rr(
+				rcv, RSD_BC_REPORTER_SSRC(c->session_id), rr_now, RSD_BC_CNAME,
+				rr_buf, sizeof(rr_buf));
+			if (rr_len <= 0)
+				continue; /* nothing received yet */
+			struct iovec rr_iov[1] = {{.iov_base = rr_buf, .iov_len = (size_t)rr_len}};
+			pthread_mutex_lock(&c->write_lock);
+			VCALL(c->bc_rtcp_t, transmit,
+			      (Compy_IoVecSlice)Slice99_typed_from_array(rr_iov));
+			pthread_mutex_unlock(&c->write_lock);
 		}
 
 		/* Idle timeout sweep — disconnect clients with no activity.
@@ -685,7 +838,8 @@ void rsd_server_run(rsd_server_t *srv)
 			if (!c)
 				continue;
 			bool playing = c->video.playing || c->audio.playing;
-			bool udp_media = c->udp_rtp_fd >= 0 || c->audio_udp_rtp_fd >= 0;
+			bool udp_media = c->udp_rtp_fd >= 0 || c->audio_udp_rtp_fd >= 0 ||
+					 c->bc_udp_rtp_fd >= 0;
 			if ((!playing || udp_media) && (now - c->last_activity) > timeout_us) {
 				char addr[INET6_ADDRSTRLEN];
 				RSS_WARN("idle timeout: %s:%u (%ds)",

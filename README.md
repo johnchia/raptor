@@ -75,7 +75,7 @@ buffers at runtime, gracefully skipping any that don't exist.
    |     \            +--> [RMR] fragmented MP4 recording + timelapse
    |      \           +--> [RWD] WebRTC/WHIP server (DTLS-SRTP)
    |       \          +--> [RWC] USB webcam (UVC + UAC1)
-   |       \          +--> [RSP] RTMP/RTMPS push (YouTube, Twitch)
+   |       \          +--> [RSP] RTMP/RTMPS + RTP/UDP push
    |       \          +--> [RSR] SRT listener (MPEG-TS)
    |        `--osd shm <-- [ROD] OSD text / logo renderer
    |        `--ivs ------> [RMD] motion detection → triggers RMR
@@ -90,8 +90,8 @@ buffers at runtime, gracefully skipping any that don't exist.
 | Name | Binary | Description |
 |------|--------|-------------|
 | RVD  | `rvd`  | Raw Video Daemon. Initializes HAL, configures sensor and encoder channels, creates SHM ring buffers (`main`, `sub`, `jpeg0`, `jpeg1`), and runs the frame acquisition loop. Exposes ISP controls and encoder tuning via its control socket. |
-| RSD  | `rsd`  | RTSP Streaming Daemon. Serves RTSP/RTSPS (Digest auth, TLS via mbedTLS) from the video/audio rings using compy; video+audio, video-only, or audio-only sessions, with audio interleaved during IDR delivery so large keyframes never starve it. Optional per-frame MISB ST 0604 UTC timecode SEI, MJPEG endpoints (`/jpeg`, `/jpeg_sub`), and ONVIF Profile T audio backchannel into the `speaker` ring. |
-| RSD-555 | `rsd-555` | Alternative RTSP server built on live555, statically linked. Same `[rtsp]` config (port override via `[rtsp-555]`), H.264/H.265 plus all five audio codecs, per-client refcounted fan-out. Runs alongside or instead of RSD. Not enabled by default; see the note below the table. |
+| RSD  | `rsd`  | RTSP Streaming Daemon. Serves RTSP/RTSPS (Digest auth, TLS via mbedTLS) from the video/audio rings using compy; video+audio, video-only, or audio-only sessions, with audio interleaved during IDR delivery so large keyframes never starve it. Optional per-frame MISB ST 0604 UTC timecode SEI, MJPEG endpoints (`/jpeg`, `/jpeg_sub`), and an ONVIF Profile T audio backchannel into the `speaker` ring: PCMU, PCMA, opus, AAC or L16 over TCP or UDP (the client picks by sending; `backchannel_codecs` restricts the offer), answered with RTCP receiver reports and a leave BYE. |
+| RSD-555 | `rsd-555` | Alternative RTSP server built on live555, statically linked. Same `[rtsp]` config (port override via `[rtsp-555]`), H.264/H.265 plus all five audio codecs, per-client refcounted fan-out; its backchannel stays deliberately PCMU-only (the ONVIF baseline). Runs alongside or instead of RSD. Not enabled by default; see the note below the table. |
 | RAD  | `rad`  | Raw Audio Daemon. Captures PCM, encodes through pluggable codecs (G.711 mu/A-law, L16, AAC, Opus) into the `audio` ring, and drives speaker output from the `speaker` ring. Optional noise suppression, HPF, AGC. A new codec is one source file. |
 | ROD  | `rod`  | OSD Rendering Daemon. Renders timestamp, uptime, user text, and logo bitmaps into BGRA SHM double-buffers using libschrift. No HAL dependency -- RVD handles the hardware OSD regions. |
 | RHD  | `rhd`  | HTTP Streaming Daemon. JPEG snapshots (`/snap`), MJPEG (`/mjpeg`), and audio (`/audio`) straight from the rings, with proper container framing (WAV, ADTS, Ogg). Dual-stack IPv4/IPv6, Basic auth, optional HTTPS. Optional EXIF capture times and Ed25519-signed snapshots. |
@@ -101,7 +101,7 @@ buffers at runtime, gracefully skipping any that don't exist.
 | RWD  | `rwd`  | WebRTC Daemon. Live H.264 + Opus to browsers and go2rtc via WHIP with sub-second latency: ICE-lite, DTLS-SRTP, two-way audio (browser mic to camera speaker). Embedded player at `/webrtc`; optional WebTorrent sharing for external viewing without port forwarding. |
 | RWC  | `rwc`  | USB Webcam Daemon. Presents the camera as a standard UVC + UAC1 USB webcam (MJPEG or H.264 at 1080p/720p/360p, 16kHz mono mic) through the kernel gadget. Bulk video endpoint, so it works through USB hubs. |
 | RFS  | `rfs`  | File Source Daemon. Plays MP4/MOV or raw Annex B H.264/H.265 files into the rings at real-time rate, replacing RVD+RAD where there is no ISP (A1, x86 testing). Zero-copy MP4 demux, B-frame reorder, audio passthrough or transcode. Pause/resume/seek via control socket. |
-| RSP  | `rsp`  | Stream Push Daemon. Pushes video + audio to RTMP/RTMPS endpoints (YouTube Live, Twitch, custom) with its own RTMP client; H.264 via standard FLV, H.265 via Enhanced RTMP FourCC. Ring audio is transcoded to AAC-LC as needed, native AAC passes through. Auto-reconnect with backoff. |
+| RSP  | `rsp`  | Stream Push Daemon. Pushes video + audio to RTMP/RTMPS endpoints (YouTube Live, Twitch, custom) with its own RTMP client; H.264 via standard FLV, H.265 via Enhanced RTMP FourCC. Ring audio is transcoded to AAC-LC as needed, native AAC passes through. Auto-reconnect with backoff. `udp://host:port` instead sends video as raw RTP datagrams with no session, for relays and custom receivers; never queues, drops instead, so the receiver always holds the freshest frame. |
 | RSR  | `rsr`  | SRT Listener Daemon. Live video + audio as MPEG-TS over SRT: multi-client, stream selection via STREAMID, AES encryption. Audio must be AAC or Opus (G.711/L16 do not exist in MPEG-TS). Works with ffplay, VLC, OBS, go2rtc, and SRT-capable NVRs. |
 
 Feature-to-build-flag mapping (`TLS=1`, `AAC=1`, `OPUS=1`, `WEBTORRENT=1`) is
@@ -228,6 +228,33 @@ first (it creates the rings), then the rest; each daemon checks its own
 `enabled` config flag and exits cleanly if disabled.
 
 ## Configuration
+
+### Standalone V4L2 video
+
+RVD can use a public capture node instead of owning the private IMP frame
+graph:
+
+```ini
+[system]
+video_backend = v4l2
+video_device = /dev/video0
+```
+
+Build Raptor with `V4L2_OPENIMP=1`; selecting this backend without that build
+option fails explicitly while the default IMP backend remains available.
+
+The initial backend is deliberately narrow: one H.264 main stream, NV12 MMAP
+capture exported as DMA-BUF, and zero-copy submission to OpenIMP AVC. It does
+not create sub/JPEG/OSD/IVS channels. Runtime IDR requests and read-only stream
+configuration queries are supported; encoder reconfiguration and ISP effects
+return an explicit unsupported response. A separate ISP tuning service owns
+image policy so capture, encoding, and creative profiles have independent
+lifecycles.
+
+This first tranche is scaffolding around the existing IMP-shaped pipeline.
+The follow-up backend work will move V4L2 behind dedicated HAL operations and
+advertise its smaller surface through `get_caps`, instead of growing the
+temporary `v4l2_backend` branches as RVD evolves.
 
 All daemons share a single INI-style config file: `/etc/raptor.conf`.
 See [raptor-docs/23-rss-config.md](https://github.com/gtxaspec/raptor-docs/blob/main/23-rss-config.md)

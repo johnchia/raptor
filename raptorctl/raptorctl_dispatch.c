@@ -153,6 +153,10 @@ static const struct cmd_def cmd_table[] = {
 	{"set-bitrate", NULL, 2, args_ch_val},
 	{"set-gop", NULL, 2, args_ch_val},
 	{"set-fps", NULL, 2, args_ch_val},
+
+	/* Sensor rate: transient override, whole pipeline (0 = base) */
+	{"set-sensor-fps", NULL, 1, args_val},
+	{"get-sensor-fps", NULL, 0, args_none},
 	{"timelapse-set", NULL, 2, args_key_val},
 	{"set-h264-trans", NULL, 2, args_ch_val},
 
@@ -232,6 +236,7 @@ static const struct cmd_def cmd_table[] = {
 	{"set-stroke-size", NULL, 1, args_val},
 	{"set-time-format", NULL, 1, args_val_str},
 	{"set-url", NULL, 1, args_val_str},
+	{"set-backchannel-codecs", NULL, 1, args_val_str},
 	{"set-position", NULL, 2, args_position},
 	{"remove-element", NULL, 1, args_name},
 	{"show-element", NULL, 1, args_name},
@@ -369,7 +374,10 @@ static int handle_enc_list(const char *daemon, int argc, char **argv)
 		jadd_i(j, "channel", argv[3]);
 		jstr(j, cmd_json, sizeof(cmd_json));
 	} else {
-		snprintf(cmd_json, sizeof(cmd_json), "{\"cmd\":\"enc-list\"}");
+		cJSON *j = jcmd("enc-list");
+		if (!j)
+			return 1;
+		jstr(j, cmd_json, sizeof(cmd_json));
 	}
 
 	char resp[4096];

@@ -154,6 +154,18 @@ static int publish_pcm(rss_ring_t *ring, rac_pacer_t *pacer, const int16_t *pcm,
 }
 #endif
 
+/* Ask RAD to drain the hardware pipeline: it consumes the ring tail and
+ * blocks until the last sample has played (IMP_AO_FlushChnBuf), which is
+ * what prevents end-of-playback cutoff. Falls back to a fixed sleep when
+ * RAD is unreachable or answers with an error. */
+static void rad_drain_or_sleep(void)
+{
+	char resp[128];
+	int r = rss_ctrl_cmd(RSS_RUN_DIR "/rad.sock", "ao-drain", resp, sizeof(resp), 4000);
+	if (r <= 0 || !rss_ctrl_resp_is_ok(resp))
+		usleep(100000);
+}
+
 /* ── Play: decode and write PCM16 to speaker ring ── */
 
 int cmd_play(const char *src, int sample_rate)
@@ -192,8 +204,7 @@ int cmd_play(const char *src, int sample_rate)
 	/* Tell RAD to flush stale hardware audio and prepare for new playback */
 	{
 		char resp[256];
-		rss_ctrl_send_command(RSS_RUN_DIR "/rad.sock", "{\"cmd\":\"ao-flush\"}", resp,
-				      sizeof(resp), 500);
+		rss_ctrl_cmd(RSS_RUN_DIR "/rad.sock", "ao-flush", resp, sizeof(resp), 500);
 	}
 
 	/* Create speaker ring */
@@ -567,17 +578,7 @@ int cmd_play(const char *src, int sample_rate)
 	}
 
 done:
-	/* Ask RAD to drain: it consumes the ring tail and blocks until the
-	 * hardware has played the last sample (IMP_AO_FlushChnBuf), which is
-	 * what prevents end-of-playback cutoff. Fall back to a fixed sleep
-	 * when RAD is unreachable, then destroy so it reconnects next time. */
-	{
-		char resp[128];
-		int r = rss_ctrl_send_command(RSS_RUN_DIR "/rad.sock", "{\"cmd\":\"ao-drain\"}",
-					      resp, sizeof(resp), 4000);
-		if (r <= 0 || !strstr(resp, "\"status\":\"ok\""))
-			usleep(100000);
-	}
+	rad_drain_or_sleep();
 	rss_ring_destroy(ring);
 	if (!is_stdin)
 		fclose(in);
@@ -608,8 +609,7 @@ int cmd_beep(int freq_hz, int duration_ms, int sample_rate)
 	 * speaker ring, give the AO thread a moment to attach. */
 	{
 		char resp[256];
-		rss_ctrl_send_command(RSS_RUN_DIR "/rad.sock", "{\"cmd\":\"ao-flush\"}", resp,
-				      sizeof(resp), 500);
+		rss_ctrl_cmd(RSS_RUN_DIR "/rad.sock", "ao-flush", resp, sizeof(resp), 500);
 	}
 	rss_ring_t *ring = rss_ring_create("speaker", 16, 64 * 1024);
 	if (!ring) {
@@ -664,15 +664,7 @@ int cmd_beep(int freq_hz, int duration_ms, int sample_rate)
 	}
 	free(buf);
 
-	/* Same epilogue as playback: let RAD drain the hardware pipeline so
-	 * the tail is not cut when the ring goes away. */
-	{
-		char resp[128];
-		int r = rss_ctrl_send_command(RSS_RUN_DIR "/rad.sock", "{\"cmd\":\"ao-drain\"}",
-					      resp, sizeof(resp), 4000);
-		if (r <= 0 || !strstr(resp, "\"status\":\"ok\""))
-			usleep(100000);
-	}
+	rad_drain_or_sleep();
 	rss_ring_destroy(ring);
 	fprintf(stderr, "rac: beeped %.1fs, %llu samples\n", (double)total_samples / sample_rate,
 		(unsigned long long)total_samples);

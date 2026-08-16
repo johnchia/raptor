@@ -22,6 +22,8 @@ extern SUITE(rmq_cmd_suite);
 extern SUITE(sendq_suite);
 extern SUITE(rad_clock_suite);
 extern SUITE(resync_suite);
+extern SUITE(backchannel_suite);
+extern SUITE(config_suite);
 
 GREATEST_MAIN_DEFS();
 
@@ -50,5 +52,7 @@ int main(int argc, char **argv)
 	RUN_SUITE(sendq_suite);
 	RUN_SUITE(rad_clock_suite);
 	RUN_SUITE(resync_suite);
+	RUN_SUITE(backchannel_suite);
+	RUN_SUITE(config_suite);
 	GREATEST_MAIN_END();
 }

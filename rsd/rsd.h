@@ -7,6 +7,7 @@
 
 #include <compy.h>
 
+#include "rsd_backchannel.h"
 #include "rsd_sendq.h"
 #include <rss_ipc.h>
 #include <rss_common.h>
@@ -49,11 +50,17 @@
 #define RSD_CODEC_AAC  97
 #define RSD_CODEC_OPUS 111
 
-/* RTP payload types for audio */
-#define RSD_AUDIO_PT_L16   98  /* dynamic PT for L16 */
-#define RSD_AUDIO_PT_AAC   97  /* dynamic PT for AAC (RFC 3640) */
-#define RSD_AUDIO_PT_OPUS  111 /* dynamic PT for Opus (RFC 7587) */
-#define RSD_BACKCHANNEL_PT 110 /* backchannel audio PT (PCMU default) */
+/* RTP payload types for audio. Backchannel PTs live in
+ * rsd_backchannel.h next to their decoders. */
+#define RSD_AUDIO_PT_L16  98  /* dynamic PT for L16 */
+#define RSD_AUDIO_PT_AAC  97  /* dynamic PT for AAC (RFC 3640) */
+#define RSD_AUDIO_PT_OPUS 111 /* dynamic PT for Opus (RFC 7587) */
+
+/* The RTCP identity rsd reports under on the backchannel. The RR
+ * cadence and the TEARDOWN leave compound must agree on both, or the
+ * BYE removes a participant nobody ever saw. */
+#define RSD_BC_REPORTER_SSRC(session_id) ((uint32_t)(session_id) ^ 0x52534452u)
+#define RSD_BC_CNAME			 "raptor-rsd"
 
 /* Stream index for per-ring state */
 #define RSD_STREAM_MAIN	    0
@@ -61,6 +68,14 @@
 #define RSD_STREAM_JPEG	    6
 #define RSD_STREAM_JPEG_SUB 7
 #define RSD_STREAM_COUNT    8 /* main+sub per sensor (6) + jpeg main+sub (2) */
+
+/* Backchannel audio receiver (rsd_session.c implements the
+ * Compy_AudioReceiver interface on it; decode state lives in the
+ * embedded rsd_bc_dec_t so every teardown path can deinit it). */
+typedef struct {
+	rss_ring_t **speaker_ring_ptr; /* points to client->speaker_ring */
+	rsd_bc_dec_t dec;
+} rsd_bc_recv_t;
 
 /* Per-client stream state */
 typedef struct {
@@ -105,7 +120,12 @@ typedef struct rsd_client {
 	/* Backchannel (client → server audio) */
 	Compy_Backchannel *backchannel;
 	rss_ring_t *speaker_ring; /* created on first backchannel packet */
-	void *bc_recv;		  /* rsd_bc_recv_t, kept alive for callback */
+	rsd_bc_recv_t *bc_recv;	  /* kept alive for the compy callback */
+	/* RTCP transport for the receiver reports rsd owes the client's
+	 * sender (RFC 3550 §6.4.2), valid while bc_has_rtcp_t. */
+	Compy_Transport bc_rtcp_t;
+	bool bc_has_rtcp_t;
+	int64_t bc_last_rr; /* last RR instant, armed at SETUP */
 
 	/* TCP interleaved channel numbers (for RTCP routing) */
 	uint8_t video_rtcp_ch; /* RTCP channel for video (default 1) */
@@ -118,6 +138,13 @@ typedef struct rsd_client {
 	int audio_udp_rtp_fd; /* audio track UDP pair (UDP transport only) */
 	int audio_udp_rtcp_fd;
 	bool audio_rtcp_in_epoll;
+	/* Backchannel UDP pair. Unlike the send-only pairs above, BOTH
+	 * fds are read: RTP carries the client's audio, RTCP its sender
+	 * reports. */
+	int bc_udp_rtp_fd;
+	int bc_udp_rtcp_fd;
+	bool bc_rtp_in_epoll;
+	bool bc_rtcp_in_epoll;
 
 	/* Deferred PLAY — set inside compy callback, applied after
 	 * write_lock is released to avoid lock-order inversion with

@@ -19,6 +19,76 @@
 #define RVD_OSD_RETRY_INTERVAL	50 /* check ticks (~5s at 10Hz) */
 #define RVD_OSD_NAME_LEN	32
 
+/* Keep the optional adapter out of normal Raptor builds. The wrappers let the
+ * pipeline reject a V4L2 configuration cleanly even when raptor-hal was built
+ * without the OpenIMP bridge. */
+#ifdef RAPTOR_V4L2_OPENIMP
+typedef rss_v4l2_h264_t rvd_v4l2_h264_t;
+#define rvd_v4l2_h264_create	    rss_v4l2_h264_create
+#define rvd_v4l2_h264_destroy	    rss_v4l2_h264_destroy
+#define rvd_v4l2_h264_start	    rss_v4l2_h264_start
+#define rvd_v4l2_h264_stop	    rss_v4l2_h264_stop
+#define rvd_v4l2_h264_poll	    rss_v4l2_h264_poll
+#define rvd_v4l2_h264_get_frame	    rss_v4l2_h264_get_frame
+#define rvd_v4l2_h264_release_frame rss_v4l2_h264_release_frame
+#define rvd_v4l2_h264_request_idr   rss_v4l2_h264_request_idr
+static inline bool rvd_v4l2_h264_supported(void)
+{
+	return true;
+}
+#else
+typedef void rvd_v4l2_h264_t;
+static inline bool rvd_v4l2_h264_supported(void)
+{
+	return false;
+}
+static inline int rvd_v4l2_h264_create(rvd_v4l2_h264_t **backend, const char *device,
+				       const rss_video_config_t *config)
+{
+	(void)backend;
+	(void)device;
+	(void)config;
+	return RSS_ERR_NOTSUP;
+}
+static inline void rvd_v4l2_h264_destroy(rvd_v4l2_h264_t *backend)
+{
+	(void)backend;
+}
+static inline int rvd_v4l2_h264_start(rvd_v4l2_h264_t *backend)
+{
+	(void)backend;
+	return RSS_ERR_NOTSUP;
+}
+static inline int rvd_v4l2_h264_stop(rvd_v4l2_h264_t *backend)
+{
+	(void)backend;
+	return RSS_ERR_NOTSUP;
+}
+static inline int rvd_v4l2_h264_poll(rvd_v4l2_h264_t *backend, uint32_t timeout_ms)
+{
+	(void)backend;
+	(void)timeout_ms;
+	return RSS_ERR_NOTSUP;
+}
+static inline int rvd_v4l2_h264_get_frame(rvd_v4l2_h264_t *backend, rss_frame_t *frame)
+{
+	(void)backend;
+	(void)frame;
+	return RSS_ERR_NOTSUP;
+}
+static inline int rvd_v4l2_h264_release_frame(rvd_v4l2_h264_t *backend, rss_frame_t *frame)
+{
+	(void)backend;
+	(void)frame;
+	return RSS_ERR_NOTSUP;
+}
+static inline int rvd_v4l2_h264_request_idr(rvd_v4l2_h264_t *backend)
+{
+	(void)backend;
+	return RSS_ERR_NOTSUP;
+}
+#endif
+
 /*
  * Thread safety: enc_cfg/fs_cfg are written only by the ctrl handler
  * (main thread). The encoder thread reads width/height once at startup
@@ -39,6 +109,11 @@ typedef struct {
 	int64_t pulse_next_us;	    /* jpeg_pulse: earliest next RecvPic start */
 	uintptr_t enc_buf_addrs[8]; /* refmode: unique virAddr bases seen */
 	uint8_t enc_buf_count;	    /* refmode: number of unique buffers discovered */
+	uint32_t active_fps_num;    /* sensor-rate override in effect (0 = follow
+				     * enc_cfg). Transient: set-sensor-fps only,
+				     * never persisted, so the configured rate in
+				     * enc_cfg/config stays the camera's truth. */
+	uint32_t active_fps_den;
 } rvd_stream_t;
 
 /* Per-OSD-region state (dynamic, name-based) */
@@ -66,6 +141,10 @@ struct rvd_state {
 	/* HAL */
 	rss_hal_ctx_t *hal_ctx;
 	const rss_hal_ops_t *ops;
+	bool hal_initialized;
+	bool v4l2_backend;
+	char v4l2_device[64];
+	rvd_v4l2_h264_t *v4l2;
 
 	/* Sensors */
 	int sensor_count;
@@ -76,6 +155,11 @@ struct rvd_state {
 	 * the modes. 0 when it could not be determined. */
 	int sensor_width;
 	int sensor_height;
+
+	/* Sensor frame rate at pipeline init — the restore target for the
+	 * transient set-sensor-fps override (0/0 = backend can't report). */
+	uint32_t sensor_base_fps_num;
+	uint32_t sensor_base_fps_den;
 
 	/* Streams */
 	rvd_stream_t streams[RVD_MAX_STREAMS];

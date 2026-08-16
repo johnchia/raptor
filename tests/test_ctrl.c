@@ -362,11 +362,22 @@ static void setup(void)
 	st.streams[1].is_jpeg = false;
 	snprintf(st.streams[1].cfg_sect, sizeof(st.streams[1].cfg_sect), "stream1");
 
-	/* Stream 2: JPEG snapshot channel */
+	/* Stream 2: JPEG snapshot channel, hw channel 2.
+	 *
+	 * Its section is stream0's, not one of its own: a snapshot channel is
+	 * built from its parent video stream and configured out of that
+	 * stream's section under jpeg_-prefixed keys, so that is the section
+	 * rvd_pipeline hands it and the one a runtime change has to write. */
 	st.streams[2].chn = 2;
 	st.streams[2].fs_chn = 0;
+	st.streams[2].enc_cfg.codec = RSS_CODEC_MJPEG;
+	st.streams[2].enc_cfg.width = 1920;
+	st.streams[2].enc_cfg.height = 1080;
+	st.streams[2].enc_cfg.fps_num = 1;
+	st.streams[2].enc_cfg.fps_den = 1;
+	st.streams[2].enc_cfg.init_qp = 75;
 	st.streams[2].is_jpeg = true;
-	snprintf(st.streams[2].cfg_sect, sizeof(st.streams[2].cfg_sect), "jpeg0");
+	snprintf(st.streams[2].cfg_sect, sizeof(st.streams[2].cfg_sect), "stream0");
 
 	/* WB initial state */
 	wb_state =
@@ -483,6 +494,219 @@ TEST set_fps_no_publish_on_hal_failure(void)
 	call("{\"cmd\":\"set-fps\",\"channel\":0,\"value\":60}");
 	ASSERT_EQ(25, (int)st.streams[0].enc_cfg.fps_num);
 	ASSERT_EQ_FMT(0, rec.publish_count, "%d");
+	teardown();
+	PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  A snapshot channel persists into the section it is read from
+ * ══════════════════════════════════════════════════════════════════
+ *
+ * Stream 2 is a JPEG channel carrying stream0's section, which is what
+ * rvd_pipeline gives it -- a snapshot channel is built from its parent
+ * video stream and configured out of that stream's section, under
+ * jpeg_-prefixed keys. It shares the section but not the keys, so each
+ * command either writes the jpeg_ key or writes nothing:
+ *
+ *   command on channel 2      HAL   [stream0] afterwards
+ *   ----------------------    ---   -------------------------------
+ *   set-jpeg-quality 60       yes   jpeg_quality = 60
+ *   set-fps 5                 yes   jpeg_fps = 5, fps untouched
+ *   set-bitrate 4000000       yes   nothing
+ *   set-gop 10                yes   nothing
+ *   set-qp-bounds 10 40       yes   nothing
+ *   set-rc-mode cbr           yes   nothing
+ *
+ * The last four are the rate-control keys, which have no snapshot
+ * counterpart: writing the parent's plain key would retune the video
+ * stream at the next boot from a command that never mentioned it, so
+ * the change applies to the running encoder and stops there. Every one
+ * of those keys is still written for the video streams, which the
+ * mutation legs above pin.
+ */
+
+TEST jpeg_quality_persists_under_the_parent_section(void)
+{
+	setup();
+	rec.return_val = 0;
+	call("{\"cmd\":\"set-jpeg-quality\",\"channel\":2,\"value\":60}");
+	ASSERT_EQ(60, st.streams[2].enc_cfg.init_qp);
+	ASSERT_EQ(60, rss_config_get_int(st.cfg, "stream0", "jpeg_quality", 0));
+	teardown();
+	PASS();
+}
+
+TEST jpeg_fps_persists_under_the_jpeg_key(void)
+{
+	setup();
+	rec.return_val = 0;
+	call("{\"cmd\":\"set-fps\",\"channel\":2,\"value\":5}");
+	/* The encoder was asked, on the JPEG channel's own hw channel... */
+	ASSERT_EQ_FMT(2, rec.last_chn, "%d");
+	ASSERT_EQ_FMT(5u, rec.set_fps_num, "%u");
+	/* ...and the rate was written where the snapshot reads it from. */
+	ASSERT_EQ(5, rss_config_get_int(st.cfg, "stream0", "jpeg_fps", 0));
+	/* The parent's own rate is not what was changed. */
+	ASSERT_EQ(0, rss_config_get_int(st.cfg, "stream0", "fps", 0));
+	teardown();
+	PASS();
+}
+
+/* The rate-control keys reach the encoder and are not written down:
+ * [stream0] bitrate/gop/min_qp/max_qp/rc_mode belong to the video
+ * stream, and a snapshot command must not redefine them. */
+TEST jpeg_rate_control_applies_without_persisting(void)
+{
+	setup();
+	rec.return_val = 0;
+
+	call("{\"cmd\":\"set-bitrate\",\"channel\":2,\"value\":4000000}");
+	ASSERT_EQ_FMT(4000000u, rec.set_bitrate, "%u");
+	ASSERT_EQ(4000000, (int)st.streams[2].enc_cfg.bitrate);
+	ASSERT_EQ(0, rss_config_get_int(st.cfg, "stream0", "bitrate", 0));
+
+	call("{\"cmd\":\"set-gop\",\"channel\":2,\"value\":10}");
+	ASSERT_EQ_FMT(10u, rec.set_gop, "%u");
+	ASSERT_EQ(0, rss_config_get_int(st.cfg, "stream0", "gop", 0));
+
+	call("{\"cmd\":\"set-qp-bounds\",\"channel\":2,\"min\":10,\"max\":40}");
+	ASSERT_EQ_FMT(10, rec.set_min_qp, "%d");
+	ASSERT_EQ_FMT(40, rec.set_max_qp, "%d");
+	ASSERT_EQ(0, rss_config_get_int(st.cfg, "stream0", "min_qp", 0));
+	ASSERT_EQ(0, rss_config_get_int(st.cfg, "stream0", "max_qp", 0));
+
+	call("{\"cmd\":\"set-rc-mode\",\"channel\":2,\"mode\":\"cbr\"}");
+	ASSERT_EQ(RSS_RC_CBR, rec.set_rc_mode);
+	ASSERT_STR_EQ("", rss_config_get_str(st.cfg, "stream0", "rc_mode", ""));
+
+	teardown();
+	PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  set-sensor-fps: transient whole-pipeline rate override
+ * ══════════════════════════════════════════════════════════════════ */
+
+static void sensor_fps_setup(void)
+{
+	setup();
+	st.streams[0].enabled = true;
+	st.streams[1].enabled = true;
+	st.streams[2].enabled = true; /* jpeg — must be skipped */
+	st.sensor_base_fps_num = 25;
+	st.sensor_base_fps_den = 1;
+}
+
+/* Sensor drops below both streams: each follows, GOP holds its seconds
+ * (stream1: 30 frames @ 15fps = 2s -> 24 frames @ 12fps), and neither
+ * enc_cfg nor the config learns anything -- the override is transient. */
+TEST sensor_fps_applies_min_rule_and_rescales_gop(void)
+{
+	sensor_fps_setup();
+	call("{\"cmd\":\"set-sensor-fps\",\"value\":12}");
+	ASSERT(strstr(resp, "\"status\":\"ok\"") != NULL);
+	/* last enc calls were stream1 (chn 3): jpeg was skipped */
+	ASSERT_EQ_FMT(3, rec.last_chn, "%d");
+	ASSERT_EQ(12, (int)rec.set_fps_num);
+	ASSERT_EQ(1, (int)rec.set_fps_den);
+	ASSERT_EQ(24, (int)rec.set_gop);
+	ASSERT_EQ(12, (int)st.streams[0].active_fps_num);
+	ASSERT_EQ(12, (int)st.streams[1].active_fps_num);
+	/* configured truth untouched, nothing dirty */
+	ASSERT_EQ(25, (int)st.streams[0].enc_cfg.fps_num);
+	ASSERT_EQ(15, (int)st.streams[1].enc_cfg.fps_num);
+	ASSERT_EQ(50, (int)st.streams[0].enc_cfg.gop_length);
+	ASSERT(!rss_config_has_dirty(st.cfg));
+	ASSERT_EQ(0, rss_config_get_int(st.cfg, "stream0", "fps", 0));
+	/* both video streams republished their ring headers */
+	ASSERT_EQ_FMT(2, rec.publish_count, "%d");
+	teardown();
+	PASS();
+}
+
+/* A substream configured slower than the sensor keeps its own rate. */
+TEST sensor_fps_decimated_substream_keeps_rate(void)
+{
+	sensor_fps_setup();
+	call("{\"cmd\":\"set-sensor-fps\",\"value\":20}");
+	ASSERT(strstr(resp, "\"status\":\"ok\"") != NULL);
+	ASSERT_EQ(20, (int)st.streams[0].active_fps_num);
+	/* stream1 not limited: override cleared, its own 15/30 re-applied */
+	ASSERT_EQ(0, (int)st.streams[1].active_fps_num);
+	ASSERT_EQ(15, (int)rec.set_fps_num);
+	ASSERT_EQ(30, (int)rec.set_gop);
+	teardown();
+	PASS();
+}
+
+/* value 0 = restore the boot base exactly; every stream lands back on
+ * its configured numbers and the overrides clear. */
+TEST sensor_fps_zero_restores_base(void)
+{
+	sensor_fps_setup();
+	call("{\"cmd\":\"set-sensor-fps\",\"value\":12}");
+	ASSERT_EQ(12, (int)st.streams[0].active_fps_num);
+	call("{\"cmd\":\"set-sensor-fps\",\"value\":0}");
+	ASSERT(strstr(resp, "\"status\":\"ok\"") != NULL);
+	ASSERT(strstr(resp, "\"fps_num\":25") != NULL);
+	ASSERT_EQ(0, (int)st.streams[0].active_fps_num);
+	ASSERT_EQ(0, (int)st.streams[1].active_fps_num);
+	ASSERT_EQ(30, (int)rec.set_gop); /* stream1 gop restored */
+	teardown();
+	PASS();
+}
+
+/* No baseline (backend can't report) -> restore is refused, loudly. */
+TEST sensor_fps_zero_without_base_errors(void)
+{
+	sensor_fps_setup();
+	st.sensor_base_fps_num = 0;
+	st.sensor_base_fps_den = 0;
+	call("{\"cmd\":\"set-sensor-fps\",\"value\":0}");
+	ASSERT(strstr(resp, "\"error\"") != NULL);
+	ASSERT_EQ_FMT(0, rec.call_count, "%d");
+	teardown();
+	PASS();
+}
+
+/* A driver that rejects the rate aborts the whole change: no encoder
+ * calls, no override marks, no republish -- nothing half-applied. */
+TEST sensor_fps_sensor_reject_aborts_everything(void)
+{
+	sensor_fps_setup();
+	setenv("RSS_MOCK_SENSOR_FPS_SET", "error", 1);
+	call("{\"cmd\":\"set-sensor-fps\",\"value\":12}");
+	unsetenv("RSS_MOCK_SENSOR_FPS_SET");
+	ASSERT(strstr(resp, "\"error\"") != NULL);
+	ASSERT_EQ_FMT(0, rec.call_count, "%d");
+	ASSERT_EQ(0, (int)st.streams[0].active_fps_num);
+	ASSERT_EQ_FMT(0, rec.publish_count, "%d");
+	teardown();
+	PASS();
+}
+
+/* An explicit user rate on a stream supersedes the transient override. */
+TEST set_fps_clears_active_override(void)
+{
+	sensor_fps_setup();
+	call("{\"cmd\":\"set-sensor-fps\",\"value\":12}");
+	ASSERT_EQ(12, (int)st.streams[0].active_fps_num);
+	call("{\"cmd\":\"set-fps\",\"channel\":0,\"value\":30}");
+	ASSERT_EQ(0, (int)st.streams[0].active_fps_num);
+	ASSERT_EQ(30, (int)st.streams[0].enc_cfg.fps_num);
+	teardown();
+	PASS();
+}
+
+/* get-sensor-fps reports the live rate beside the boot base. */
+TEST get_sensor_fps_reports_live_and_base(void)
+{
+	sensor_fps_setup();
+	setenv("RSS_MOCK_SENSOR_FPS_ACTUAL", "12", 1);
+	call("{\"cmd\":\"get-sensor-fps\"}");
+	unsetenv("RSS_MOCK_SENSOR_FPS_ACTUAL");
+	ASSERT(strstr(resp, "\"fps_num\":12") != NULL);
+	ASSERT(strstr(resp, "\"base_fps_num\":25") != NULL);
 	teardown();
 	PASS();
 }
@@ -991,6 +1215,16 @@ SUITE(ctrl_suite)
 	RUN_TEST(set_fps_resets_a_fractional_den);
 	RUN_TEST(set_fps_publishes_the_channel_it_changed);
 	RUN_TEST(set_fps_no_publish_on_hal_failure);
+	RUN_TEST(jpeg_quality_persists_under_the_parent_section);
+	RUN_TEST(jpeg_fps_persists_under_the_jpeg_key);
+	RUN_TEST(jpeg_rate_control_applies_without_persisting);
+	RUN_TEST(sensor_fps_applies_min_rule_and_rescales_gop);
+	RUN_TEST(sensor_fps_decimated_substream_keeps_rate);
+	RUN_TEST(sensor_fps_zero_restores_base);
+	RUN_TEST(sensor_fps_zero_without_base_errors);
+	RUN_TEST(sensor_fps_sensor_reject_aborts_everything);
+	RUN_TEST(set_fps_clears_active_override);
+	RUN_TEST(get_sensor_fps_reports_live_and_base);
 	RUN_TEST(set_qp_bounds_atomic_update);
 	RUN_TEST(set_qp_bounds_neither_updated_on_failure);
 	RUN_TEST(set_rc_mode_stores_enum_not_string);

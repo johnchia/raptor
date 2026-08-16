@@ -28,6 +28,8 @@ const struct help_entry help_entries[] = {
 	{"rvd", "set-bitrate <ch> <bps>              Change bitrate"},
 	{"rvd", "set-gop <ch> <length>               Change GOP length"},
 	{"rvd", "set-fps <ch> <fps>                  Change frame rate"},
+	{"rvd", "set-sensor-fps <fps>                Sensor rate override, 0=base (transient)"},
+	{"rvd", "get-sensor-fps                      Show sensor rate and boot base"},
 	{"rvd", "set-qp-bounds <ch> <min> <max>      Change QP range"},
 	{"rvd", "set-qp-bounds-per-frame <ch> ...    Per-frame QP (iMin iMax pMin pMax)"},
 	{"rvd", "set-max-pic-size <ch> <iK> <pK>     Max I/P frame size (kbits)"},
@@ -94,6 +96,8 @@ const struct help_entry help_entries[] = {
 	{"rvd", "get-isp                             Show all ISP settings"},
 	{"rvd", "get-exposure                        Show exposure info"},
 	{"rsd", "clients                             List connected clients"},
+	{"rsd", "set-backchannel-codecs <list>       Offered talk-back codecs, e.g. pcmu,opus"
+		" (\"\" = all)"},
 	{"rad", "set-codec <codec>                   Change audio codec (restart)"},
 	{"rad", "set-sample-rate <Hz>                Input sample rate (restarts pipeline)"},
 	{"rad", "set-volume <val>                    Input volume"},
@@ -165,7 +169,8 @@ const struct help_entry help_entries[] = {
 	{NULL, "test-motion [sec]                   Trigger clip recording (default 10s)"},
 	{"rsp", "start                               Start push stream"},
 	{"rsp", "stop                                Stop push stream"},
-	{"rsp", "set-url <rtmp://...>                Change target URL (reconnects)"},
+	{"rsp", "set-url <url>                       Change target URL (reconnects; rtmp://, "
+		"rtmps://, udp://)"},
 	{"rsr", "clients                             List connected SRT clients"},
 	{"rmq", "status                              Show broker connection and topic prefix"},
 	{NULL, "<daemon> set-affinity <cpu>          Pin daemon to CPU core"},

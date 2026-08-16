@@ -68,6 +68,30 @@ echo " raptor test suite ($SAN_MODE)"
 echo "========================================"
 echo ""
 
+# ── Stage 0: Hand-written JSON gate ──
+#
+# Structured formats are built by serializers, never string assembly:
+# a "%s" into a JSON literal is one edit away from injection, and the
+# safety of today's literal requires provenance reasoning no reviewer
+# should have to repeat. Production C carries exactly two documented
+# exemptions -- raptorctl_help.c prints example -j syntax (display
+# text, not construction) and raptor-ipc's transport error frame
+# (rss_ctrl.c, a dependency-free layer emitting a constant shape with
+# one integer). Anything else is a failure, not a style note.
+
+echo "=== Stage 0: Hand-written JSON gate ==="
+# Single source: the conformity hooks run this same script on staged
+# diffs and push ranges, so the rule cannot drift between suite,
+# hooks and CI.
+if "$RAPTOR_DIR/tools/conformity/json-gate.sh" --tree \
+    "$RAPTOR_DIR" "$RAPTOR_DIR/../raptor-common" "$RAPTOR_DIR/../raptor-ipc" \
+    "$RAPTOR_DIR/../raptor-hal"; then
+    stage_pass "hand-written JSON gate"
+else
+    stage_fail "hand-written JSON gate"
+    exit 1
+fi
+
 # ── Stage 1: Build ──
 
 echo "=== Stage 1: Build ($SAN_MODE) ==="
