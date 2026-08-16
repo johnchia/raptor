@@ -1875,15 +1875,18 @@ sleep 1
 # repeating the number that was dropped. Which answer is honest depends
 # on what can be read back, hence three arms; the mock's two knobs pick
 # which platform it imitates. No [sensor] fps in the suite config and no
-# /proc/jz on the host, so rvd falls back to 25 -- the same case that
-# made the original line mislead.
+# /proc/jz on the host, so rvd asks the backend what the sensor is
+# running at and requests that -- the same case that made the original
+# line mislead. An arm that needs the request to differ from what the
+# sensor reports has to say so in a config of its own ($arm_conf): a
+# stored default is display-only, so nothing else can stand in for the ask.
 fps_arm() {
     arm_name="$1"
     arm_want="$2"
     shift 2
     pkill -f "$OUT/rvd" 2>/dev/null || true
     sleep 1
-    start_daemon rvd env "$@" "$OUT/rvd" -c "$CONFIG" -f -d
+    start_daemon rvd env "$@" "$OUT/rvd" -c "${arm_conf:-$CONFIG}" -f -d
     sleep 2
     if grep -q "$arm_want" "$LOG_DIR/rvd.log" 2>/dev/null; then
         pass "$arm_name"
@@ -1906,9 +1909,17 @@ echo "=== Sensor rate diagnostics ==="
 
 fps_arm "unsettable and unreadable names no rate as the sensor's" \
     "no source confirmed" RSS_MOCK_SENSOR_FPS_SET=notsup
+
+# The one arm with a request of its own: 25 named in the config against a
+# sensor the mock reports at 30
+FPS_CONFIG="$LOG_DIR/test-fps25.conf"
+awk '/^\[sensor\]$/ { print; print "fps = 25"; next } { print }' "$CONFIG" >"$FPS_CONFIG"
+arm_conf="$FPS_CONFIG"
 fps_arm "unsettable but readable names the rate in force over the request" \
     "sensor runs at 30, not the 25 asked for" \
     RSS_MOCK_SENSOR_FPS_SET=notsup RSS_MOCK_SENSOR_FPS_ACTUAL=30
+arm_conf=""
+
 fps_arm "unsettable and already at the requested rate says so plainly" \
     "not settable on this platform; the sensor runs at 25" \
     RSS_MOCK_SENSOR_FPS_SET=notsup RSS_MOCK_SENSOR_FPS_ACTUAL=25
