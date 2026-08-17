@@ -187,6 +187,17 @@ static int rec_isp_get_brightness(void *ctx, uint8_t *val)
 /* WB mock that preserves state for merge testing */
 static rss_wb_config_t wb_state;
 
+/* What the exposure readback carries, for the platforms whose white balance is
+ * only visible there. */
+static rss_exposure_t exp_state;
+
+static int rec_isp_get_exposure(void *ctx, rss_exposure_t *exp)
+{
+	(void)ctx;
+	*exp = exp_state;
+	return 0;
+}
+
 static int rec_isp_get_wb(void *ctx, rss_wb_config_t *wb)
 {
 	(void)ctx;
@@ -996,6 +1007,54 @@ TEST get_wb_returns_current_state(void)
 	PASS();
 }
 
+/*
+ * A backend with no isp_get_wb still reports the gains it has.
+ *
+ * MI runs AWB inside its own 3A and publishes no setter, so the SigmaStar
+ * backends leave isp_get_wb out on purpose and the gains surface through
+ * isp_get_exposure instead. get-isp used to answer 0/0/0 there, which reads as
+ * "white balance is doing nothing" -- while the same gains were reaching ric
+ * through get-exposure the whole time. Measured on an SSC377QE: r=1604 b=2341
+ * out of ric, wb_r=0 wb_b=0 out of get-isp, in the same second.
+ */
+TEST get_isp_falls_back_to_the_exposure_gains(void)
+{
+	setup();
+	ops.isp_get_wb = NULL;
+	exp_state.wb_rgain = 1604;
+	exp_state.wb_ggain = 1024;
+	exp_state.wb_bgain = 2341;
+	ops.isp_get_exposure = (void *)rec_isp_get_exposure;
+
+	call("{\"cmd\":\"get-isp\"}");
+	ASSERT(strstr(resp, "\"wb_r\":1604") != NULL);
+	ASSERT(strstr(resp, "\"wb_g\":1024") != NULL);
+	ASSERT(strstr(resp, "\"wb_b\":2341") != NULL);
+	teardown();
+	PASS();
+}
+
+/* And a backend that does answer isp_get_wb keeps its own values, rather than
+ * having them overwritten by whatever the exposure readback happens to hold. */
+TEST get_isp_prefers_the_wb_op_where_there_is_one(void)
+{
+	setup();
+	wb_state.r_gain = 111;
+	wb_state.g_gain = 222;
+	wb_state.b_gain = 333;
+	exp_state.wb_rgain = 1604;
+	exp_state.wb_ggain = 1024;
+	exp_state.wb_bgain = 2341;
+	ops.isp_get_exposure = (void *)rec_isp_get_exposure;
+
+	call("{\"cmd\":\"get-isp\"}");
+	ASSERT(strstr(resp, "\"wb_r\":111") != NULL);
+	ASSERT(strstr(resp, "\"wb_g\":222") != NULL);
+	ASSERT(strstr(resp, "\"wb_b\":333") != NULL);
+	teardown();
+	PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  ISP set→get roundtrip through ctrl handler
  * ══════════════════════════════════════════════════════════════════ */
@@ -1256,6 +1315,8 @@ SUITE(ctrl_suite)
 	RUN_TEST(set_wb_mode_only_preserves_gains);
 	RUN_TEST(set_wb_gain_only_preserves_mode);
 	RUN_TEST(get_wb_returns_current_state);
+	RUN_TEST(get_isp_falls_back_to_the_exposure_gains);
+	RUN_TEST(get_isp_prefers_the_wb_op_where_there_is_one);
 
 	/* ISP roundtrip */
 	RUN_TEST(isp_brightness_roundtrip);

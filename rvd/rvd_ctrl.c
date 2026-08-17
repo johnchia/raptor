@@ -1262,7 +1262,28 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 		RSS_HAL_CALL(st->ops, isp_get_backlight_comp, st->hal_ctx, &blc);
 		RSS_HAL_CALL(st->ops, isp_get_defog_strength, st->hal_ctx, &dfg);
 		rss_wb_config_t wb = {0};
-		RSS_HAL_CALL(st->ops, isp_get_wb, st->hal_ctx, &wb);
+		/*
+		 * The gains second, from the exposure readback, for the platforms
+		 * that have no isp_get_wb at all. Those report auto white balance
+		 * they cannot configure -- MI runs AWB inside its own 3A and
+		 * publishes no setter, so the SigmaStar backends leave the op out
+		 * on purpose -- and get-isp was answering wb_r/wb_g/wb_b as 0 while
+		 * the very same gains were reaching ric through get-exposure. Zero
+		 * reads as "white balance is doing nothing", which is the opposite
+		 * of what those numbers said.
+		 *
+		 * Only where the wb op declined, so a backend that answers it keeps
+		 * its own values.
+		 */
+		if (RSS_HAL_CALL(st->ops, isp_get_wb, st->hal_ctx, &wb) != RSS_OK) {
+			rss_exposure_t exp = {0};
+
+			if (RSS_HAL_CALL(st->ops, isp_get_exposure, st->hal_ctx, &exp) == RSS_OK) {
+				wb.r_gain = exp.wb_rgain;
+				wb.g_gain = exp.wb_ggain;
+				wb.b_gain = exp.wb_bgain;
+			}
+		}
 		cJSON *r = cJSON_CreateObject();
 		cJSON_AddStringToObject(r, "status", "ok");
 		cJSON_AddNumberToObject(r, "brightness", (double)bri);
