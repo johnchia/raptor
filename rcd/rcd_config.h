@@ -91,6 +91,18 @@ cJSON *rcd_cmd_action(struct rcd_state *st, const cJSON *root);
  * Added to both `pending` and `state`, so one poll answers both. */
 void rcd_config_report_stale(const struct rcd_state *st, cJSON *out);
 
+/*
+ * Provider-backed keys whose store is written and whose value is not yet in
+ * force -- the system's half of the drift `apply` exists to settle. Kept in
+ * the same stale list as everything else, so an rcd restart does not forget
+ * that an interface is still running on the old address.
+ *
+ * `rcd_enact_owed` fills `out` with them and returns how many; `rcd_enact_done`
+ * forgets them, and is called only for the ones that were actually enacted.
+ */
+int rcd_enact_owed(const struct rcd_state *st, const struct rcd_key **out, int max);
+void rcd_enact_done(struct rcd_state *st);
+
 /* Whether a deferred save has fallen due, and the write itself. `flush` is
  * also called at shutdown, so a change made moments before a stop is kept. */
 bool rcd_save_due(const struct rcd_state *st, uint64_t now_ms);

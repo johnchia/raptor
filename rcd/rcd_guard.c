@@ -4,6 +4,7 @@
 
 #include "rcd_guard.h"
 #include "rcd.h"
+#include "rcd_config.h"
 #include "rcd_proto.h"
 #include "rcd_schema.h"
 #include "rcd_system.h"
@@ -29,11 +30,21 @@ static uint64_t now_ms(void)
 
 static void record_write(const rcd_state_t *st)
 {
-	cJSON *arr = cJSON_CreateArray();
-	if (!arr)
+	cJSON *root = cJSON_CreateObject();
+	if (!root)
 		return;
 
-	for (int i = 0; i < st->guard_count; i++) {
+	/*
+	 * Armed or merely held. A held snapshot is one whose values were
+	 * written to their stores and never enacted, so finding it after a
+	 * restart means there is nothing in force to undo -- while an armed
+	 * one found after a reboot is exactly the case the guard exists for.
+	 */
+	cJSON_AddBoolToObject(root, "armed", st->guard_deadline_ms != 0);
+	cJSON_AddNumberToObject(root, "window_sec", st->guard_window_sec);
+
+	cJSON *arr = cJSON_AddArrayToObject(root, "keys");
+	for (int i = 0; arr && i < st->guard_count; i++) {
 		cJSON *o = cJSON_CreateObject();
 		if (!o)
 			continue;
@@ -47,8 +58,8 @@ static void record_write(const rcd_state_t *st)
 		cJSON_AddItemToArray(arr, o);
 	}
 
-	char *text = cJSON_PrintUnformatted(arr);
-	cJSON_Delete(arr);
+	char *text = cJSON_PrintUnformatted(root);
+	cJSON_Delete(root);
 	if (!text)
 		return;
 
@@ -120,26 +131,33 @@ static void snapshot(rcd_state_t *st)
 	}
 }
 
+void rcd_guard_hold(rcd_state_t *st)
+{
+	/*
+	 * Already holding one. It stays: it is the last state somebody proved
+	 * they could reach, and an edit made after it -- whether or not the
+	 * one before it was ever applied -- is part of the same experiment.
+	 */
+	if (st->guard_count > 0)
+		return;
+
+	snapshot(st);
+	record_write(st);
+	RSS_INFO("guard: holding %d key(s) against an apply", st->guard_count);
+}
+
 void rcd_guard_arm(rcd_state_t *st, int window_sec)
 {
 	if (window_sec <= 0)
 		return;
 
-	if (st->guard_deadline_ms) {
-		/*
-		 * Already armed. The snapshot stays as it is -- it holds the
-		 * last state somebody proved they could reach, and the edit
-		 * that arrived now was made from inside the same window, over
-		 * a connection that has not been confirmed either.
-		 */
-		st->guard_deadline_ms = now_ms() + (uint64_t)window_sec * 1000;
-		st->guard_window_sec = window_sec;
-		armed_write(st);
-		RSS_INFO("guard: window extended to %d s", window_sec);
-		return;
-	}
+	/* Nothing was held -- an apply of guarded keys that no set preceded,
+	 * which is a client enacting somebody else's staged edit. Snapshot
+	 * now: it is the state that is about to stop being true. */
+	if (st->guard_count == 0)
+		snapshot(st);
 
-	snapshot(st);
+	bool extend = st->guard_deadline_ms != 0;
 	st->guard_window_sec = window_sec;
 	st->guard_deadline_ms = now_ms() + (uint64_t)window_sec * 1000;
 
@@ -148,7 +166,13 @@ void rcd_guard_arm(rcd_state_t *st, int window_sec)
 	record_write(st);
 	armed_write(st);
 
-	RSS_INFO("guard: armed for %d s over %d key(s)", window_sec, st->guard_count);
+	RSS_INFO("guard: %s for %d s over %d key(s)", extend ? "window extended" : "armed",
+		 window_sec, st->guard_count);
+}
+
+bool rcd_guard_held(const rcd_state_t *st)
+{
+	return st && st->guard_count > 0;
 }
 
 int rcd_guard_remaining(const rcd_state_t *st)
@@ -204,12 +228,39 @@ void rcd_guard_confirm(rcd_state_t *st)
 	RSS_INFO("guard: confirmed");
 }
 
+/* Collected rather than called: five keys of one stanza share one enact, and
+ * bringing the interface up five times would turn one revert into five
+ * outages. Nothing is collected for a snapshot that was never armed -- there
+ * is nothing in force to undo, and an enact would be an outage the undo
+ * invented. */
+static void add_enact(const rcd_provider_t **list, int *count, const rcd_provider_t *p,
+		      bool was_armed)
+{
+	if (!was_armed || *count >= RCD_GUARD_MAX)
+		return;
+	for (int i = 0; i < *count; i++) {
+		if (list[i]->enact == p->enact)
+			return;
+	}
+	list[(*count)++] = p;
+}
+
 void rcd_guard_revert(rcd_state_t *st, const char *why)
 {
 	if (!st->guard_deadline_ms && st->guard_count == 0)
 		return;
 
-	RSS_WARN("guard: reverting %d key(s) -- %s", st->guard_count, why ? why : "");
+	/* Whether anything is actually in force. A snapshot that was held and
+	 * never applied has stores to put back and nothing to re-enact -- and
+	 * bouncing an interface to undo a change that never reached it would
+	 * be an outage invented by the undo. */
+	bool was_armed = st->guard_deadline_ms != 0;
+
+	RSS_INFO("guard: putting back what changed of %d key(s) -- %s", st->guard_count,
+		 why ? why : "");
+
+	const rcd_provider_t *enacted[RCD_GUARD_MAX];
+	int enact_count = 0;
 
 	/*
 	 * Table order, which is the order they were taken in. Providers that
@@ -223,27 +274,86 @@ void rcd_guard_revert(rcd_state_t *st, const char *why)
 		if (!k || !k->provider)
 			continue;
 
-		if (!s->had) {
-			/* Nothing was there to go back to. A provider stores a
-			 * value or it does not; there is no verb for unsetting
-			 * one, and inventing a default here would be a third
-			 * state nobody asked for. */
-			RSS_WARN("guard: [%s] %s had no previous value; it keeps the new one",
-				 s->section, s->key);
+		/*
+		 * Only what actually moved. The snapshot covers every guarded
+		 * key so that a batch is undone as a batch, but writing back
+		 * a value that never changed leaves a fingerprint on a store
+		 * nobody touched -- and for a key whose `get` falls back to
+		 * somewhere else when its own store is silent, it would
+		 * materialise that fallback as a setting. It also decides
+		 * whether anything needs re-enacting at all: a revert of keys
+		 * that all still hold their old values is not an outage.
+		 */
+		char cur[RCD_VAL_MAX] = "";
+		bool has_cur = k->provider->get(cur, sizeof(cur)) == 0;
+
+		if ((!s->had && !has_cur) || (s->had && has_cur && strcmp(cur, s->prev) == 0)) {
+			/* Already what it was. Nothing to write, nothing to
+			 * enact -- and nothing owed to an apply either, which
+			 * is the part that has to be said out loud: a key
+			 * staged and then set back by hand is settled, and
+			 * leaving it in the drift list would offer to enact a
+			 * change that is no longer one. */
+			rcd_stale_forget(st, s->section, s->key);
 			continue;
 		}
 
-		if (k->provider->set(s->prev) != 0)
+		/*
+		 * Nothing was there before, and something is now. The store
+		 * has to go back to having no value rather than to an empty
+		 * one -- a camera whose address was never configured is the
+		 * ordinary case, not an edge, since that is every camera that
+		 * has only ever used DHCP.
+		 */
+		if (!s->had) {
+			if (k->provider->set("") != 0) {
+				RSS_WARN("guard: [%s] %s cannot be emptied; it keeps the new "
+					 "value",
+					 s->section, s->key);
+				continue;
+			}
+			RSS_INFO("guard: [%s] %s back to unset", s->section, s->key);
+			if (k->provider->enact)
+				add_enact(enacted, &enact_count, k->provider, was_armed);
+			rcd_stale_forget(st, s->section, s->key);
+			continue;
+		}
+
+		if (k->provider->set(s->prev) != 0) {
 			RSS_ERROR("guard: [%s] %s could not be put back to %s", s->section, s->key,
 				  s->prev);
-		else
-			RSS_INFO("guard: [%s] %s back to %s", s->section, s->key, s->prev);
+			continue;
+		}
+		RSS_INFO("guard: [%s] %s back to %s", s->section, s->key, s->prev);
+
+		/*
+		 * And it is no longer owed to an apply. The store holds what
+		 * the system holds again -- whether because the enact below
+		 * is about to put it there, or because nothing ever moved --
+		 * so leaving it in the drift list would show the operator a
+		 * pending change that is not one.
+		 */
+		rcd_stale_forget(st, s->section, s->key);
+
+		if (k->provider->enact)
+			add_enact(enacted, &enact_count, k->provider, was_armed);
+	}
+
+	/*
+	 * Last, and after every store is back. The enact is what the client
+	 * lost its connection to, so it is also what gives it back, and it
+	 * has to see the whole restored stanza rather than half of one.
+	 */
+	for (int i = 0; i < enact_count; i++) {
+		if (enacted[i]->enact() != 0)
+			RSS_ERROR("guard: the old settings are back in the file but not in force");
 	}
 
 	st->guard_deadline_ms = 0;
 	st->guard_window_sec = 0;
 	st->guard_count = 0;
 	record_clear();
+	rcd_stale_save(st);
 }
 
 void rcd_guard_tick(rcd_state_t *st, uint64_t now)
@@ -291,9 +401,13 @@ void rcd_guard_load(rcd_state_t *st)
 		return;
 	}
 
+	bool was_armed = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "armed"));
+	const cJSON *w = cJSON_GetObjectItemCaseSensitive(root, "window_sec");
+	int win_sec = cJSON_IsNumber(w) ? (int)cJSON_GetNumberValue(w) : 0;
+
 	st->guard_count = 0;
 	const cJSON *item = NULL;
-	cJSON_ArrayForEach(item, root)
+	cJSON_ArrayForEach(item, cJSON_GetObjectItemCaseSensitive(root, "keys"))
 	{
 		const cJSON *sec = cJSON_GetObjectItemCaseSensitive(item, "section");
 		const cJSON *key = cJSON_GetObjectItemCaseSensitive(item, "key");
@@ -319,8 +433,23 @@ void rcd_guard_load(rcd_state_t *st)
 	}
 	cJSON_Delete(root);
 
-	int win = 0;
-	uint64_t deadline = armed_read(&win);
+	/*
+	 * Held but never armed: the stores were written and nothing was ever
+	 * enacted, so there is nothing in force to undo. Carried forward
+	 * instead, so that an apply which comes later still has the state to
+	 * return to -- which is the whole reason the snapshot is taken by
+	 * `set` rather than by `apply`.
+	 */
+	if (!was_armed) {
+		RSS_INFO("guard: %d key(s) staged and not applied; snapshot kept", st->guard_count);
+		return;
+	}
+
+	int marker_win = 0;
+	uint64_t deadline = armed_read(&marker_win);
+	if (marker_win > 0)
+		win_sec = marker_win;
+	st->guard_window_sec = win_sec > 0 ? win_sec : RCD_GUARD_NAME_SEC;
 
 	/*
 	 * No deadline beside the snapshot. /run is a tmpfs, so it is gone
@@ -332,7 +461,6 @@ void rcd_guard_load(rcd_state_t *st)
 		return;
 	}
 
-	st->guard_window_sec = win > 0 ? win : RCD_GUARD_NAME_SEC;
 	st->guard_deadline_ms = deadline;
 
 	/* rcd itself restarted, and the clock ran on while it was down. */
@@ -375,7 +503,10 @@ cJSON *rcd_cmd_cancel(rcd_state_t *st, const cJSON *root)
 {
 	(void)root;
 
-	bool was = st->guard_deadline_ms != 0;
+	/* Anything to put back, armed or merely held: cancelling a staged
+	 * change that was never applied is a revert too, and reporting it as
+	 * "nothing happened" would be a lie about a file that just changed. */
+	bool was = rcd_guard_held(st);
 	rcd_guard_revert(st, "cancelled");
 
 	cJSON *r = rcd_ok();

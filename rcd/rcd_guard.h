@@ -6,25 +6,27 @@
  * camera enacts it, and if the value was wrong the client is no longer talking
  * to anything. On a camera up a pole that is a trip with a ladder.
  *
- * So a key may declare a window. rcd snapshots the guarded keys, writes the
- * new value, and arms a timer; the client's job is to re-reach the camera --
- * at its new address, by its new name -- and say `confirm`. Silence is a
- * failure: when the timer expires the snapshot is written back and enacted, so
- * the camera returns to the last state somebody proved they could reach.
+ * So a key may declare a window. `set` writes the store and remembers what was
+ * there; `apply` puts it into force and starts a timer. The client's job is to
+ * re-reach the camera -- at its new address, by its new name -- and say
+ * `confirm`. Silence is a failure: when the timer expires the snapshot is
+ * written back and enacted, so the camera returns to the last state somebody
+ * proved they could reach.
  *
- *     Steady ------ set(guarded key) ------> Armed ---- confirm ----> Steady
- *        ^                                     |
- *        |                                     +-- timer expires --+
- *        +------- snapshot re-enacted -------- Reverting <---------+
- *                                                 ^
- *                                                 +-- cancel
+ *     Steady -- set --> Held -- apply --> Armed ---- confirm ----> Steady
+ *        ^                                  |
+ *        |                                  +-- timer expires --+
+ *        +----- snapshot re-enacted ----- Reverting <-----------+
+ *                                            ^
+ *                                            +-- cancel
  *
  * Three properties are the whole of it:
  *
- * - **The guard arms on `set`, not on `apply`.** A provider's store is the
- *   value, so a provider-backed key is in force the moment `set` returns and
- *   there is no later step to hang a guard on. This is the same reason those
- *   keys report tier "live" -- see rcd_schema.c.
+ * - **The snapshot is taken by `set` and the clock is started by `apply`.**
+ *   Those are different moments for a reason: `set` writes a store and costs
+ *   nothing, `apply` puts it into force and is where the client may lose its
+ *   way back. Taking the snapshot at apply would capture the value that was
+ *   just written and revert to it, which is no revert at all.
  *
  * - **The snapshot covers every guarded key, not the edited ones.** Guarded
  *   providers share files: a batch that turns DHCP off and sets an address
@@ -37,6 +39,10 @@
  *   was armed, and a camera that rebooted did not confirm. rcd puts the
  *   snapshot back on the way up. That is what makes power-cycling a stranded
  *   camera a recovery instead of a commitment.
+ *
+ *   A snapshot that was never armed is the other case, and it must not be
+ *   treated as one: nothing was enacted, so there is nothing to undo. The
+ *   record says which it is.
  *
  * A second guarded `set` inside an open window keeps the original snapshot and
  * only pushes the deadline out. The guard protects the state that was last
@@ -81,14 +87,24 @@ typedef struct {
 } rcd_guard_snap_t;
 
 /*
- * Snapshot every guarded key and start the clock, before the first write.
+ * Remember what the guarded keys hold, before `set` writes over any of them.
+ * No clock starts here. Cheap enough to call on every set that touches one,
+ * and a no-op when a snapshot is already held.
  *
- * Called with the longest window the request's keys ask for. Failing to
- * persist the snapshot is not a refusal: the edit the caller asked for still
+ * Failing to persist it is not a refusal: the edit the caller asked for still
  * happens, and the log says the guard is not covering it -- a camera that
  * cannot write /etc is in trouble the guard was never going to fix.
  */
+void rcd_guard_hold(struct rcd_state *st);
+
+/*
+ * Start the clock over the held snapshot, with the longest window the keys
+ * being enacted ask for. Called by `apply`, immediately before it enacts.
+ */
 void rcd_guard_arm(struct rcd_state *st, int window_sec);
+
+/* Whether a snapshot is held, armed or not. */
+bool rcd_guard_held(const struct rcd_state *st);
 
 /* Seconds left, or 0 when nothing is armed. */
 int rcd_guard_remaining(const struct rcd_state *st);

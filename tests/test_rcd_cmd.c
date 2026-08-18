@@ -26,6 +26,7 @@
 #include "../rcd/rcd.h"
 #include "../rcd/rcd_config.h"
 #include "../rcd/rcd_guard.h"
+#include "../rcd/rcd_network.h"
 #include "../rcd/rcd_proto.h"
 #include "../rcd/rcd_schema.h"
 #include "../rcd/rcd_system.h"
@@ -708,6 +709,21 @@ static int guard_ready(rcd_state_t *st, const char *name)
 	return rcd_provider_hostname.set(name) == 0;
 }
 
+/*
+ * What a client actually does: `set` stores the value over a held snapshot,
+ * and `apply` starts the clock. Written out here rather than hidden in a
+ * helper because the order is the property -- a snapshot taken after the
+ * store has been written holds the new value and reverts to nothing.
+ */
+static int guard_change(rcd_state_t *st, const char *name, int window)
+{
+	rcd_guard_hold(st);
+	if (rcd_provider_hostname.set(name) != 0)
+		return -1;
+	rcd_guard_arm(st, window);
+	return 0;
+}
+
 static const char *hostname_now(char *buf, size_t sz)
 {
 	buf[0] = '\0';
@@ -727,11 +743,9 @@ TEST an_unconfirmed_change_goes_back_when_the_window_ends(void)
 	if (!guard_ready(&st, "camera-before"))
 		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
 
-	rcd_guard_arm(&st, 90);
+	ASSERT_EQ(0, guard_change(&st, "camera-after", 90));
 	ASSERT(rcd_guard_remaining(&st) > 0);
 	ASSERT(rcd_guard_remaining(&st) <= 90);
-
-	ASSERT_EQ(0, rcd_provider_hostname.set("camera-after"));
 	ASSERT_STR_EQ("camera-after", hostname_now(now, sizeof(now)));
 
 	/* Not yet: an armed guard that reverted early would be a countdown
@@ -753,8 +767,7 @@ TEST a_confirmed_change_stays_and_leaves_nothing_armed(void)
 	if (!guard_ready(&st, "camera-before"))
 		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
 
-	rcd_guard_arm(&st, 90);
-	ASSERT_EQ(0, rcd_provider_hostname.set("camera-after"));
+	ASSERT_EQ(0, guard_change(&st, "camera-after", 90));
 
 	cJSON *r = rcd_cmd_confirm(&st, NULL);
 	ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "confirmed")));
@@ -783,8 +796,7 @@ TEST cancelling_puts_it_back_without_waiting(void)
 	if (!guard_ready(&st, "camera-before"))
 		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
 
-	rcd_guard_arm(&st, 90);
-	ASSERT_EQ(0, rcd_provider_hostname.set("camera-after"));
+	ASSERT_EQ(0, guard_change(&st, "camera-after", 90));
 
 	cJSON *r = rcd_cmd_cancel(&st, NULL);
 	ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "reverted")));
@@ -808,8 +820,7 @@ TEST a_reboot_inside_the_window_reverts(void)
 	if (!guard_ready(&st, "camera-before"))
 		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
 
-	rcd_guard_arm(&st, 90);
-	ASSERT_EQ(0, rcd_provider_hostname.set("camera-after"));
+	ASSERT_EQ(0, guard_change(&st, "camera-after", 90));
 
 	/* What a boot looks like from here: the tmpfs is empty and rcd starts
 	 * with no memory of anything. */
@@ -835,8 +846,7 @@ TEST an_rcd_restart_inside_the_window_keeps_it_armed(void)
 	if (!guard_ready(&st, "camera-before"))
 		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
 
-	rcd_guard_arm(&st, 90);
-	ASSERT_EQ(0, rcd_provider_hostname.set("camera-after"));
+	ASSERT_EQ(0, guard_change(&st, "camera-after", 90));
 
 	rcd_state_t fresh;
 	memset(&fresh, 0, sizeof(fresh));
@@ -867,11 +877,39 @@ TEST a_second_change_inside_the_window_keeps_the_first_snapshot(void)
 	rcd_guard_arm(&st, 90);
 	ASSERT_EQ(0, rcd_provider_hostname.set("camera-middle"));
 
-	rcd_guard_arm(&st, 90);
-	ASSERT_EQ(0, rcd_provider_hostname.set("camera-after"));
+	ASSERT_EQ(0, guard_change(&st, "camera-after", 90));
 
 	rcd_guard_tick(&st, GUARD_LATER);
 	ASSERT_STR_EQ("camera-before", hostname_now(now, sizeof(now)));
+	PASS();
+}
+
+/*
+ * A staged change is not in force, so cancelling it is a file write and not an
+ * outage -- and afterwards there must be nothing left for an apply to do. A
+ * key still listed as drift here is a pending change the operator is invited
+ * to enact, which would put back the value they just took back.
+ */
+TEST cancelling_a_staged_change_leaves_nothing_owed(void)
+{
+	rcd_state_t st;
+	char now[RCD_VAL_MAX];
+
+	if (!guard_ready(&st, "camera-before"))
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	/* What `set` does for a provider that can enact. */
+	rcd_guard_hold(&st);
+	ASSERT_EQ(0, rcd_provider_hostname.set("camera-staged"));
+	rcd_stale_add(&st, "system", "hostname", RCD_D_COUNT);
+	ASSERT_EQ(1, st.stale_count);
+
+	cJSON *r = rcd_cmd_cancel(&st, NULL);
+	ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "reverted")));
+	cJSON_Delete(r);
+
+	ASSERT_STR_EQ("camera-before", hostname_now(now, sizeof(now)));
+	ASSERT_EQ(0, st.stale_count);
 	PASS();
 }
 
@@ -897,13 +935,288 @@ TEST the_guard_reports_itself_only_while_it_is_armed(void)
 	ASSERT(cJSON_IsObject(g));
 	ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(g, "armed")));
 	ASSERT(cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(g, "revert_in_sec")) > 0);
-	/* Named, so the page can say which settings it is asking about. */
+	/*
+	 * Named, so the page can say which settings it is asking about -- and
+	 * every guarded key is there, not only the one that changed: they
+	 * share files, so they are put back together or not at all.
+	 */
 	const cJSON *keys = cJSON_GetObjectItemCaseSensitive(g, "keys");
 	ASSERT(cJSON_IsArray(keys));
-	ASSERT_EQ(1, cJSON_GetArraySize(keys));
+	int guarded = 0;
+	for (int i = 0; rcd_key_at(i); i++)
+		guarded += rcd_key_at(i)->guard_sec > 0 ? 1 : 0;
+	ASSERT(guarded > 1);
+	ASSERT_EQ(guarded, cJSON_GetArraySize(keys));
 	cJSON_Delete(out);
 
 	rcd_guard_confirm(&st);
+	PASS();
+}
+
+/* ------------------------------------------------------------------ */
+/* The camera's address                                                 */
+/* ------------------------------------------------------------------ */
+
+/* The shipped stanza, and the reason this rewrites lines rather than files:
+ * the second one is where the interface's MAC comes from. */
+static const char *const SHIPPED_ETH0 =
+	"iface eth0 inet dhcp\n"
+	"    hwaddress ether $(fw_printenv -n ethaddr || echo 00:00:23:34:45:66)\n";
+
+static void iface_path(char *out, size_t outsz)
+{
+	snprintf(out, outsz, "%s/network/interfaces.d/%s", RCD_SYSCONF_DIR, rcd_net_iface());
+}
+
+static int iface_ready(void)
+{
+	char dir[256], path[320];
+
+	if (!sysconf_dir_ready())
+		return 0;
+
+	snprintf(dir, sizeof(dir), "%s/network", RCD_SYSCONF_DIR);
+	mkdir(dir, 0755);
+	snprintf(dir, sizeof(dir), "%s/network/interfaces.d", RCD_SYSCONF_DIR);
+	mkdir(dir, 0755);
+
+	iface_path(path, sizeof(path));
+	FILE *f = fopen(path, "w");
+	if (!f)
+		return 0;
+	fputs(SHIPPED_ETH0, f);
+	fclose(f);
+	return 1;
+}
+
+static void iface_read(char *out, size_t outsz)
+{
+	char path[320];
+	iface_path(path, sizeof(path));
+
+	out[0] = '\0';
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return;
+	size_t n = fread(out, 1, outsz - 1, f);
+	out[n] = '\0';
+	fclose(f);
+}
+
+TEST an_address_is_four_octets_and_nothing_else(void)
+{
+	rcd_edit_t e[RCD_EDITS_MAX];
+	int n = 0;
+
+	static const char *const good[] = {"192.168.1.50", "0.0.0.0", "255.255.255.255", "10.0.0.1",
+					   NULL};
+	for (int i = 0; good[i]; i++) {
+		char req[192];
+		snprintf(req, sizeof(req),
+			 "{\"section\":\"network\",\"key\":\"address\",\"value\":\"%s\"}", good[i]);
+		ASSERT_EQm(good[i], 0, validate_set(req, e, &n));
+		ASSERT_STR_EQ(good[i], e[0].rendered);
+	}
+
+	/* 256 is not an octet; a leading zero is octal to most things that
+	 * parse this file and decimal to everyone who types it; and the rest
+	 * are not addresses at all. */
+	static const char *const bad[] = {
+		"192.168.1.256", "192.168.1",	 "192.168.1.1.1",  "192.168.01.1", "192.168.1.",
+		".1.2.3",	 "192.168.1.1 ", "1.2.3.4;reboot", "localhost",	   NULL};
+	for (int i = 0; bad[i]; i++) {
+		char req[192];
+		snprintf(req, sizeof(req),
+			 "{\"section\":\"network\",\"key\":\"address\",\"value\":\"%s\"}", bad[i]);
+		ASSERT_EQm(bad[i], -1, validate_set(req, e, &n));
+	}
+
+	/* A camera on a flat network has no gateway and no name server, and
+	 * a form that submits every field has to be able to say so. The
+	 * address itself is not optional in the same way: an interface
+	 * configured static without one does not come up. */
+	ASSERT_EQ(0, validate_set("{\"section\":\"network\",\"key\":\"gateway\",\"value\":\"\"}", e,
+				  &n));
+	ASSERT_STR_EQ("", e[0].rendered);
+	ASSERT_EQ(-1, validate_set("{\"section\":\"network\",\"key\":\"address\",\"value\":\"\"}",
+				   e, &n));
+	PASS();
+}
+
+/*
+ * The line rcd must not lose. `hwaddress ether $(fw_printenv -n ethaddr ...)`
+ * is where this camera's MAC comes from, evaluated by the shell at ifup --
+ * so a provider that rewrote the stanza as "iface + address + netmask" would
+ * bring the interface back on a different MAC and a different lease.
+ */
+TEST the_interface_stanza_keeps_what_it_did_not_write(void)
+{
+	char file[1024];
+
+	if (!iface_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	ASSERT_EQ(0, rcd_provider_net_dhcp.set("false"));
+	ASSERT_EQ(0, rcd_provider_net_address.set("192.168.1.50"));
+	ASSERT_EQ(0, rcd_provider_net_netmask.set("255.255.255.0"));
+	ASSERT_EQ(0, rcd_provider_net_gateway.set("192.168.1.1"));
+	ASSERT_EQ(0, rcd_provider_net_dns.set("192.168.1.1"));
+
+	iface_read(file, sizeof(file));
+	ASSERT(strstr(file, "hwaddress ether $(fw_printenv -n ethaddr") != NULL);
+	ASSERT(strstr(file, "iface eth0 inet static") != NULL);
+	ASSERT(strstr(file, "address 192.168.1.50") != NULL);
+	ASSERT(strstr(file, "netmask 255.255.255.0") != NULL);
+
+	/* Read back through the same providers, so the pair is what is
+	 * tested rather than the spelling of one file. */
+	char v[RCD_VAL_MAX];
+	ASSERT_EQ(0, rcd_provider_net_address.get(v, sizeof(v)));
+	ASSERT_STR_EQ("192.168.1.50", v);
+	ASSERT_EQ(0, rcd_provider_net_dhcp.get(v, sizeof(v)));
+	ASSERT_STR_EQ("false", v);
+
+	/* Setting one twice must not leave two of it: ifupdown refuses a
+	 * duplicate option outright, so the interface would stop coming up. */
+	ASSERT_EQ(0, rcd_provider_net_address.set("192.168.1.51"));
+	iface_read(file, sizeof(file));
+	/* Indented, so that `hwaddress ether ...` -- which ends in the same
+	 * eight characters -- is not counted as one of them. */
+	int copies = 0;
+	for (const char *at = file; (at = strstr(at, "\n    address ")) != NULL; at++)
+		copies++;
+	ASSERT_EQ(1, copies);
+
+	/* And back to DHCP, which changes one word and keeps the static
+	 * settings for the next time somebody wants them. */
+	ASSERT_EQ(0, rcd_provider_net_dhcp.set("true"));
+	iface_read(file, sizeof(file));
+	ASSERT(strstr(file, "iface eth0 inet dhcp") != NULL);
+	ASSERT(strstr(file, "address 192.168.1.51") != NULL);
+	ASSERT(strstr(file, "hwaddress ether $(fw_printenv") != NULL);
+	PASS();
+}
+
+/* An empty value removes the directive rather than writing a bare one, which
+ * ifupdown reads as a parse error and refuses the whole interface for. */
+TEST clearing_an_address_removes_its_line(void)
+{
+	char file[1024];
+
+	if (!iface_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	ASSERT_EQ(0, rcd_provider_net_gateway.set("192.168.1.1"));
+	iface_read(file, sizeof(file));
+	ASSERT(strstr(file, "gateway 192.168.1.1") != NULL);
+
+	ASSERT_EQ(0, rcd_provider_net_gateway.set(""));
+	iface_read(file, sizeof(file));
+	ASSERT_EQ(NULL, strstr(file, "gateway"));
+	ASSERT(strstr(file, "hwaddress ether $(fw_printenv") != NULL);
+	PASS();
+}
+
+/* Every one of them is on the same clock, and none of them is live: a change
+ * of address is applied, never typed into effect. */
+TEST every_network_key_is_guarded_and_waits_for_apply(void)
+{
+	int seen = 0;
+	for (int i = 0; rcd_key_at(i); i++) {
+		const rcd_key_t *k = rcd_key_at(i);
+		if (strcmp(k->section, "network") != 0)
+			continue;
+		seen++;
+		ASSERT_EQm(k->key, RCD_GUARD_NET_SEC, k->guard_sec);
+		ASSERT_EQm(k->key, false, rcd_key_live(k));
+		ASSERT_EQm(k->key, RCD_IMPACT_NETWORK, rcd_key_impact(k));
+		/* And each of them can be put into force, which is what makes
+		 * them the restart tier rather than a declaration about them. */
+		ASSERT(k->provider != NULL && k->provider->enact != NULL);
+	}
+	ASSERT_EQ(5, seen);
+	PASS();
+}
+
+/*
+ * The snapshot covers every guarded key; the revert writes back only the ones
+ * that moved. A store nobody touched must come out of a revert byte for byte
+ * -- and `network.dns` is the case that makes it matter, since its `get` falls
+ * back to /etc/resolv.conf when its own store is silent, so putting the
+ * "previous value" back would write a setting that was never set.
+ */
+TEST a_revert_leaves_the_stores_it_did_not_change_alone(void)
+{
+	rcd_state_t st;
+	char before[1024], after[1024];
+
+	if (!guard_ready(&st, "camera-before") || !iface_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	iface_read(before, sizeof(before));
+
+	/* One key changes; the other five guarded ones do not. */
+	rcd_guard_hold(&st);
+	ASSERT_EQ(0, rcd_provider_hostname.set("camera-staged"));
+
+	cJSON *r = rcd_cmd_cancel(&st, NULL);
+	cJSON_Delete(r);
+
+	char now[RCD_VAL_MAX];
+	ASSERT_STR_EQ("camera-before", hostname_now(now, sizeof(now)));
+
+	iface_read(after, sizeof(after));
+	ASSERT_STR_EQ(before, after);
+	PASS();
+}
+
+/*
+ * The ordinary case for a camera that has only ever used DHCP: the stanza has
+ * no address at all. Reverting has to put it back to not having one, which is
+ * a different thing from putting an empty one there -- so `set("")` means
+ * unset, and a store that cannot be emptied refuses it.
+ */
+TEST a_revert_can_unset_a_value_that_was_never_there(void)
+{
+	rcd_state_t st;
+	char before[1024], after[1024];
+
+	if (!guard_ready(&st, "camera-before") || !iface_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	iface_read(before, sizeof(before));
+	/* Indented, so `hwaddress ether ...` is not mistaken for one. */
+	ASSERT_EQ(NULL, strstr(before, "\n    address "));
+
+	rcd_guard_hold(&st);
+	ASSERT_EQ(0, rcd_provider_net_address.set("192.168.1.99"));
+	rcd_stale_add(&st, "network", "address", RCD_D_COUNT);
+	iface_read(after, sizeof(after));
+	ASSERT(strstr(after, "address 192.168.1.99") != NULL);
+
+	cJSON *r = rcd_cmd_cancel(&st, NULL);
+	cJSON_Delete(r);
+
+	/* Byte for byte, and nothing left for an apply to enact. */
+	iface_read(after, sizeof(after));
+	ASSERT_STR_EQ(before, after);
+	ASSERT_EQ(0, st.stale_count);
+
+	/* Setting a key back to what it already held is settled too: the
+	 * revert writes nothing and the drift goes with it. */
+	rcd_guard_hold(&st);
+	ASSERT_EQ(0, rcd_provider_hostname.set("camera-before"));
+	rcd_stale_add(&st, "system", "hostname", RCD_D_COUNT);
+	cJSON *same = rcd_cmd_cancel(&st, NULL);
+	cJSON_Delete(same);
+	ASSERT_EQ(0, st.stale_count);
+
+	/* And the stores that cannot be emptied say so rather than writing a
+	 * blank. A hostname is the case: every camera has one. */
+	ASSERT_EQ(-1, rcd_provider_hostname.set(""));
+	ASSERT_EQ(-1, rcd_provider_timezone.set(""));
+	ASSERT_EQ(-1, rcd_provider_ntp_server.set(""));
+	ASSERT_EQ(-1, rcd_provider_net_dhcp.set(""));
 	PASS();
 }
 
@@ -964,7 +1277,12 @@ TEST the_schema_says_where_a_system_key_takes_effect(void)
 			const cJSON *g = cJSON_GetObjectItemCaseSensitive(k, "guard_sec");
 			ASSERT(cJSON_IsNumber(g));
 			ASSERT_EQ(RCD_GUARD_NAME_SEC, (int)cJSON_GetNumberValue(g));
-			ASSERT_STR_EQ("live", tier->valuestring);
+			/* The restart tier, because the provider can enact and
+			 * has not: `set` wrote the file, and the running host
+			 * is renamed by `apply`. A key that costs the operator
+			 * their way in must be something they press a button
+			 * for. */
+			ASSERT_STR_EQ("restart", tier->valuestring);
 			checked++;
 		}
 	}
@@ -1243,7 +1561,14 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(a_reboot_inside_the_window_reverts);
 	RUN_TEST(an_rcd_restart_inside_the_window_keeps_it_armed);
 	RUN_TEST(a_second_change_inside_the_window_keeps_the_first_snapshot);
+	RUN_TEST(cancelling_a_staged_change_leaves_nothing_owed);
 	RUN_TEST(the_guard_reports_itself_only_while_it_is_armed);
+	RUN_TEST(an_address_is_four_octets_and_nothing_else);
+	RUN_TEST(the_interface_stanza_keeps_what_it_did_not_write);
+	RUN_TEST(clearing_an_address_removes_its_line);
+	RUN_TEST(every_network_key_is_guarded_and_waits_for_apply);
+	RUN_TEST(a_revert_leaves_the_stores_it_did_not_change_alone);
+	RUN_TEST(a_revert_can_unset_a_value_that_was_never_there);
 	RUN_TEST(the_schema_says_where_a_system_key_takes_effect);
 	RUN_TEST(nothing_is_unavailable_until_the_camera_says_so);
 	RUN_TEST(availability_matches_whole_key_names);

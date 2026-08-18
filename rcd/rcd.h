@@ -106,6 +106,10 @@ void rcd_stale_add(rcd_state_t *st, const char *section, const char *key, rcd_da
 /* Forget every key owned by `d`, which has just re-read the file. */
 void rcd_stale_clear(rcd_state_t *st, rcd_daemon_t d);
 
+/* Forget one key, whoever owns it: what was written has been taken back, so
+ * there is nothing left for an apply to enact. */
+void rcd_stale_forget(rcd_state_t *st, const char *section, const char *key);
+
 /* Load and store the drift record. Failure is not fatal: an unreadable or
  * unwritable /run costs the memory of a pending restart, not the edit. */
 void rcd_stale_load(rcd_state_t *st);

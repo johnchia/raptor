@@ -58,6 +58,8 @@ typedef enum {
 	RCD_IMPACT_SERVICE,  /* one feature pauses; no client notices */
 	RCD_IMPACT_STREAM,   /* connected viewers are dropped */
 	RCD_IMPACT_PIPELINE, /* capture stops and everything downstream reconnects */
+	RCD_IMPACT_NETWORK,  /* every connection to the camera is dropped, including
+			      * the one that asked for this */
 	RCD_IMPACT_REBOOT,   /* the camera restarts */
 } rcd_impact_t;
 
@@ -89,6 +91,7 @@ typedef enum {
 	V_ENUM,
 	V_CRED,
 	V_HOST,
+	V_IPV4,
 } rcd_val_type_t;
 
 /*
@@ -100,6 +103,11 @@ typedef enum {
  *
  * It is not a relaxed V_CRED and must not be used for one: it is reported back
  * like any other value.
+ *
+ * V_IPV4 is narrower still: four decimal octets, no leading zeros -- which
+ * every C library reads as octal and no operator ever means that way. An empty
+ * string is accepted where the table says so, because "no gateway" and "no
+ * name server" are configurations rather than omissions.
  */
 
 /*
@@ -136,10 +144,31 @@ typedef enum {
  * -1 for a store that could not be written. `get` returns 0 and fills `out`,
  * or -1 for a value that is not set or not recognisable -- which is reported
  * as unset, exactly like a key absent from the config file.
+ *
+ * `set("")` means put the store back to having no value at all, and it is the
+ * revert path that asks for it: a camera whose address was never configured
+ * has to be returned to not having one, not to an empty one. A provider whose
+ * store cannot be empty -- a hostname, a timezone -- refuses it and says so.
+ * A key the table lets a client send empty gets the same call either way, so
+ * there is nothing to distinguish and nothing that can be got wrong.
  */
 typedef struct rcd_provider {
 	int (*get)(char *out, size_t outsz);
 	int (*set)(const char *value);
+
+	/*
+	 * Put the stored value into force. Optional, and its presence is what
+	 * decides the key's tier: a provider without one is a store the system
+	 * reads continuously, so `set` is the whole of it and the key is live.
+	 * A provider with one has separated writing the value from paying for
+	 * it -- bringing an interface down and back up, renaming a running
+	 * host -- and that is exactly what `apply` is for.
+	 *
+	 * It takes no argument: it re-reads the store, so the same call
+	 * enacts an edit and enacts a revert. Providers that share a store
+	 * share one of these, and `apply` runs each distinct one once.
+	 */
+	int (*enact)(void);
 } rcd_provider_t;
 
 typedef struct rcd_key {

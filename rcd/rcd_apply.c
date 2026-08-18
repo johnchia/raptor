@@ -5,6 +5,7 @@
 #include "rcd_apply.h"
 #include "rcd.h"
 #include "rcd_config.h"
+#include "rcd_guard.h"
 #include "rcd_ipc.h"
 #include "rcd_proto.h"
 #include "rcd_schema.h"
@@ -331,6 +332,69 @@ static void run(rcd_state_t *st, const bool *want, bool forget_stale, cJSON *res
 	}
 }
 
+/*
+ * The settings that are not a daemon's: an address, a name. `set` wrote them
+ * to their stores and this is where they take effect, which for a network
+ * address means the connection carrying this request ends here.
+ *
+ * That is why the guard is armed first. Whatever happens to this reply -- and
+ * on an address change nothing does, because the socket is gone before it can
+ * be written -- the camera is now counting, and it will put the old settings
+ * back unless somebody reaches it and says not to.
+ */
+static void enact_system(rcd_state_t *st, cJSON *results)
+{
+	const rcd_key_t *owed[RCD_STALE_MAX];
+	int n = rcd_enact_owed(st, owed, RCD_STALE_MAX);
+	if (n == 0)
+		return;
+
+	int window = 0;
+	for (int i = 0; i < n; i++) {
+		if (owed[i]->guard_sec > window)
+			window = owed[i]->guard_sec;
+	}
+	if (window)
+		rcd_guard_arm(st, window);
+
+	/* One call per store, not one per key: five directives of one
+	 * interface come into force together or the interface bounces five
+	 * times. */
+	const rcd_provider_t *done[RCD_STALE_MAX];
+	int done_count = 0;
+
+	for (int i = 0; i < n; i++) {
+		const rcd_provider_t *p = owed[i]->provider;
+		bool seen = false;
+		for (int j = 0; j < done_count; j++)
+			seen = seen || done[j]->enact == p->enact;
+		if (seen)
+			continue;
+		done[done_count++] = p;
+
+		int rc = p->enact();
+		if (rc != 0) {
+			char msg[192];
+			snprintf(msg, sizeof(msg),
+				 "[%s] could not be put into force; it is stored but not in "
+				 "effect",
+				 owed[i]->section);
+			note_error(st, msg);
+		}
+		if (!results)
+			continue;
+		cJSON *o = cJSON_CreateObject();
+		if (!o)
+			continue;
+		cJSON_AddStringToObject(o, "daemon", "system");
+		cJSON_AddStringToObject(o, "section", owed[i]->section);
+		cJSON_AddStringToObject(o, "status", rc == 0 ? "ok" : "error");
+		cJSON_AddItemToArray(results, o);
+	}
+
+	rcd_enact_done(st);
+}
+
 static cJSON *do_restarts(rcd_state_t *st, const cJSON *root, bool default_stale)
 {
 	if (st->applying)
@@ -340,6 +404,17 @@ static cJSON *do_restarts(rcd_state_t *st, const cJSON *root, bool default_stale
 	cJSON *refusal = select_daemons(st, root, want, default_stale);
 	if (refusal)
 		return refusal;
+
+	/*
+	 * The camera's own settings go with an unscoped apply and with
+	 * nothing else. `restart` is about daemons, and an apply narrowed to
+	 * one daemon is an operator asking for that daemon -- neither is a
+	 * request to change the address.
+	 */
+	const rcd_key_t *owed[RCD_STALE_MAX];
+	bool do_enacts = default_stale &&
+			 !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(root, "daemons")) &&
+			 rcd_enact_owed(st, owed, RCD_STALE_MAX) > 0;
 
 	cJSON *resp = rcd_ok();
 	if (!resp)
@@ -351,7 +426,7 @@ static cJSON *do_restarts(rcd_state_t *st, const cJSON *root, bool default_stale
 
 	/* Nothing to do is a success, not an error: `apply` is meant to be
 	 * safe to press twice. */
-	if (n == 0) {
+	if (n == 0 && !do_enacts) {
 		cJSON_AddBoolToObject(resp, "restarted", false);
 		rcd_config_report_stale(st, resp);
 		return resp;
@@ -360,6 +435,7 @@ static cJSON *do_restarts(rcd_state_t *st, const cJSON *root, bool default_stale
 	if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "dry_run"))) {
 		cJSON_AddBoolToObject(resp, "dry_run", true);
 		emit_plan(resp, want);
+		cJSON_AddBoolToObject(resp, "system", do_enacts);
 		return resp;
 	}
 
@@ -378,11 +454,20 @@ static cJSON *do_restarts(rcd_state_t *st, const cJSON *root, bool default_stale
 	emit_plan(resp, want);
 	run(st, want, default_stale, results);
 
+	/*
+	 * Last of all. Everything else has already been restarted by the time
+	 * the network goes, so a client that loses the camera here loses it
+	 * having had the rest of its apply carried out.
+	 */
+	if (do_enacts)
+		enact_system(st, results);
+
 	st->applying = false;
 	rcd_stale_save(st);
 
 	cJSON_AddBoolToObject(resp, "restarted", true);
 	rcd_config_report_stale(st, resp);
+	rcd_guard_report(st, resp);
 	return resp;
 }
 

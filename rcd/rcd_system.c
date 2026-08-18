@@ -791,6 +791,11 @@ static int tz_get(char *out, size_t outsz)
 
 static int tz_set(const char *name)
 {
+	/* A camera with no timezone is a camera with UTC, which is a zone in
+	 * the table rather than the absence of one. */
+	if (!name[0])
+		return -1;
+
 	const char *posix = rcd_zone_posix(name);
 	if (!posix)
 		return -1; /* unreachable: the enum was checked against this list */
@@ -815,7 +820,7 @@ static int tz_set(const char *name)
 	return 0;
 }
 
-const rcd_provider_t rcd_provider_timezone = {tz_get, tz_set};
+const rcd_provider_t rcd_provider_timezone = {tz_get, tz_set, NULL};
 
 /* ------------------------------------------------------------------ */
 /* NTP server                                                          */
@@ -845,6 +850,11 @@ static int ntp_get(char *out, size_t outsz)
 
 static int ntp_set(const char *host)
 {
+	/* An empty ntp.conf is not "no time server", it is a file ntpd reads
+	 * and finds nothing in. Refused rather than written. */
+	if (!host[0])
+		return -1;
+
 	/*
 	 * One server, replacing the pool the image ships with. `iburst` is
 	 * kept because the first sync is the one that matters on a camera
@@ -873,7 +883,7 @@ static int ntp_set(const char *host)
 	return 0;
 }
 
-const rcd_provider_t rcd_provider_ntp_server = {ntp_get, ntp_set};
+const rcd_provider_t rcd_provider_ntp_server = {ntp_get, ntp_set, NULL};
 
 /* ------------------------------------------------------------------ */
 /* Hostname                                                            */
@@ -959,11 +969,31 @@ static void hosts_rename(const char *name)
 	free(out);
 }
 
+/*
+ * The store, and nothing else. Writing the file is free and reversible;
+ * putting the name into force is neither, so it waits for `apply`.
+ */
 static int hostname_set(const char *name)
 {
+	/* Every camera has a name -- the boot script derives one from the MAC
+	 * when nothing else has -- so there is no state to go back to here. */
+	if (!name[0])
+		return -1;
+
 	char buf[128];
 	snprintf(buf, sizeof(buf), "%s\n", name);
-	if (write_file(PATH_HOSTNAME, buf) != 0)
+	return write_file(PATH_HOSTNAME, buf);
+}
+
+/*
+ * And this is where it costs something: every machine that knows this camera
+ * by name stops knowing it, until it looks the new one up.
+ */
+static int hostname_enact(void)
+{
+	char name[128];
+	read_line(PATH_HOSTNAME, name, sizeof(name));
+	if (!name[0])
 		return -1;
 
 	hosts_rename(name);
@@ -1003,4 +1033,4 @@ static int hostname_set(const char *name)
 	return 0;
 }
 
-const rcd_provider_t rcd_provider_hostname = {hostname_get, hostname_set};
+const rcd_provider_t rcd_provider_hostname = {hostname_get, hostname_set, hostname_enact};

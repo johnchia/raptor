@@ -63,6 +63,18 @@ void rcd_stale_clear(rcd_state_t *st, rcd_daemon_t d)
 	st->stale_count = kept;
 }
 
+void rcd_stale_forget(rcd_state_t *st, const char *section, const char *key)
+{
+	int kept = 0;
+	for (int i = 0; i < st->stale_count; i++) {
+		if (strcmp(st->stale[i].section, section) == 0 &&
+		    strcmp(st->stale[i].key, key) == 0)
+			continue;
+		st->stale[kept++] = st->stale[i];
+	}
+	st->stale_count = kept;
+}
+
 void rcd_config_report_stale(const rcd_state_t *st, cJSON *out)
 {
 	cJSON *arr = cJSON_AddArrayToObject(out, "stale");
@@ -94,8 +106,65 @@ void rcd_config_report_stale(const rcd_state_t *st, cJSON *out)
 		cJSON_AddItemToArray(arr, o);
 	}
 
+	/*
+	 * And the camera's own settings, which no daemon owns. Reported under
+	 * the same name the schema gives them so that a client grouping drift
+	 * by owner finds them where it found the keys -- a page that lists
+	 * what an apply will do must not leave out the half that changes the
+	 * address it is talking to.
+	 */
+	const rcd_key_t *owed[RCD_STALE_MAX];
+	int n = rcd_enact_owed(st, owed, RCD_STALE_MAX);
+	if (n > 0) {
+		cJSON *o = cJSON_CreateObject();
+		if (o) {
+			rcd_impact_t worst = RCD_IMPACT_NONE;
+			for (int i = 0; i < n; i++) {
+				rcd_impact_t imp = rcd_key_impact(owed[i]);
+				if (imp > worst)
+					worst = imp;
+			}
+			cJSON_AddStringToObject(o, "daemon", "system");
+			cJSON_AddStringToObject(o, "impact", rcd_impact_name(worst));
+
+			cJSON *keys = cJSON_AddArrayToObject(o, "keys");
+			for (int i = 0; keys && i < n; i++) {
+				cJSON *k = cJSON_CreateObject();
+				if (!k)
+					continue;
+				cJSON_AddStringToObject(k, "section", owed[i]->section);
+				cJSON_AddStringToObject(k, "key", owed[i]->key);
+				cJSON_AddItemToArray(keys, k);
+			}
+			cJSON_AddItemToArray(arr, o);
+		}
+	}
+
 	if (st->apply_error[0])
 		cJSON_AddStringToObject(out, "apply_error", st->apply_error);
+}
+
+int rcd_enact_owed(const rcd_state_t *st, const rcd_key_t **out, int max)
+{
+	int n = 0;
+	for (int i = 0; i < st->stale_count && n < max; i++) {
+		const rcd_key_t *k = rcd_key_find(st->stale[i].section, st->stale[i].key);
+		if (k && k->provider && k->provider->enact)
+			out[n++] = k;
+	}
+	return n;
+}
+
+void rcd_enact_done(rcd_state_t *st)
+{
+	int kept = 0;
+	for (int i = 0; i < st->stale_count; i++) {
+		const rcd_key_t *k = rcd_key_find(st->stale[i].section, st->stale[i].key);
+		if (k && k->provider && k->provider->enact)
+			continue;
+		st->stale[kept++] = st->stale[i];
+	}
+	st->stale_count = kept;
 }
 
 /* ------------------------------------------------------------------ */
@@ -420,6 +489,67 @@ static const char *render(const rcd_key_t *k, const cJSON *v, rcd_edit_t *e, cha
 		}
 		memcpy(e->rendered, s, n);
 		e->rendered[n] = '\0';
+		return NULL;
+	}
+
+	if (k->type == V_IPV4) {
+		if (!cJSON_IsString(v) || !v->valuestring) {
+			snprintf(err, errsz, "'%s' must be a string", k->key);
+			return RCD_E_TYPE;
+		}
+		const char *sv = v->valuestring;
+
+		/*
+		 * Empty is a value where the table allows it. A camera with no
+		 * gateway is on a flat network and a camera with no name
+		 * server is one that resolves nothing -- both are
+		 * configurations somebody may mean, and neither can be
+		 * expressed by leaving the key out of a form that always
+		 * submits every field.
+		 */
+		if (!sv[0]) {
+			if (k->min != 0) {
+				snprintf(err, errsz, "'%s' needs an address", k->key);
+				return RCD_E_RANGE;
+			}
+			e->rendered[0] = '\0';
+			return NULL;
+		}
+
+		int octet = 0, digits = 0, value = 0;
+		bool bad = false;
+		for (const char *c = sv;; c++) {
+			if (*c >= '0' && *c <= '9') {
+				/* A leading zero is octal to most things that
+				 * will read this file back, and to nobody who
+				 * types it. Refused rather than reinterpreted. */
+				if (digits == 1 && value == 0)
+					bad = true;
+				value = value * 10 + (*c - '0');
+				if (++digits > 3 || value > 255)
+					bad = true;
+				continue;
+			}
+			if (*c == '.' || *c == '\0') {
+				if (digits == 0)
+					bad = true;
+				octet++;
+				digits = 0;
+				value = 0;
+				if (*c == '\0')
+					break;
+				continue;
+			}
+			bad = true;
+			break;
+		}
+		if (bad || octet != 4) {
+			snprintf(err, errsz, "'%s' must be four numbers 0-255 separated by dots",
+				 k->key);
+			return RCD_E_CHOICE;
+		}
+
+		rss_strlcpy(e->rendered, sv, sizeof(e->rendered));
 		return NULL;
 	}
 
@@ -849,20 +979,6 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 	}
 
 	/*
-	 * Armed before the first write, and over every guarded key rather than
-	 * the ones named here -- both for the same reason: what has to be put
-	 * back is the state as it was before this request touched anything.
-	 * The longest window wins, since the client has to survive all of it.
-	 */
-	int window = 0;
-	for (int i = 0; i < n; i++) {
-		if (edits[i].k->guard_sec > window)
-			window = edits[i].k->guard_sec;
-	}
-	if (window)
-		rcd_guard_arm(st, window);
-
-	/*
 	 * Whether a live key should also be applied now. It is by default: a
 	 * slider that needs a second round trip to show anything is not a
 	 * slider. A client filling a whole form at once can ask to stage
@@ -878,6 +994,7 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 
 	bool to_file[RCD_EDITS_MAX] = {false};
 	bool provided[RCD_EDITS_MAX] = {false};
+	bool staged[RCD_EDITS_MAX] = {false};
 	const char *note[RCD_EDITS_MAX] = {NULL};
 	char notebuf[RCD_EDITS_MAX][192];
 
@@ -897,6 +1014,15 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		 * report helps anyone with.
 		 */
 		if (k->provider) {
+			/*
+			 * What is about to be written over, remembered before
+			 * it is. Nothing starts counting here: this costs
+			 * nothing and can be undone by writing it again, which
+			 * is precisely why it is not the moment to guard.
+			 */
+			if (k->guard_sec > 0)
+				rcd_guard_hold(st);
+
 			if (k->provider->set(edits[i].rendered) != 0) {
 				cJSON_Delete(resp);
 				cJSON *e = rcd_err(RCD_E_IO, "the setting could not be stored");
@@ -904,8 +1030,23 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 				return e;
 			}
 			provided[i] = true;
-			if (rcd_key_impact(k) == RCD_IMPACT_REBOOT)
+
+			/*
+			 * A provider that can enact has not enacted: the store
+			 * holds the value and the running system does not, so
+			 * it is drift like any other and `apply` settles it.
+			 */
+			if (k->provider->enact) {
+				rcd_stale_add(st, k->section, k->key, RCD_D_COUNT);
+				staged[i] = true;
+				note[i] =
+					k->guard_sec > 0
+						? "stored -- apply puts it in force, and you will "
+						  "have to confirm it"
+						: "stored -- apply puts it in force";
+			} else if (rcd_key_impact(k) == RCD_IMPACT_REBOOT) {
 				note[i] = "stored -- takes effect on reboot";
+			}
 			continue;
 		}
 
@@ -948,6 +1089,10 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 
 	int saved = 0;
 	for (int i = 0; i < n; i++) {
+		if (staged[i]) {
+			saved++; /* already recorded above, with no daemon */
+			continue;
+		}
 		if (!to_file[i])
 			continue;
 		rcd_stale_add(st, edits[i].k->section, edits[i].k->key,
@@ -980,7 +1125,9 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		 * what the key's impact says, and the note beside it.
 		 */
 		cJSON_AddStringToObject(o, "applied",
-					(provided[i] || !to_file[i]) ? "live" : "saved");
+					(provided[i] && !staged[i]) || (!provided[i] && !to_file[i])
+						? "live"
+						: "saved");
 		if (note[i] && note[i][0])
 			cJSON_AddStringToObject(o, "note", note[i]);
 		cJSON_AddItemToArray(results, o);
@@ -990,8 +1137,8 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 	 * ask a second question to know whether it just cost an outage. */
 	rcd_config_report_stale(st, resp);
 
-	/* And what is now on a clock. A client that ignores this loses the
-	 * change it just made, which is the safe direction to fail in. */
+	/* And the clock, if one is already running -- a set made inside an
+	 * open window does not start a second one. */
 	rcd_guard_report(st, resp);
 	return resp;
 }

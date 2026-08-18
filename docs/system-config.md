@@ -4,10 +4,12 @@ A design for `[system]` — timezone, NTP, hostname, network — as a section of
 `rcd` rather than a daemon of its own, written so that a captive portal is a
 client of the same socket instead of a second way to configure the camera.
 
-Status: the provider hook, the two time keys, the confirm-or-revert timer and
-`system.hostname` are **built and board-verified**; everything from
-[Wired network settings](#phasing) onward is still design. Verified facts cite
-the file they came from, on a running SSC377QE (INFINITY6C) board on an OpenIPC
+Status: the provider hook, the time keys, the confirm-or-revert timer,
+`system.hostname` and the whole of `[network]` are **built and
+board-verified** -- the camera has been moved to a second address over the
+connection it was moved with, and left to put itself back. Everything from
+[Wireless settings](#phasing) onward is still design. Verified facts cite the
+file they came from, on a running SSC377QE (INFINITY6C) board on an OpenIPC
 base.
 
 ## Why this exists
@@ -71,7 +73,7 @@ section*. `rcd_key_t` carries section, key, type, range, choices and an optional
 System keys are not that. Their stores are `/etc/TZ`, `/etc/ntp.conf`,
 `/etc/network/interfaces.d/eth0` and the U-Boot environment.
 
-So a key may name an accessor pair instead of taking the config-file default:
+So a key may name an accessor set instead of taking the config-file default:
 
 ```c
 typedef struct rcd_provider {
@@ -81,12 +83,26 @@ typedef struct rcd_provider {
 	/* Store it. The value has already been validated against the table
 	 * entry, so this never parses and never bounds-checks. */
 	int (*set)(const char *value);
+
+	/* Put the stored value into force. Optional -- and its presence is
+	 * what decides the key's tier. Takes no argument: it re-reads the
+	 * store, so the same call enacts an edit and enacts a revert. */
+	int (*enact)(void);
 } rcd_provider_t;
 ```
 
 One field on `rcd_key_t`. `rcd_cmd_get` and `rcd_cmd_set` branch on it rather
 than opening a daemon socket; `rcd_section_owner` answers `RCD_D_COUNT`, which
 already means "nothing owns this".
+
+**`enact` is the whole of the tier question for these keys.** A provider
+without one is a store the system reads as it stands — the timezone is in
+`/etc/TZ` whether or not anything has looked — so `set` is the entire
+operation and the key is live. A provider with one has separated writing the
+value from paying for it, and closing that gap is exactly what `apply` means
+everywhere else in this table. Which is also the only honest answer for a
+setting that can cost the operator their connection: it must be something they
+press a button for, not something that happens as they leave the field.
 
 Most of the implementation exists. `rmq/rmq_system.c` already writes `/etc/TZ`
 and `/etc/ntp.conf`, carries the generated timezone table, and validates a
@@ -110,7 +126,12 @@ should not keep one door open into one.
 space, quote or shell metacharacter can appear, so the value cannot become a
 second config directive on the line it is written to. `V_IPV4` is stricter than
 `V_HOST` on purpose: an address field that accepts a name produces a config file
-that fails at `ifup`, after the network is already down.
+that fails at `ifup`, after the network is already down. As built it also
+refuses a **leading zero** — `192.168.01.1` is octal to most things that will
+parse the file back and decimal to everyone who types it — and accepts the
+**empty string** where the table says the key is optional, because "no gateway"
+and "no name server" are configurations somebody may mean and a form that
+always submits every field has to be able to say so.
 
 `V_TEXT` exists because an SSID is neither of those and is not a secret either.
 It is up to 32 arbitrary octets, so `V_HOST` would refuse the spaces and
@@ -173,12 +194,12 @@ Cost is what an `apply` of that key costs whoever is using the camera.
 |---|---|---|---|---|
 | `system.timezone` | `V_ENUM` | `/etc/TZ` + `/etc/timezone` | reboot | 309 choices from the generated zone table. `/etc/TZ` takes the POSIX rule, `/etc/timezone` the name, so the control reads back the zone that was picked rather than whichever one shares its rule |
 | `system.ntp_server` | `V_HOST` | `/etc/ntp.conf` | service | Written as `server <host> iburst`; `S49ntpd restart` applies it now. Already implemented |
-| `system.hostname` | `V_HOST` | `/etc/hostname` + `/etc/hosts` (overlay) | service, revert | In force at once: the kernel is renamed and mdnsd re-announces. Also advertised by udhcpc, so it is how the camera names itself on the LAN. Implemented |
-| `network.dhcp` | `V_BOOL` | `interfaces.d/eth0` | revert | False switches the stanza to `static` and requires the three below |
-| `network.address` | `V_IPV4` | `interfaces.d/eth0` | revert | Kept while `dhcp` is true, so switching back and forth does not lose the static settings |
-| `network.netmask` | `V_IPV4` | `interfaces.d/eth0` | revert | |
-| `network.gateway` | `V_IPV4` | `interfaces.d/eth0` | revert | |
-| `network.dns` | `V_IPV4` | `/etc/resolv.conf` | revert | Overwritten by udhcpc on a lease, so only meaningful with `dhcp = false`. The schema should say so rather than let it look effective |
+| `system.hostname` | `V_HOST` | `/etc/hostname` + `/etc/hosts` (overlay) | service, revert | `apply` renames the running kernel and reloads mdnsd. Also advertised by udhcpc, so it is how the camera names itself on the LAN. Implemented |
+| `network.dhcp` | `V_BOOL` | `interfaces.d/<primary>` | network, revert | The method word on the `iface` line. False switches the stanza to `static` and uses the three below. Implemented |
+| `network.address` | `V_IPV4` | `interfaces.d/<primary>` | network, revert | Kept while `dhcp` is true, so switching back and forth does not lose the static settings — busybox's ifupdown stores options it does not recognise rather than refusing them. Implemented |
+| `network.netmask` | `V_IPV4` | `interfaces.d/<primary>` | network, revert | Implemented |
+| `network.gateway` | `V_IPV4` | `interfaces.d/<primary>` | network, revert | Empty is a value: a camera on a flat network has no route out. Implemented |
+| `network.dns` | `V_IPV4` | `interfaces.d/<primary>`, as `dns-nameserver` | network, revert | **Not** `/etc/resolv.conf`, which udhcpc rewrites on every lease and is therefore not a store. The stanza keeps it; the enact writes `resolv.conf` from it when the method is static, and lets the lease script win when it is not. Reads back from `resolv.conf` when the stanza is silent, so a camera that has never been given one reports the server it is actually using. Implemented |
 | `wifi.ssid` | `V_TEXT` | U-Boot env `wlanssid` | reboot | Capped at 32 octets |
 | `wifi.psk` | `V_SECRET` | U-Boot env `wlanpass` | revert | Accepts a passphrase or a 64-hex pre-derived PSK |
 
@@ -232,27 +253,36 @@ is not a safety net for a wired camera.
 An address change is delivered over the connection it is about to break.
 Applied optimistically, a typo puts a camera on a pole beyond reach.
 
-So a key may declare a window. rcd snapshots the guarded keys, writes the new
-value, and arms a timer. If `{"cmd":"confirm"}` does not arrive before it
-expires, the snapshot is written back through the same providers. The client's
-job is to re-reach the camera — at its new address, by its new name — and
-confirm; the console knows both, so it can try on its own and show a countdown
-while it does.
+So a key may declare a window. `set` writes the store and remembers what was
+there; `apply` puts it into force and starts a timer. If `{"cmd":"confirm"}`
+does not arrive before it expires, the snapshot is written back and re-enacted
+through the same providers. The client's job is to re-reach the camera — at its
+new address, by its new name — and confirm; the console knows both, so it can
+go looking on its own and show a countdown once it has found it.
 
 ```
-                set (guarded key)
-     Steady ──────────────────────▶ Armed ──────── confirm ────────▶ Steady
-        ▲                             │
-        │                             ├── timer expires ──┐
-        │                             └── cancel ─────────┤
-        └────── snapshot re-enacted ─────────── Reverting ┘
+            set                apply
+   Steady ────────▶ Held ──────────────▶ Armed ──── confirm ────▶ Steady
+      ▲                                    │
+      │                                    ├── timer expires ──┐
+      │                                    └── cancel ─────────┤
+      └────── snapshot re-enacted ──────────────── Reverting ───┘
 ```
 
-**The guard arms on `set`, not on `apply`.** A provider's store *is* the value,
-so a provider-backed key is in force the moment `set` returns and there is no
-later step to hang a guard on. That is the same property that makes those keys
-report tier `live`, and it is why the spec's original wording — a guarded form
-of `apply` — did not survive contact with the hook.
+**`set` takes the snapshot; `apply` starts the clock.** Those are different
+moments for a reason. `set` writes a store and costs nothing — the interface is
+still up, the camera still answers to its old name — so there is nothing to
+guard yet, and a snapshot taken any later would capture the value that was just
+written and revert to it, which is no revert at all. `apply` is where it is put
+into force and where the client may lose its way back.
+
+This is the second correction the implementation made to this document, and it
+undoes the first: the guard was briefly armed by `set`, on the reasoning that a
+provider's store *is* the value. That was true of the timezone and false of
+everything worth guarding, and it showed up as soon as it was used — a hostname
+field that committed as you left it, and a countdown nobody had asked to start.
+Adding `enact` puts those keys back in the restart tier, where an operator
+presses Apply for them like everything else.
 
 - `set` reports a `guard` object: `armed`, `revert_in_sec`, `window_sec` and
   the keys it covers. `pending` and `state` report the same object while it is
@@ -263,6 +293,11 @@ of `apply` — did not survive contact with the hook.
   out. Both answer `ok` with nothing armed, because "there is no guard" is the
   answer a reconnecting client is asking for, and an error would send it
   looking for a fault.
+- **The revert re-enacts**, and once per store rather than once per key: five
+  directives of one interface come back together or the interface bounces five
+  times. A snapshot that was held and never applied is put back without
+  enacting anything — undoing a change that never reached the interface must
+  not be an outage the undo invented.
 - **The snapshot covers every guarded key, not the edited ones.** Guarded
   providers share files: a batch that turns DHCP off and sets an address has to
   be undone as a batch, and a key the request did not name may still have been
@@ -273,7 +308,9 @@ of `apply` — did not survive contact with the hook.
 - **A reboot inside the window reverts.** The snapshot is on flash, because
   restoring it has to survive losing power; the deadline is in `/run`, which is
   a tmpfs. Finding one without the other means the camera rebooted since the
-  guard was armed, and a camera that rebooted did not confirm. That is what
+  guard was armed, and a camera that rebooted did not confirm. The record says
+  whether it was ever armed, so a snapshot that is merely held — written by a
+  `set` that no `apply` followed — is carried forward instead of enacted. That is what
   makes power-cycling a stranded camera a recovery rather than a commitment —
   and it is the same evidence, read the other way, that lets an rcd which
   merely restarted pick the window back up with the time that is left.
@@ -306,6 +343,40 @@ guarded until the machinery has been exercised on one that cannot.
 The DHCP lease still carries the old name until the interface next comes up.
 Nothing forces a renew: dropping the link is a bigger interruption than the
 stale lease it would fix.
+
+### Finding the camera again
+
+The reply to a guarded `apply` is not worth waiting for. On an address change
+the socket is gone before rcd can write it, so the console sends the apply and
+does not await it; what it does instead is go looking.
+
+```
+    Apply ─▶ set ─▶ apply (not awaited) ─▶ "Reconnecting…"
+                                              │
+                        ┌─────────────────────┼──────────────────────┐
+                    answers here          silent 3×              silent on
+                        │                     │                  past the window
+                        ▼                     ▼                      │
+                   "Keep it"           move to the new URL            ▼
+                                       (page reloads there,     camera reverts,
+                                        finds the guard,        old address works,
+                                        offers "Keep it")       page finds it
+```
+
+Three properties of that, each the answer to a way it could mislead:
+
+- **No Keep button until the camera answers.** Confirming a setting whose
+  effect you cannot see is how a camera ends up unreachable *and* confirmed. A
+  button posting into the dark would report a failure that means nothing.
+- **The redirect is a real navigation**, because the API is same-origin: a page
+  at the old address cannot ask the new one anything. The reloaded page finds
+  the armed guard in `pending`, which is why a page loaded mid-window is the
+  expected case rather than the odd one.
+- **The candidate address comes from the edit**, and only from the two keys
+  that move the camera. An address the camera is about to ask a DHCP server
+  for is not one the page can predict, so it does not pretend to — it waits,
+  and waiting is itself the recovery, since the window running out puts the
+  camera back where the page already is.
 
 ## Provisioning and the portal
 
@@ -417,10 +488,11 @@ that has a radio.
    `system.hostname`, whose failure mode is real and recoverable. All four
    exits were walked on the board: confirm, cancel, the timer running out, and
    a reboot inside the window.
-3. **Wired network settings.** `V_IPV4`, the `interfaces.d/eth0` provider,
-   DHCP-versus-static, and the console flow that re-reaches the camera at its
-   new address. The first feature where getting it wrong costs a trip to the
-   camera, hence the ordering.
+3. **Wired network settings.** *Done.* `V_IPV4`, `RCD_IMPACT_NETWORK`, the
+   `interfaces.d/<primary>` provider, DHCP-versus-static, and the console flow
+   that goes looking for the camera afterwards. Board-verified the hard way:
+   the camera was moved to a second address over the connection that moved it,
+   found there, and then left alone until it put itself back.
 4. **Wireless settings.** `V_TEXT`, `V_SECRET` and the `fw_setenv` provider,
    with the packages that make a radio work at all. Configurable over the wire
    from the console before any portal exists, which is the order that lets the

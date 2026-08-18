@@ -277,14 +277,14 @@ select{background:var(--sink);border:1px solid var(--line);border-radius:var(--r
          deadline: a change nobody confirms is put back by the camera. -->
     <footer class="applybar guard" id="guardbar" hidden>
       <div class="lead">
-        <span class="count">Still there? Confirm before this runs out</span>
+        <span class="count" id="gdTitle"></span>
         <span class="cost" id="gdWhat"></span>
       </div>
       <div class="keys" id="gdKeys"></div>
       <div class="sp"></div>
       <span class="clock" id="gdClock"></span>
-      <button class="btn ghost" id="btnGuardUndo">Undo now</button>
-      <button class="btn primary" id="btnGuardKeep">Keep it</button>
+      <button class="btn ghost" id="btnGuardUndo" hidden>Undo now</button>
+      <button class="btn primary" id="btnGuardKeep" hidden>Keep it</button>
     </footer>
     <footer class="applybar" id="applybar" hidden>
       <div class="lead">
@@ -345,6 +345,11 @@ async function api(req, quiet) {
    from this map still renders -- see label() below. */
 const L = {
  "system.timezone":["Timezone","","Sets the clock's zone and its daylight-saving rule. Nothing running re-reads it, so the camera has to restart before timestamps move."],
+ "network.dhcp":["Get an address automatically","","Ask the network for an address at boot. Off means the four settings below are used instead."],
+ "network.address":["IP address","","The address this camera answers on. Applied together with the three below, and put back unless you confirm."],
+ "network.netmask":["Subnet mask","","Which part of the address is the network. 255.255.255.0 for an ordinary home or office network."],
+ "network.gateway":["Gateway","","The router traffic leaves through. Leave empty on a network with no route out."],
+ "network.dns":["Name server","","Who resolves names for the camera. With an automatic address this is replaced by whatever the network hands out."],
  "system.hostname":["Camera name","","What this camera calls itself on the network — mdnsd answers to <name>.local and the DHCP lease carries it. Changing it takes effect at once, so confirm within the window or the camera puts the old name back."],
  "system.ntp_server":["Time server","","The host to sync the clock from. Applied at once — ntpd is restarted with it."],
  "sensor.fps":["Sensor frame rate","fps","The rate the sensor is driven at. Every stream is capped by it."],
@@ -430,8 +435,9 @@ const TABS = [
  {id:"record",  name:"Recording",   groups:[{title:"Motion", section:"motion"},
                                             {title:"Recording", section:"recording"},
                                             {title:"Time-lapse", section:"timelapse"}]},
- {id:"system",  name:"System",       groups:[{title:"Time", section:"system",
-                                             note:"The camera has no zoneinfo database, so the list is the one this build carries."}]},
+ {id:"system",  name:"System",       groups:[{title:"Time", section:"system"},
+                                            {title:"Network", section:"network",
+                                             note:"Applied together, and put back after 90 seconds unless you confirm — so a wrong address costs a wait, not a trip to the camera."}]},
  {id:"services",name:"Services",    groups:[{title:"RTSP", section:"rtsp"},
                                             {title:"Snapshots & MJPEG", section:"http"},
                                             {title:"Overlay", section:"osd"},
@@ -511,7 +517,7 @@ function isIdentifier(k) { return IDENTIFIER.test(k.key); }
 function widgetFor(k) {
   if (k.type === "bool") return "switch";
   if (k.type === "credential") return "cred";
-  if (k.type === "host") return "text";
+  if (k.type === "host" || k.type === "ipv4") return "text";
   if (k.type === "enum") return (k.choices || []).length <= 4 ? "seg" : "select";
   if (k.labels) return k.labels.length <= 4 ? "seg" : "select";
   const span = k.max - k.min;
@@ -584,7 +590,6 @@ async function commitLive(id, val, el, prev) {
   const wire = k.labels ? labelOf(k, val) : val;
   try {
     const r = await api({cmd:"set", edits:[{section:k.section, key:k.key, value:wire}]});
-    if (k.guard_sec) noteGuard(r);
     const res = (r.results || [])[0] || {};
     /* The device's answer wins over what was typed: an ISP quantises, and a
      * live command that was refused falls back to the file and says so. */
@@ -743,6 +748,7 @@ const COST = {
   service:"nothing a viewer notices",
   stream:"connected viewers are dropped",
   pipeline:"capture stops, everything downstream reconnects",
+  network:"every connection to the camera drops, including this page",
   reboot:"the camera has to restart before anything reads it"
 };
 /* Two different questions, and a key can answer them differently. The tier
@@ -931,7 +937,7 @@ function paintTabs() {
 }
 
 /* ═══ apply ══════════════════════════════════════════════════════════════ */
-const RANK = {service:1, stream:2, pipeline:3};
+const RANK = {service:1, stream:2, pipeline:3, network:4};
 const bar = document.getElementById("applybar");
 const btnApply = document.getElementById("btnApply");
 
@@ -942,16 +948,22 @@ function refreshBar() {
   paintTabs();
   if (!n) return;
   const worst = worstCost();
-  const daemons = [...new Set([...dirty].map(id => byId[id].owner))];
+  const owners = [...new Set([...dirty].map(id => byId[id].owner))];
+  const daemons = owners.filter(o => o !== "system");
   document.getElementById("apCount").textContent = n + (n === 1 ? " change pending" : " changes pending");
+  /* "system" is not a daemon and cannot be restarted; what happens to those
+     keys is that the camera enacts them, which is a different sentence. */
+  const what = [daemons.length ? "Restarts " + daemons.join(", ") : null,
+                owners.includes("system") ? "changes the camera itself" : null]
+               .filter(Boolean).join(", ");
   document.getElementById("apCost").textContent =
-    "Restarts " + daemons.join(", ") + " — " + COST[worst] + ".";
+    what.charAt(0).toUpperCase() + what.slice(1) + " — " + COST[worst] + ".";
   const kb = document.getElementById("apKeys"); kb.textContent = "";
   [...dirty].slice(0, 5).forEach(id => {
     const c = document.createElement("code"); c.textContent = id; kb.append(c);
   });
   if (n > 5) { const c = document.createElement("code"); c.textContent = "+" + (n - 5) + " more"; kb.append(c); }
-  if (worst === "pipeline") btnApply.className = "btn danger";
+  if (worst === "pipeline" || worst === "network") btnApply.className = "btn danger";
 }
 
 function worstCost() {
@@ -963,7 +975,9 @@ btnApply.addEventListener("click", async () => {
   const worst = worstCost();
   if (worst !== "service" && !armed) {
     armed = true;
-    btnApply.textContent = worst === "pipeline" ? "Confirm — stops capture" : "Confirm — drops viewers";
+    btnApply.textContent = worst === "network" ? "Confirm — changes the address"
+                         : worst === "pipeline" ? "Confirm — stops capture"
+                         : "Confirm — drops viewers";
     return;
   }
   await doApply(worst);
@@ -988,6 +1002,21 @@ async function doApply(worst) {
   try {
     if (edits.length) await api({cmd:"set", edits: edits});
     if (worst === "pipeline") { screen.classList.add("busy"); cam.removeAttribute("src"); }
+
+    /*
+     * A guarded key changes the way back to the camera, so the reply to this
+     * apply is not waited for: on an address change the socket is gone before
+     * rcd can write it. The apply is sent, and then this page goes looking.
+     */
+    const guarded = [...dirty].filter(id => byId[id].guard_sec);
+    if (guarded.length) {
+      const target = reconnectTarget(guarded);
+      dirty.forEach(id => SAVED[id] = V[id]); dirty.clear();
+      api({cmd:"apply"}).then(noteGuard).catch(() => {});
+      await reconnect(target);
+      return;
+    }
+
     await api({cmd:"apply"});
     dirty.forEach(id => SAVED[id] = V[id]); dirty.clear();
     await loadValues();
@@ -1014,37 +1043,65 @@ async function doApply(worst) {
 }
 
 /* ═══ confirm-or-revert ══════════════════════════════════════════════════
-   Some settings are delivered over the connection they are about to break, so
-   the camera arms a timer and puts them back unless somebody comes back and
-   says the camera is still reachable. This page is that somebody: it counts
-   down locally at 1 Hz and re-reads the real number from the camera on every
-   state poll, so a tab that was asleep, or a clock that drifted, corrects
-   itself rather than showing a countdown of its own invention. */
+   A guarded key is applied, never typed into effect: it sits in the apply bar
+   with everything else, and pressing Apply is what puts it in force. What
+   happens next is the interesting part -- an address change ends this page's
+   connection to the camera before the reply to that apply can be written, so
+   there is nothing to await and nothing to read.
+
+   So the page does what a person would: it goes looking. It keeps asking the
+   camera whether it is there, at the address it knows and then at the address
+   it just asked for, and only when the camera answers does it offer to keep
+   the change. Confirming a setting you cannot see the effect of is how a
+   camera ends up unreachable and confirmed. */
 const gbar = document.getElementById("guardbar");
+const gdTitle = document.getElementById("gdTitle");
+const gdWhat = document.getElementById("gdWhat");
+const gdClock = document.getElementById("gdClock");
+const btnKeep = document.getElementById("btnGuardKeep");
+const btnUndo = document.getElementById("btnGuardUndo");
 let guardLeft = 0, guardTick = null;
 
-function paintGuard() {
-  document.getElementById("gdClock").textContent = guardLeft + " s";
-}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-function showGuard(g) {
-  guardLeft = g.revert_in_sec || 0;
-  document.getElementById("gdWhat").textContent =
-    "The camera goes back to what it had before unless you keep this.";
+function guardKeys(keys) {
   const kb = document.getElementById("gdKeys"); kb.textContent = "";
-  (g.keys || []).forEach(k => {
+  (keys || []).forEach(k => {
     const c = document.createElement("code"); c.textContent = k.section + "." + k.key; kb.append(c);
   });
+}
+
+/* Connected, and the camera is waiting to be told. */
+function showGuard(g) {
+  guardLeft = g.revert_in_sec || 0;
+  gdTitle.textContent = "Still there? Confirm before this runs out";
+  gdWhat.textContent = "The camera goes back to what it had before unless you keep this.";
+  guardKeys(g.keys);
+  btnKeep.hidden = false; btnUndo.hidden = false;
   gbar.hidden = false;
-  paintGuard();
+  gdClock.textContent = guardLeft + " s";
   if (guardTick) return;
   guardTick = setInterval(() => {
     if (guardLeft > 0) guardLeft--;
-    paintGuard();
+    gdClock.textContent = guardLeft + " s";
     /* Zero here is this page's own arithmetic, not the camera's word for it.
        Ask, and let the answer -- guard gone -- close the bar. */
     if (guardLeft <= 0) loadPending();
   }, 1000);
+}
+
+/* Not connected yet. No Keep button: there is nothing to confirm from a page
+   that cannot reach the camera, and a button that posts into the dark would
+   report a failure that means nothing. */
+function showReconnect(target) {
+  gdTitle.textContent = "Reconnecting…";
+  gdWhat.textContent = target
+    ? "Applied. Looking for the camera at " + target.replace(/^https?:\/\//, "") + "."
+    : "Applied. Waiting for the camera to answer again.";
+  guardKeys(null);
+  btnKeep.hidden = true; btnUndo.hidden = true;
+  gbar.hidden = false;
+  gdClock.textContent = "";
 }
 
 async function hideGuard() {
@@ -1057,23 +1114,107 @@ async function hideGuard() {
   render();
 }
 
-/* Called with any reply that reports the guard: `set`, `pending`, `state`,
-   `confirm`, `cancel`. Never with one that does not, since absence would then
-   read as "disarmed" from a command that was never asked. */
+/* Called with any reply that reports the guard: `set`, `apply`, `pending`,
+   `state`, `confirm`, `cancel`. Never with one that does not, since absence
+   would then read as "disarmed" from a command that was never asked. */
 function noteGuard(r) {
   const g = r && r.guard;
   if (g && g.armed) showGuard(g); else hideGuard();
 }
 
-document.getElementById("btnGuardKeep").addEventListener("click", async () => {
+btnKeep.addEventListener("click", async () => {
   try { noteGuard(await api({cmd:"confirm"})); wlog("sys", "settings confirmed"); }
   catch (e) { wlog("err", "! confirm: " + e.message); }
 });
 
-document.getElementById("btnGuardUndo").addEventListener("click", async () => {
+btnUndo.addEventListener("click", async () => {
   try { noteGuard(await api({cmd:"cancel"})); wlog("sys", "settings put back"); }
   catch (e) { wlog("err", "! cancel: " + e.message); }
 });
+
+/*
+ * Where the camera will be once this is applied, when the page can work it
+ * out. Only the two keys that move it are here; everything else guarded keeps
+ * the address, and then the answer is "the address you are already using".
+ */
+function reconnectTarget(ids) {
+  const port = location.port ? ":" + location.port : "";
+  const url = host => location.protocol + "//" + host + port;
+
+  /* An address the camera is about to ask a DHCP server for is not one this
+     page can predict, so it does not pretend to. */
+  const toDhcp = ids.includes("network.dhcp") && V["network.dhcp"] === true;
+  if (!toDhcp && ids.includes("network.address") && V["network.address"]) return url(V["network.address"]);
+
+  if (ids.includes("system.hostname") && V["system.hostname"]) {
+    const n = V["system.hostname"];
+    /* mdnsd answers for <name>.local; a name that is already qualified is
+       one somebody's DNS is expected to know, and is used as given. */
+    return url(n.includes(".") ? n : n + ".local");
+  }
+  return null;
+}
+
+/* One question, a short fuse, and no logging: this is asked over and over
+   while the camera is not there, and every failure is expected. */
+async function probe(ms) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    const res = await fetch(API, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({cmd: "pending"}),
+      signal: ctl.signal
+    });
+    return res.ok ? await res.json() : null;
+  } catch (e) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/*
+ * Go looking for the camera, and move this page to it when it is not coming
+ * back to where we are. The redirect is a real navigation because the API is
+ * same-origin: a page at the old address cannot ask the new one anything.
+ *
+ * Failing that, keep asking past the window -- when the timer runs out the
+ * camera puts the old address back, which is this page's address, so waiting
+ * is itself the recovery.
+ */
+async function reconnect(target) {
+  showReconnect(target);
+  wlog("sys", "applied — waiting for the camera" + (target ? " at " + target : ""));
+
+  const moves = target && target !== location.origin;
+  const until = Date.now() + 150000;
+  let misses = 0;
+
+  while (Date.now() < until) {
+    await sleep(2000);
+    const p = await probe(4000);
+    if (p) {
+      noteGuard(p);
+      if (!p.guard) wlog("sys", "the camera is back and nothing is waiting to be confirmed");
+      return;
+    }
+    /* Three misses is six seconds of silence -- long enough that the
+       interface has gone down and not come back here, short enough that
+       nobody is left staring at a dead page. */
+    if (moves && ++misses === 3) {
+      wlog("sys", "moving to " + target);
+      location.href = target;
+      return;
+    }
+  }
+
+  gdTitle.textContent = "The camera has not come back";
+  gdWhat.textContent = target
+    ? "Try " + target + ". If it never answers, the camera puts the old settings back on its own."
+    : "The camera puts the old settings back on its own; this page will find it again when it does.";
+}
 
 /* ═══ preview ════════════════════════════════════════════════════════════
    The stream this shows is the one an apply tears down, so a failure here is

@@ -5,6 +5,7 @@
 #include "rcd_schema.h"
 
 #include "rcd_guard.h"
+#include "rcd_network.h"
 #include "rcd_system.h"
 
 #include <rss_common.h>
@@ -47,6 +48,8 @@ const char *rcd_impact_name(rcd_impact_t i)
 		return "stream";
 	case RCD_IMPACT_PIPELINE:
 		return "pipeline";
+	case RCD_IMPACT_NETWORK:
+		return "network";
 	case RCD_IMPACT_REBOOT:
 		return "reboot";
 	}
@@ -108,7 +111,8 @@ static const struct {
 	{"image", RCD_D_RVD},	  {"jpeg", RCD_D_RVD},	   {"audio", RCD_D_RAD},
 	{"rtsp", RCD_D_RSD},	  {"http", RCD_D_RHD},	   {"osd", RCD_D_ROD},
 	{"ircut", RCD_D_RIC},	  {"motion", RCD_D_RMD},   {"recording", RCD_D_RMR},
-	{"timelapse", RCD_D_RMR}, {"system", RCD_D_COUNT}, {NULL, RCD_D_COUNT},
+	{"timelapse", RCD_D_RMR}, {"system", RCD_D_COUNT}, {"network", RCD_D_COUNT},
+	{NULL, RCD_D_COUNT},
 };
 
 const char *rcd_section_reader(const char *section)
@@ -398,22 +402,60 @@ static const rcd_key_t keys[] = {
 	{"system", "hostname", V_HOST, 1, 63, NULL,
 	 GUARDED(rcd_provider_hostname, RCD_IMPACT_SERVICE, RCD_GUARD_NAME_SEC)},
 
+	/*
+	 * -- The camera's address. One interface, the camera's -- see
+	 *    rcd_network.h -- and five directives of one file, so they are
+	 *    declared together and enacted together: `apply` brings the
+	 *    interface down and back up once, whichever of them changed.
+	 *
+	 *    Every one of them is guarded, because every one of them can be
+	 *    wrong in a way that ends the conversation. This is the section
+	 *    the guard was built for; the hostname above was the rehearsal. --
+	 */
+	{"network", "dhcp", V_BOOL, 0, 0, NULL,
+	 GUARDED(rcd_provider_net_dhcp, RCD_IMPACT_NETWORK, RCD_GUARD_NET_SEC)},
+	{"network", "address", V_IPV4, 1, 0, NULL,
+	 GUARDED(rcd_provider_net_address, RCD_IMPACT_NETWORK, RCD_GUARD_NET_SEC)},
+	{"network", "netmask", V_IPV4, 1, 0, NULL,
+	 GUARDED(rcd_provider_net_netmask, RCD_IMPACT_NETWORK, RCD_GUARD_NET_SEC)},
+	/* A camera on a flat network has no gateway and no name server, so
+	 * both of these accept the empty string and the two above do not. */
+	{"network", "gateway", V_IPV4, 0, 0, NULL,
+	 GUARDED(rcd_provider_net_gateway, RCD_IMPACT_NETWORK, RCD_GUARD_NET_SEC)},
+	{"network", "dns", V_IPV4, 0, 0, NULL,
+	 GUARDED(rcd_provider_net_dns, RCD_IMPACT_NETWORK, RCD_GUARD_NET_SEC)},
+
 	{NULL, NULL, V_INT, 0, 0, NULL, SAVED},
 };
 
 /*
  * The tier answers one question: does this key still owe something to `apply`?
  *
- * A live command does not -- the daemon has the value. Neither does a
- * provider: its store is the value, so once it is written rcd has nothing
- * further to do and `apply` would find nothing to enact. What the *running*
- * system does with it is a separate question, and the impact is where that is
- * answered -- the timezone is stored the moment it is set and read once, at
- * boot, so it is live and costs a reboot.
+ * A live command does not -- the daemon has the value. Nor does a provider
+ * with no way to enact: its store is read as it stands, so once it is written
+ * rcd has nothing further to do. What the *running* system does with it is a
+ * separate question, and the impact is where that is answered -- the timezone
+ * is stored the moment it is set and read once, at boot, so it is live and
+ * costs a reboot.
+ *
+ * A provider that *can* enact is the restart tier by the same test: the store
+ * holds the value and the system does not, and closing that gap is what
+ * `apply` is for. It is also the only honest answer for a key that costs the
+ * operator their connection -- a setting that dangerous must be something
+ * they press a button for, not something that happens as they leave the
+ * field.
  */
 bool rcd_key_live(const rcd_key_t *k)
 {
-	return k && (k->live_cmd || k->provider);
+	if (!k)
+		return false;
+	if (k->live_cmd)
+		return true;
+	/* A provider that can enact has separated storing the value from
+	 * putting it in force, and the second half is owed to `apply` --
+	 * which is what the restart tier means. One that cannot enact is a
+	 * store the system reads as it stands, so `set` is the whole of it. */
+	return k->provider && !k->provider->enact;
 }
 
 rcd_impact_t rcd_key_impact(const rcd_key_t *k)
@@ -546,6 +588,8 @@ static const char *type_name(rcd_val_type_t t)
 		return "credential";
 	case V_HOST:
 		return "host";
+	case V_IPV4:
+		return "ipv4";
 	}
 	return "int";
 }
@@ -584,6 +628,11 @@ static void emit_key(cJSON *arr, const rcd_key_t *k)
 			emit_labels(o, k->choices);
 	} else if (k->type == V_CRED || k->type == V_HOST) {
 		cJSON_AddNumberToObject(o, "max_length", k->max);
+	} else if (k->type == V_IPV4) {
+		/* Whether the empty string is one of its values. A form that
+		 * always submits every field needs to know which of them it
+		 * may submit empty. */
+		cJSON_AddBoolToObject(o, "optional", k->min == 0);
 	} else if (k->type == V_ENUM) {
 		emit_choices(o, k->choices);
 	}
