@@ -10,12 +10,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define PATH_TZ	      RCD_SYSCONF_DIR "/TZ"
 #define PATH_TIMEZONE RCD_SYSCONF_DIR "/timezone"
 #define PATH_NTP      RCD_SYSCONF_DIR "/ntp.conf"
 #define PATH_NTPD     RCD_SYSCONF_DIR "/init.d/S49ntpd"
+#define PATH_HOSTNAME RCD_SYSCONF_DIR "/hostname"
+#define PATH_HOSTS    RCD_SYSCONF_DIR "/hosts"
+#define PATH_MDNSD    RCD_SYSCONF_DIR "/init.d/S50mdnsd"
 
 /*
  * Names are what an operator picks; the POSIX string at the same index is what
@@ -729,6 +733,11 @@ static int write_file(const char *path, const char *content)
 		RSS_WARN("system: cannot write %s: %s", tmp, strerror(errno));
 		return -1;
 	}
+	/* rcd runs with no umask, so a new file would otherwise land
+	 * world-writable. These are read by everything and written by one
+	 * daemon, which is what 0644 says. */
+	if (fchmod(fileno(f), 0644) != 0)
+		RSS_WARN("system: cannot set the mode on %s: %s", tmp, strerror(errno));
 	bool ok = fputs(content, f) >= 0;
 	if (fclose(f) != 0)
 		ok = false;
@@ -865,3 +874,133 @@ static int ntp_set(const char *host)
 }
 
 const rcd_provider_t rcd_provider_ntp_server = {ntp_get, ntp_set};
+
+/* ------------------------------------------------------------------ */
+/* Hostname                                                            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The camera's name, which is how it is found on the LAN: mdnsd answers to
+ * <name>.local and udhcpc offers the same string to the DHCP server, so this
+ * is an address by another route and is guarded accordingly -- rcd_guard.h.
+ *
+ * /etc/hostname is the store. The packaged copy underneath is left alone by
+ * writing through the overlay, which is the only way /etc is writable here,
+ * and matters because sysupgrade reads the SoC out of the hostname shipped in
+ * the image it is about to flash.
+ */
+
+static int hostname_get(char *out, size_t outsz)
+{
+	char name[128];
+	read_line(PATH_HOSTNAME, name, sizeof(name));
+
+	/* The file is what survives a reboot, so it is the answer whenever it
+	 * has one. The kernel's copy is the fallback for an image that carries
+	 * no such file at all. */
+	if (!name[0] && gethostname(name, sizeof(name)) != 0)
+		return -1;
+	if (!name[0])
+		return -1;
+
+	rss_strlcpy(out, name, outsz);
+	return 0;
+}
+
+/*
+ * Buildroot writes the hostname into /etc/hosts as well, as the 127.0.1.1
+ * entry that lets the machine resolve its own name. Renaming the host without
+ * it leaves that line pointing at a name nothing answers to, and everything
+ * that resolves its own hostname -- syslog, and anything binding by name --
+ * waits for a lookup that fails.
+ *
+ * Only that line is rewritten, and only its second field. A hosts file with no
+ * such line is left as it is rather than given one: this repairs a convention
+ * the image already follows, it does not impose it.
+ */
+static void hosts_rename(const char *name)
+{
+	int len = 0;
+	char *text = rss_read_file(PATH_HOSTS, &len);
+	if (!text)
+		return;
+
+	/* Bounded because the whole file is rebuilt in memory. Anything this
+	 * size is not the two-line file this knows how to edit. */
+	if (len > 8192) {
+		free(text);
+		RSS_WARN("system: %s is too large to rewrite; the 127.0.1.1 name is unchanged",
+			 PATH_HOSTS);
+		return;
+	}
+
+	char *out = calloc(1, (size_t)len + strlen(name) + 64);
+	if (!out) {
+		free(text);
+		return;
+	}
+
+	bool touched = false;
+	size_t used = 0;
+	char *save = NULL;
+	for (char *line = strtok_r(text, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+		char addr[64] = "";
+		if (!touched && sscanf(line, "%63s", addr) == 1 && strcmp(addr, "127.0.1.1") == 0) {
+			used += (size_t)sprintf(out + used, "127.0.1.1\t%s\n", name);
+			touched = true;
+			continue;
+		}
+		used += (size_t)sprintf(out + used, "%s\n", line);
+	}
+	free(text);
+
+	if (touched)
+		write_file(PATH_HOSTS, out);
+	free(out);
+}
+
+static int hostname_set(const char *name)
+{
+	char buf[128];
+	snprintf(buf, sizeof(buf), "%s\n", name);
+	if (write_file(PATH_HOSTNAME, buf) != 0)
+		return -1;
+
+	hosts_rename(name);
+
+	/*
+	 * The running kernel, so the name is right for everything that asks
+	 * from here on without waiting for a reboot. A kernel that refuses --
+	 * a test in a namespace without CAP_SYS_ADMIN is the case that turns
+	 * up -- has not lost the setting: the file is written, and inittab
+	 * applies it on the next boot.
+	 */
+	if (sethostname(name, strlen(name)) != 0)
+		RSS_WARN("system: hostname stored, but the kernel kept the old name: %s",
+			 strerror(errno));
+
+	/*
+	 * mdnsd reads the hostname once, at startup, and re-reads it on
+	 * SIGHUP -- which is what the init script's `reload` sends. Without
+	 * this the camera keeps answering to its old <name>.local and the new
+	 * name resolves nowhere, which is precisely the condition this key is
+	 * guarded against.
+	 *
+	 * Through the init script rather than a signal of our own: how a
+	 * service is poked belongs in one place, and that place already
+	 * exists.
+	 */
+	if (access(PATH_MDNSD, X_OK) == 0) {
+		int rc = system(PATH_MDNSD " reload >/dev/null 2>&1");
+		RSS_INFO("system: hostname %s (mdnsd reload %s)", name, rc == 0 ? "ok" : "failed");
+	} else {
+		RSS_INFO("system: hostname %s", name);
+	}
+
+	/* The DHCP lease still carries the old name until the interface next
+	 * comes up; nothing here forces a renew, because dropping the link is
+	 * a bigger interruption than the stale lease it would fix. */
+	return 0;
+}
+
+const rcd_provider_t rcd_provider_hostname = {hostname_get, hostname_set};

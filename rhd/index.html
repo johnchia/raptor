@@ -225,6 +225,11 @@ select{background:var(--sink);border:1px solid var(--line);border-radius:var(--r
 .applybar .keys code{font-size:10.5px;color:var(--ink-dim);border:1px solid var(--line-soft);
                      border-radius:2px;padding:1px 5px}
 .applybar .sp{flex:1}
+/* The same bar, in the one state where ignoring it undoes what you just did. */
+.applybar.guard{border-top:1px solid var(--amber);background:var(--raise)}
+.applybar.guard .count{color:var(--amber)}
+.applybar .clock{font-family:var(--mono);font-size:15px;font-variant-numeric:tabular-nums;
+                 color:var(--amber);min-width:4.5ch;text-align:right}
 
 .foot{margin:30px 0 0;padding-top:18px;border-top:1px solid var(--line-soft);font-size:12px;
       color:var(--ink-faint);max-width:70ch;line-height:1.6}
@@ -268,6 +273,19 @@ select{background:var(--sink);border:1px solid var(--line);border-radius:var(--r
   <main>
     <div class="topbar"><div class="tabs" id="tabs" role="tablist"></div></div>
     <div class="sheet"><div class="sheet-in" id="sheet">Loading…</div></div>
+    <!-- Above the apply bar, because it is the one thing on this page with a
+         deadline: a change nobody confirms is put back by the camera. -->
+    <footer class="applybar guard" id="guardbar" hidden>
+      <div class="lead">
+        <span class="count">Still there? Confirm before this runs out</span>
+        <span class="cost" id="gdWhat"></span>
+      </div>
+      <div class="keys" id="gdKeys"></div>
+      <div class="sp"></div>
+      <span class="clock" id="gdClock"></span>
+      <button class="btn ghost" id="btnGuardUndo">Undo now</button>
+      <button class="btn primary" id="btnGuardKeep">Keep it</button>
+    </footer>
     <footer class="applybar" id="applybar" hidden>
       <div class="lead">
         <span class="count" id="apCount"></span>
@@ -327,6 +345,7 @@ async function api(req, quiet) {
    from this map still renders -- see label() below. */
 const L = {
  "system.timezone":["Timezone","","Sets the clock's zone and its daylight-saving rule. Nothing running re-reads it, so the camera has to restart before timestamps move."],
+ "system.hostname":["Camera name","","What this camera calls itself on the network — mdnsd answers to <name>.local and the DHCP lease carries it. Changing it takes effect at once, so confirm within the window or the camera puts the old name back."],
  "system.ntp_server":["Time server","","The host to sync the clock from. Applied at once — ntpd is restarted with it."],
  "sensor.fps":["Sensor frame rate","fps","The rate the sensor is driven at. Every stream is capped by it."],
  "sensor.antiflicker":["Anti-flicker","","Locks exposure to the mains period so lighting does not band."],
@@ -565,6 +584,7 @@ async function commitLive(id, val, el, prev) {
   const wire = k.labels ? labelOf(k, val) : val;
   try {
     const r = await api({cmd:"set", edits:[{section:k.section, key:k.key, value:wire}]});
+    if (k.guard_sec) noteGuard(r);
     const res = (r.results || [])[0] || {};
     /* The device's answer wins over what was typed: an ISP quantises, and a
      * live command that was refused falls back to the file and says so. */
@@ -742,6 +762,7 @@ function chip(k) {
     c.className = "chip " + k.impact; c.textContent = k.impact;
     c.title = "Needs " + k.owner + " restarted — " + COST[k.impact];
   }
+  if (k.guard_sec) c.title += ". Reverts in " + k.guard_sec + " s unless you confirm";
   return c;
 }
 
@@ -992,6 +1013,68 @@ async function doApply(worst) {
   }
 }
 
+/* ═══ confirm-or-revert ══════════════════════════════════════════════════
+   Some settings are delivered over the connection they are about to break, so
+   the camera arms a timer and puts them back unless somebody comes back and
+   says the camera is still reachable. This page is that somebody: it counts
+   down locally at 1 Hz and re-reads the real number from the camera on every
+   state poll, so a tab that was asleep, or a clock that drifted, corrects
+   itself rather than showing a countdown of its own invention. */
+const gbar = document.getElementById("guardbar");
+let guardLeft = 0, guardTick = null;
+
+function paintGuard() {
+  document.getElementById("gdClock").textContent = guardLeft + " s";
+}
+
+function showGuard(g) {
+  guardLeft = g.revert_in_sec || 0;
+  document.getElementById("gdWhat").textContent =
+    "The camera goes back to what it had before unless you keep this.";
+  const kb = document.getElementById("gdKeys"); kb.textContent = "";
+  (g.keys || []).forEach(k => {
+    const c = document.createElement("code"); c.textContent = k.section + "." + k.key; kb.append(c);
+  });
+  gbar.hidden = false;
+  paintGuard();
+  if (guardTick) return;
+  guardTick = setInterval(() => {
+    if (guardLeft > 0) guardLeft--;
+    paintGuard();
+    /* Zero here is this page's own arithmetic, not the camera's word for it.
+       Ask, and let the answer -- guard gone -- close the bar. */
+    if (guardLeft <= 0) loadPending();
+  }, 1000);
+}
+
+async function hideGuard() {
+  if (gbar.hidden) return;
+  gbar.hidden = true;
+  if (guardTick) { clearInterval(guardTick); guardTick = null; }
+  /* Whatever ended it, the camera may now hold different values than this
+     page last drew -- a revert is a change nobody made here. */
+  await loadValues();
+  render();
+}
+
+/* Called with any reply that reports the guard: `set`, `pending`, `state`,
+   `confirm`, `cancel`. Never with one that does not, since absence would then
+   read as "disarmed" from a command that was never asked. */
+function noteGuard(r) {
+  const g = r && r.guard;
+  if (g && g.armed) showGuard(g); else hideGuard();
+}
+
+document.getElementById("btnGuardKeep").addEventListener("click", async () => {
+  try { noteGuard(await api({cmd:"confirm"})); wlog("sys", "settings confirmed"); }
+  catch (e) { wlog("err", "! confirm: " + e.message); }
+});
+
+document.getElementById("btnGuardUndo").addEventListener("click", async () => {
+  try { noteGuard(await api({cmd:"cancel"})); wlog("sys", "settings put back"); }
+  catch (e) { wlog("err", "! cancel: " + e.message); }
+});
+
 /* ═══ preview ════════════════════════════════════════════════════════════
    The stream this shows is the one an apply tears down, so a failure here is
    the ordinary case and not an error state. rhd answers /mjpeg with a 404
@@ -1054,6 +1137,7 @@ function hhmm(secs) {
 async function loadState() {
   let s;
   try { s = await api({cmd:"state"}, true); } catch (e) { return; }
+  noteGuard(s);
   const box = document.getElementById("status"); box.textContent = "";
   const up = s.up || {};
   const running = Object.keys(up).filter(d => up[d]);
@@ -1165,6 +1249,9 @@ async function loadPending() {
       const id = k.section + "." + k.key;
       if (byId[id]) dirty.add(id);
     }));
+    /* A page loaded mid-window is the expected case, not the odd one: the
+       reason this window exists is that the last one stopped answering. */
+    noteGuard(p);
   } catch (e) { /* drift is a nicety; the page works without it */ }
 }
 

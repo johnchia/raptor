@@ -4,6 +4,7 @@
 
 #include "rcd_config.h"
 #include "rcd.h"
+#include "rcd_guard.h"
 #include "rcd_ipc.h"
 #include "rcd_proto.h"
 #include "rcd_schema.h"
@@ -848,6 +849,20 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 	}
 
 	/*
+	 * Armed before the first write, and over every guarded key rather than
+	 * the ones named here -- both for the same reason: what has to be put
+	 * back is the state as it was before this request touched anything.
+	 * The longest window wins, since the client has to survive all of it.
+	 */
+	int window = 0;
+	for (int i = 0; i < n; i++) {
+		if (edits[i].k->guard_sec > window)
+			window = edits[i].k->guard_sec;
+	}
+	if (window)
+		rcd_guard_arm(st, window);
+
+	/*
 	 * Whether a live key should also be applied now. It is by default: a
 	 * slider that needs a second round trip to show anything is not a
 	 * slider. A client filling a whole form at once can ask to stage
@@ -974,6 +989,10 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 	/* What is now owed. Reported on every set, so a client never has to
 	 * ask a second question to know whether it just cost an outage. */
 	rcd_config_report_stale(st, resp);
+
+	/* And what is now on a clock. A client that ignores this loses the
+	 * change it just made, which is the safe direction to fail in. */
+	rcd_guard_report(st, resp);
 	return resp;
 }
 

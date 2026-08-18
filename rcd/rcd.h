@@ -23,6 +23,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "rcd_guard.h"
 #include "rcd_schema.h"
 
 /* The protocol version every response carries. Bumped when a field changes
@@ -86,6 +87,15 @@ struct rcd_state {
 	/* An apply is running. It blocks for as long as the slowest daemon
 	 * takes to come back, so a second one is refused rather than queued. */
 	bool applying;
+
+	/*
+	 * Confirm-or-revert: what the guarded keys held before the change
+	 * nobody has confirmed yet, and when it goes back. See rcd_guard.h.
+	 */
+	rcd_guard_snap_t guard[RCD_GUARD_MAX];
+	int guard_count;
+	uint64_t guard_deadline_ms; /* 0 = nothing armed */
+	int guard_window_sec;
 };
 
 typedef struct rcd_state rcd_state_t;

@@ -4,10 +4,11 @@ A design for `[system]` — timezone, NTP, hostname, network — as a section of
 `rcd` rather than a daemon of its own, written so that a captive portal is a
 client of the same socket instead of a second way to configure the camera.
 
-Status: the provider hook and the two time keys are **built and
-board-verified**; everything from [Confirm-or-revert](#confirm-or-revert)
-onward is still design. Verified facts cite the file they came from, on a
-running SSC377QE (INFINITY6C) board on an OpenIPC base.
+Status: the provider hook, the two time keys, the confirm-or-revert timer and
+`system.hostname` are **built and board-verified**; everything from
+[Wired network settings](#phasing) onward is still design. Verified facts cite
+the file they came from, on a running SSC377QE (INFINITY6C) board on an OpenIPC
+base.
 
 ## Why this exists
 
@@ -45,8 +46,8 @@ discussion has to settle.
 A separate daemon would earn its keep if system config had to outlive rcd or
 ship independently of it. Neither is true.
 
-The cost is one struct field, one accessor table, four value types and one
-impact level. The wire format, the value grammars, `set` batching, the
+The cost is two struct fields, one accessor table, four value types, one impact
+level and two verbs. The wire format, the value grammars, `set` batching, the
 stale/pending mirror and `apply` are untouched.
 
 ## Principles
@@ -172,7 +173,7 @@ Cost is what an `apply` of that key costs whoever is using the camera.
 |---|---|---|---|---|
 | `system.timezone` | `V_ENUM` | `/etc/TZ` + `/etc/timezone` | reboot | 309 choices from the generated zone table. `/etc/TZ` takes the POSIX rule, `/etc/timezone` the name, so the control reads back the zone that was picked rather than whichever one shares its rule |
 | `system.ntp_server` | `V_HOST` | `/etc/ntp.conf` | service | Written as `server <host> iburst`; `S49ntpd restart` applies it now. Already implemented |
-| `system.hostname` | `V_HOST` | `/etc/hostname` (overlay) | reboot | Also advertised by udhcpc, so it is how the camera names itself on the LAN |
+| `system.hostname` | `V_HOST` | `/etc/hostname` + `/etc/hosts` (overlay) | service, revert | In force at once: the kernel is renamed and mdnsd re-announces. Also advertised by udhcpc, so it is how the camera names itself on the LAN. Implemented |
 | `network.dhcp` | `V_BOOL` | `interfaces.d/eth0` | revert | False switches the stanza to `static` and requires the three below |
 | `network.address` | `V_IPV4` | `interfaces.d/eth0` | revert | Kept while `dhcp` is true, so switching back and forth does not lose the static settings |
 | `network.netmask` | `V_IPV4` | `interfaces.d/eth0` | revert | |
@@ -231,34 +232,80 @@ is not a safety net for a wired camera.
 An address change is delivered over the connection it is about to break.
 Applied optimistically, a typo puts a camera on a pole beyond reach.
 
-So `apply` gains a guarded form for keys that declare it. rcd keeps the previous
-version of every file it is about to touch, writes the new one, enacts it, and
-arms a timer. If `{"cmd":"confirm"}` does not arrive before the timer expires,
-the previous files are restored and re-enacted. The client's job is to re-reach
-the camera at its new address and confirm; the console knows both addresses, so
-it can do that itself and show a countdown while it tries.
+So a key may declare a window. rcd snapshots the guarded keys, writes the new
+value, and arms a timer. If `{"cmd":"confirm"}` does not arrive before it
+expires, the snapshot is written back through the same providers. The client's
+job is to re-reach the camera — at its new address, by its new name — and
+confirm; the console knows both, so it can try on its own and show a countdown
+while it does.
 
 ```
-                apply (guarded key)
+                set (guarded key)
      Steady ──────────────────────▶ Armed ──────── confirm ────────▶ Steady
         ▲                             │
         │                             ├── timer expires ──┐
         │                             └── cancel ─────────┤
-        └────── previous config re-enacted ──── Reverting ┘
+        └────── snapshot re-enacted ─────────── Reverting ┘
 ```
 
-- `apply` reports `"guarded": true` and `"revert_in_sec"` when it arms.
-- `state` carries `system.revert_in_sec` while armed, so a client that
-  reconnects mid-window — the expected case — can find out it is inside one.
+**The guard arms on `set`, not on `apply`.** A provider's store *is* the value,
+so a provider-backed key is in force the moment `set` returns and there is no
+later step to hang a guard on. That is the same property that makes those keys
+report tier `live`, and it is why the spec's original wording — a guarded form
+of `apply` — did not survive contact with the hook.
+
+- `set` reports a `guard` object: `armed`, `revert_in_sec`, `window_sec` and
+  the keys it covers. `pending` and `state` report the same object while it is
+  armed, and omit it when it is not — so a client that has never seen a guard
+  has nothing to draw, and one that reconnects mid-window finds out it is
+  inside one from the cheapest poll it makes.
 - `confirm` disarms. `cancel` reverts immediately rather than waiting the clock
-  out.
-- **A reboot inside the window reverts.** The timer lives in `/run`, and its
-  absence at boot is not a confirmation. This is what makes power-cycling a
-  stranded camera a recovery rather than a commitment.
+  out. Both answer `ok` with nothing armed, because "there is no guard" is the
+  answer a reconnecting client is asking for, and an error would send it
+  looking for a fault.
+- **The snapshot covers every guarded key, not the edited ones.** Guarded
+  providers share files: a batch that turns DHCP off and sets an address has to
+  be undone as a batch, and a key the request did not name may still have been
+  rewritten by a provider that owns the same stanza.
+- **A second guarded `set` inside an open window keeps the first snapshot** and
+  only pushes the deadline out. The guard protects the last state somebody
+  proved they could reach, and two edits into the dark are one experiment.
+- **A reboot inside the window reverts.** The snapshot is on flash, because
+  restoring it has to survive losing power; the deadline is in `/run`, which is
+  a tmpfs. Finding one without the other means the camera rebooted since the
+  guard was armed, and a camera that rebooted did not confirm. That is what
+  makes power-cycling a stranded camera a recovery rather than a commitment —
+  and it is the same evidence, read the other way, that lets an rcd which
+  merely restarted pick the window back up with the time that is left.
+
+A store that held no previous value is the one case with no answer: a provider
+stores a value or it does not, there is no verb for unsetting one, and
+inventing a default would be a third state nobody chose. Such a key keeps the
+new value and says so in the log.
 
 The window is per-key, not global: 90 seconds suits a wired address change —
 long enough for DHCP release, ARP settling and a page reload, short enough that
 nobody waits it out by accident — while associating a cold radio needs more.
+
+### Why hostname went first
+
+The camera's name is an address by another route: `mdnsd` answers to
+`<name>.local` and the DHCP lease carries the same string. rcd's provider
+writes `/etc/hostname`, repairs the `127.0.1.1` line in `/etc/hosts`, renames
+the running kernel and sends `mdnsd` the `reload` its init script already
+defines — which is a `SIGHUP`, and troglobit's `mdnsd` re-reads `gethostname()`
+on one. Verified on the bench: after the set, `raptor-guard-test.local`
+resolved to the camera and `openipc-ssc377qe-4825.local` answered nothing.
+
+So a console that reached this camera by name is looking at the wrong name the
+moment the reply arrives, and gets it back by doing nothing. That is a real
+failure of the same shape as an address change, and a mild one — which is
+exactly what a first guarded key should be. Nothing that can strand a camera is
+guarded until the machinery has been exercised on one that cannot.
+
+The DHCP lease still carries the old name until the interface next comes up.
+Nothing forces a renew: dropping the link is a bigger interruption than the
+stale lease it would fix.
 
 ## Provisioning and the portal
 
@@ -363,10 +410,13 @@ that has a radio.
    fourth: a text widget for `V_HOST`, a reboot badge, and wording for the two
    keys. It did *not* need a tab — an unclaimed section already falls onto a
    page of its own, which is the property that was under test.
-2. **Confirm-or-revert.** The guarded apply, its timer in `/run`,
-   `confirm`/`cancel`, and the countdown in `state`. Exercised by hostname
-   first, which is harmless, before anything that can actually strand the camera
-   depends on it.
+2. **Confirm-or-revert.** *Done.* The guard, its deadline in `/run` and its
+   snapshot on flash, `confirm`/`cancel`, the `guard` object in `set`,
+   `pending` and `state`, and the console's countdown bar. It arms on `set`
+   rather than on `apply` — see above — and it is exercised by
+   `system.hostname`, whose failure mode is real and recoverable. All four
+   exits were walked on the board: confirm, cancel, the timer running out, and
+   a reboot inside the window.
 3. **Wired network settings.** `V_IPV4`, the `interfaces.d/eth0` provider,
    DHCP-versus-static, and the console flow that re-reaches the camera at its
    new address. The first feature where getting it wrong costs a trip to the

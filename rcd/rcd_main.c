@@ -9,6 +9,7 @@
 
 #include "rcd.h"
 #include "rcd_config.h"
+#include "rcd_guard.h"
 #include "rcd_proto.h"
 #include "rcd_schema.h"
 
@@ -40,8 +41,14 @@ static void serve_loop(rcd_state_t *st)
 		if (select(ctrl_fd + 1, &fds, NULL, NULL, &tv) > 0)
 			rss_ctrl_accept_and_handle(st->ctrl, rcd_handle, st);
 
-		if (rcd_save_due(st, (uint64_t)(rss_timestamp_us() / 1000)))
+		uint64_t now = (uint64_t)(rss_timestamp_us() / 1000);
+		if (rcd_save_due(st, now))
 			rcd_save_flush(st);
+
+		/* The one thing rcd does that nobody asked it to. It is the
+		 * point: the change being timed is one whose client may never
+		 * come back. */
+		rcd_guard_tick(st, now);
 	}
 }
 
@@ -74,6 +81,7 @@ int main(int argc, char **argv)
 	}
 
 	rcd_stale_load(&st);
+	rcd_guard_load(&st);
 
 	RSS_INFO("rcd: config %s, api %d", st.config_path, RCD_API_VERSION);
 

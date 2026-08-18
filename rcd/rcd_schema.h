@@ -163,6 +163,17 @@ typedef struct rcd_key {
 	 * what every key in raptor.conf does.
 	 */
 	rcd_impact_t impact;
+
+	/*
+	 * Seconds a client has to confirm this key before rcd puts it back.
+	 * 0 for the keys that cannot cost anyone their way in.
+	 *
+	 * Per key rather than one number for the daemon, because the wait is
+	 * how long the client needs to notice it is still there: a wired
+	 * address change is a lease and an ARP cache, associating a cold radio
+	 * is longer. See rcd_guard.h.
+	 */
+	int guard_sec;
 } rcd_key_t;
 
 /*

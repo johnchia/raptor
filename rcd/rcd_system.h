@@ -38,5 +38,6 @@ const char *rcd_zone_posix(const char *name);
 
 extern const rcd_provider_t rcd_provider_timezone;
 extern const rcd_provider_t rcd_provider_ntp_server;
+extern const rcd_provider_t rcd_provider_hostname;
 
 #endif /* RCD_SYSTEM_H */

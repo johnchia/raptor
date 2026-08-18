@@ -5,6 +5,7 @@
 #include "rcd_state.h"
 #include "rcd.h"
 #include "rcd_config.h"
+#include "rcd_guard.h"
 #include "rcd_ipc.h"
 #include "rcd_proto.h"
 #include "rcd_schema.h"
@@ -433,5 +434,6 @@ cJSON *rcd_cmd_state(rcd_state_t *st, const cJSON *root)
 	}
 
 	rcd_config_report_stale(st, resp);
+	rcd_guard_report(st, resp);
 	return resp;
 }

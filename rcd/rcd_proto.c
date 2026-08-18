@@ -6,6 +6,7 @@
 #include "rcd.h"
 #include "rcd_apply.h"
 #include "rcd_config.h"
+#include "rcd_guard.h"
 #include "rcd_ipc.h"
 #include "rcd_schema.h"
 #include "rcd_state.h"
@@ -146,6 +147,9 @@ static cJSON *cmd_pending(rcd_state_t *st)
 	cJSON_AddBoolToObject(r, "save_pending", st->save_due_ms != 0);
 	cJSON_AddBoolToObject(r, "applying", st->applying);
 	rcd_config_report_stale(st, r);
+	/* The cheap poll is where a client watching a countdown looks, and a
+	 * client that has just reconnected is exactly that client. */
+	rcd_guard_report(st, r);
 	return r;
 }
 
@@ -177,6 +181,10 @@ static cJSON *dispatch(rcd_state_t *st, const char *name, const cJSON *root)
 		return rcd_cmd_apply(st, root);
 	if (strcmp(name, "restart") == 0)
 		return rcd_cmd_restart(st, root);
+	if (strcmp(name, "confirm") == 0)
+		return rcd_cmd_confirm(st, root);
+	if (strcmp(name, "cancel") == 0)
+		return rcd_cmd_cancel(st, root);
 	if (strcmp(name, "state") == 0)
 		return rcd_cmd_state(st, root);
 	if (strcmp(name, "pending") == 0)

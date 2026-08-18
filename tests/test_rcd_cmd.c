@@ -25,6 +25,7 @@
 #include "greatest.h"
 #include "../rcd/rcd.h"
 #include "../rcd/rcd_config.h"
+#include "../rcd/rcd_guard.h"
 #include "../rcd/rcd_proto.h"
 #include "../rcd/rcd_schema.h"
 #include "../rcd/rcd_system.h"
@@ -683,13 +684,236 @@ TEST a_provider_key_round_trips_through_its_store(void)
 	PASS();
 }
 
+/* ------------------------------------------------------------------ */
+/* Confirm-or-revert                                                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The guard is exercised through the hostname provider rather than a mock of
+ * one, because the property under test is that the *store* goes back. A mock
+ * would prove that a string was copied around.
+ *
+ * The camera keeps the snapshot on flash and the deadline on a tmpfs, which is
+ * what makes a reboot revert; here both land in the scratch directory, so the
+ * reboot test unlinks the deadline by hand. What is being tested is the rule
+ * rcd applies when it finds one without the other.
+ */
+static int guard_ready(rcd_state_t *st, const char *name)
+{
+	if (!sysconf_dir_ready())
+		return 0;
+	memset(st, 0, sizeof(*st));
+	unlink(RCD_GUARD_ARMED_PATH);
+	unlink(RCD_SYSCONF_DIR "/" RCD_GUARD_RECORD_NAME);
+	return rcd_provider_hostname.set(name) == 0;
+}
+
+static const char *hostname_now(char *buf, size_t sz)
+{
+	buf[0] = '\0';
+	rcd_provider_hostname.get(buf, sz);
+	return buf;
+}
+
+/* Time is passed in rather than waited for: the window is 90 seconds and the
+ * suite may not take 90 seconds to find out what happens at the end of it. */
+#define GUARD_LATER ((uint64_t)-1)
+
+TEST an_unconfirmed_change_goes_back_when_the_window_ends(void)
+{
+	rcd_state_t st;
+	char now[RCD_VAL_MAX];
+
+	if (!guard_ready(&st, "camera-before"))
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	rcd_guard_arm(&st, 90);
+	ASSERT(rcd_guard_remaining(&st) > 0);
+	ASSERT(rcd_guard_remaining(&st) <= 90);
+
+	ASSERT_EQ(0, rcd_provider_hostname.set("camera-after"));
+	ASSERT_STR_EQ("camera-after", hostname_now(now, sizeof(now)));
+
+	/* Not yet: an armed guard that reverted early would be a countdown
+	 * nobody could ever beat. */
+	rcd_guard_tick(&st, 0);
+	ASSERT_STR_EQ("camera-after", hostname_now(now, sizeof(now)));
+
+	rcd_guard_tick(&st, GUARD_LATER);
+	ASSERT_STR_EQ("camera-before", hostname_now(now, sizeof(now)));
+	ASSERT_EQ(0, rcd_guard_remaining(&st));
+	PASS();
+}
+
+TEST a_confirmed_change_stays_and_leaves_nothing_armed(void)
+{
+	rcd_state_t st;
+	char now[RCD_VAL_MAX];
+
+	if (!guard_ready(&st, "camera-before"))
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	rcd_guard_arm(&st, 90);
+	ASSERT_EQ(0, rcd_provider_hostname.set("camera-after"));
+
+	cJSON *r = rcd_cmd_confirm(&st, NULL);
+	ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "confirmed")));
+	cJSON_Delete(r);
+
+	rcd_guard_tick(&st, GUARD_LATER);
+	ASSERT_STR_EQ("camera-after", hostname_now(now, sizeof(now)));
+
+	/* Both files are gone, so a later rcd start finds nothing to undo. */
+	ASSERT(access(RCD_SYSCONF_DIR "/" RCD_GUARD_RECORD_NAME, F_OK) != 0);
+	ASSERT(access(RCD_GUARD_ARMED_PATH, F_OK) != 0);
+
+	/* And confirming again is not an error: a client that reconnected
+	 * cannot know whether it made it inside the window. */
+	r = rcd_cmd_confirm(&st, NULL);
+	ASSERT(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(r, "confirmed")));
+	cJSON_Delete(r);
+	PASS();
+}
+
+TEST cancelling_puts_it_back_without_waiting(void)
+{
+	rcd_state_t st;
+	char now[RCD_VAL_MAX];
+
+	if (!guard_ready(&st, "camera-before"))
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	rcd_guard_arm(&st, 90);
+	ASSERT_EQ(0, rcd_provider_hostname.set("camera-after"));
+
+	cJSON *r = rcd_cmd_cancel(&st, NULL);
+	ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "reverted")));
+	cJSON_Delete(r);
+
+	ASSERT_STR_EQ("camera-before", hostname_now(now, sizeof(now)));
+	ASSERT_EQ(0, rcd_guard_remaining(&st));
+	PASS();
+}
+
+/*
+ * The reason the deadline is on a tmpfs and the snapshot is not. A camera
+ * power-cycled by somebody who has lost it must come back as it was, and the
+ * absence of a deadline it cannot have kept is the only evidence rcd has.
+ */
+TEST a_reboot_inside_the_window_reverts(void)
+{
+	rcd_state_t st;
+	char now[RCD_VAL_MAX];
+
+	if (!guard_ready(&st, "camera-before"))
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	rcd_guard_arm(&st, 90);
+	ASSERT_EQ(0, rcd_provider_hostname.set("camera-after"));
+
+	/* What a boot looks like from here: the tmpfs is empty and rcd starts
+	 * with no memory of anything. */
+	unlink(RCD_GUARD_ARMED_PATH);
+
+	rcd_state_t fresh;
+	memset(&fresh, 0, sizeof(fresh));
+	rcd_guard_load(&fresh);
+
+	ASSERT_STR_EQ("camera-before", hostname_now(now, sizeof(now)));
+	ASSERT_EQ(0, rcd_guard_remaining(&fresh));
+	PASS();
+}
+
+/* An rcd that merely restarted is not a camera that rebooted: the deadline is
+ * still there, so the window carries on rather than reverting under a client
+ * that is still watching the clock. */
+TEST an_rcd_restart_inside_the_window_keeps_it_armed(void)
+{
+	rcd_state_t st;
+	char now[RCD_VAL_MAX];
+
+	if (!guard_ready(&st, "camera-before"))
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	rcd_guard_arm(&st, 90);
+	ASSERT_EQ(0, rcd_provider_hostname.set("camera-after"));
+
+	rcd_state_t fresh;
+	memset(&fresh, 0, sizeof(fresh));
+	rcd_guard_load(&fresh);
+
+	ASSERT_STR_EQ("camera-after", hostname_now(now, sizeof(now)));
+	ASSERT(rcd_guard_remaining(&fresh) > 0);
+
+	/* And the snapshot survived the restart, so the revert still works. */
+	rcd_guard_tick(&fresh, GUARD_LATER);
+	ASSERT_STR_EQ("camera-before", hostname_now(now, sizeof(now)));
+	PASS();
+}
+
+/*
+ * Two edits into the dark are one experiment. Re-snapshotting on the second
+ * would quietly make the first one permanent -- and the first one is the one
+ * that may already have cost the client its route back.
+ */
+TEST a_second_change_inside_the_window_keeps_the_first_snapshot(void)
+{
+	rcd_state_t st;
+	char now[RCD_VAL_MAX];
+
+	if (!guard_ready(&st, "camera-before"))
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	rcd_guard_arm(&st, 90);
+	ASSERT_EQ(0, rcd_provider_hostname.set("camera-middle"));
+
+	rcd_guard_arm(&st, 90);
+	ASSERT_EQ(0, rcd_provider_hostname.set("camera-after"));
+
+	rcd_guard_tick(&st, GUARD_LATER);
+	ASSERT_STR_EQ("camera-before", hostname_now(now, sizeof(now)));
+	PASS();
+}
+
+/* What a client polls while it counts down. Absent when nothing is armed, so
+ * a page that has never seen a guard has nothing to draw. */
+TEST the_guard_reports_itself_only_while_it_is_armed(void)
+{
+	rcd_state_t st;
+
+	if (!guard_ready(&st, "camera-before"))
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	cJSON *out = cJSON_CreateObject();
+	rcd_guard_report(&st, out);
+	ASSERT_EQ(NULL, cJSON_GetObjectItemCaseSensitive(out, "guard"));
+	cJSON_Delete(out);
+
+	rcd_guard_arm(&st, 90);
+
+	out = cJSON_CreateObject();
+	rcd_guard_report(&st, out);
+	const cJSON *g = cJSON_GetObjectItemCaseSensitive(out, "guard");
+	ASSERT(cJSON_IsObject(g));
+	ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(g, "armed")));
+	ASSERT(cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(g, "revert_in_sec")) > 0);
+	/* Named, so the page can say which settings it is asking about. */
+	const cJSON *keys = cJSON_GetObjectItemCaseSensitive(g, "keys");
+	ASSERT(cJSON_IsArray(keys));
+	ASSERT_EQ(1, cJSON_GetArraySize(keys));
+	cJSON_Delete(out);
+
+	rcd_guard_confirm(&st);
+	PASS();
+}
+
 TEST the_schema_says_where_a_system_key_takes_effect(void)
 {
 	cJSON *out = cJSON_CreateObject();
 	rcd_schema_emit(out, "system");
 	const cJSON *keys = cJSON_GetObjectItemCaseSensitive(out, "keys");
 	ASSERT(cJSON_IsArray(keys));
-	ASSERT_EQ(2, cJSON_GetArraySize(keys));
+	ASSERT_EQ(3, cJSON_GetArraySize(keys));
 
 	int checked = 0;
 	const cJSON *k = NULL;
@@ -729,10 +953,22 @@ TEST the_schema_says_where_a_system_key_takes_effect(void)
 			ASSERT_STR_EQ("none", imp->valuestring);
 			ASSERT_STR_EQ("host",
 				      cJSON_GetObjectItemCaseSensitive(k, "type")->valuestring);
+			/* Nothing about the time server can cost a client its
+			 * way back, so it is not on a clock. */
+			ASSERT_EQ(NULL, cJSON_GetObjectItemCaseSensitive(k, "guard_sec"));
+			checked++;
+		}
+		if (strcmp(key->valuestring, "hostname") == 0) {
+			/* The one key a client is told to come back and
+			 * confirm, and how long it has to do it in. */
+			const cJSON *g = cJSON_GetObjectItemCaseSensitive(k, "guard_sec");
+			ASSERT(cJSON_IsNumber(g));
+			ASSERT_EQ(RCD_GUARD_NAME_SEC, (int)cJSON_GetNumberValue(g));
+			ASSERT_STR_EQ("live", tier->valuestring);
 			checked++;
 		}
 	}
-	ASSERT_EQ(2, checked);
+	ASSERT_EQ(3, checked);
 	cJSON_Delete(out);
 	PASS();
 }
@@ -1001,6 +1237,13 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(the_timezone_is_an_enum_over_the_zone_table);
 	RUN_TEST(a_host_is_a_hostname_or_an_address_and_nothing_else);
 	RUN_TEST(a_provider_key_round_trips_through_its_store);
+	RUN_TEST(an_unconfirmed_change_goes_back_when_the_window_ends);
+	RUN_TEST(a_confirmed_change_stays_and_leaves_nothing_armed);
+	RUN_TEST(cancelling_puts_it_back_without_waiting);
+	RUN_TEST(a_reboot_inside_the_window_reverts);
+	RUN_TEST(an_rcd_restart_inside_the_window_keeps_it_armed);
+	RUN_TEST(a_second_change_inside_the_window_keeps_the_first_snapshot);
+	RUN_TEST(the_guard_reports_itself_only_while_it_is_armed);
 	RUN_TEST(the_schema_says_where_a_system_key_takes_effect);
 	RUN_TEST(nothing_is_unavailable_until_the_camera_says_so);
 	RUN_TEST(availability_matches_whole_key_names);

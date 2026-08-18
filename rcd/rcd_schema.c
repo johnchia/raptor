@@ -4,6 +4,7 @@
 
 #include "rcd_schema.h"
 
+#include "rcd_guard.h"
 #include "rcd_system.h"
 
 #include <rss_common.h>
@@ -187,10 +188,14 @@ static const char *const choices_threshold[] = {
  * because -Werror=missing-field-initializers means the whole of it has to be
  * spelled out either way.
  */
-#define LIVE(cmd)	 cmd, "value", -1, NULL, RCD_IMPACT_NONE
-#define LIVE_CH(c, n)	 c, "value", n, NULL, RCD_IMPACT_NONE
-#define SAVED		 NULL, NULL, -1, NULL, RCD_IMPACT_NONE
-#define PROVIDED(p, imp) NULL, NULL, -1, &(p), (imp)
+#define LIVE(cmd)	 cmd, "value", -1, NULL, RCD_IMPACT_NONE, 0
+#define LIVE_CH(c, n)	 c, "value", n, NULL, RCD_IMPACT_NONE, 0
+#define SAVED		 NULL, NULL, -1, NULL, RCD_IMPACT_NONE, 0
+#define PROVIDED(p, imp) NULL, NULL, -1, &(p), (imp), 0
+
+/* A provider whose value can cost the client its way back in: written like
+ * any other, and put back if nobody confirms within `sec`. */
+#define GUARDED(p, imp, sec) NULL, NULL, -1, &(p), (imp), (sec)
 
 static const rcd_key_t keys[] = {
 	/* -- Sensor -- */
@@ -377,6 +382,21 @@ static const rcd_key_t keys[] = {
 	 PROVIDED(rcd_provider_timezone, RCD_IMPACT_REBOOT)},
 	{"system", "ntp_server", V_HOST, 0, 63, NULL,
 	 PROVIDED(rcd_provider_ntp_server, RCD_IMPACT_NONE)},
+
+	/*
+	 * The name, and the first key that can cost a client its way back.
+	 * It is in force immediately -- the kernel is renamed, /etc/hosts
+	 * follows, and mdnsd re-announces -- so a console that reached this
+	 * camera at <name>.local is looking at the wrong name the moment the
+	 * reply arrives, and gets it back by not confirming.
+	 *
+	 * That is also why this key is guarded first: the failure is real
+	 * enough to exercise the machinery and mild enough that a bug in it
+	 * costs a name rather than an address. Nothing that can actually
+	 * strand a camera is guarded until this one has been.
+	 */
+	{"system", "hostname", V_HOST, 1, 63, NULL,
+	 GUARDED(rcd_provider_hostname, RCD_IMPACT_SERVICE, RCD_GUARD_NAME_SEC)},
 
 	{NULL, NULL, V_INT, 0, 0, NULL, SAVED},
 };
@@ -592,6 +612,11 @@ static void emit_key(cJSON *arr, const rcd_key_t *k)
 	 * and is read anyway -- from the store it is written to. */
 	if (k->type == V_CRED || (!k->provider && !rcd_section_reader(k->section)))
 		cJSON_AddBoolToObject(o, "readable", false);
+
+	/* Present only where it applies, so a client that has never heard of
+	 * the guard renders every other key exactly as it did before. */
+	if (k->guard_sec > 0)
+		cJSON_AddNumberToObject(o, "guard_sec", k->guard_sec);
 
 	cJSON_AddItemToArray(arr, o);
 }
