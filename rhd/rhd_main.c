@@ -62,6 +62,13 @@ static const char *jpeg_ring_names[RHD_MAX_JPEG] = {"jpeg0",	"jpeg1",    "s1_jpe
  * request that lands while a slot is closed costs one open, not a
  * 404. Safe to call with the slot already open.
  */
+static int64_t rhd_now_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
 static rss_ring_t *jpeg_ring_open_slot(rhd_server_t *srv, int j)
 {
 	if (srv->jpeg_rings[j])
@@ -74,6 +81,7 @@ static rss_ring_t *jpeg_ring_open_slot(rhd_server_t *srv, int j)
 	rss_ring_check_version(ring, jpeg_ring_names[j]);
 	srv->jpeg_rings[j] = ring;
 	srv->jpeg_read_seqs[j] = 0;
+	srv->jpeg_last_frame_ms[j] = rhd_now_ms();
 
 	uint32_t mfs = rss_ring_max_frame_size(ring);
 	uint32_t cap = mfs + RSS_JPEG_EXIF_MAX + RSS_JPEG_SIG_SEGMENT;
@@ -329,6 +337,39 @@ static void remove_client(rhd_server_t *srv, int idx)
  * and closed the ring for a different reason. Dropping it at the point the
  * read says so makes that immediate. rsd_ring_reader.c has the same shape.
  */
+/*
+ * Ask whether a quiet ring is still the ring we opened.
+ *
+ * The producer unlinks the name when it shuts down, so a restarted rvd gets a
+ * new inode and every consumer still mapped keeps a private orphan: its
+ * write_seq never moves again and its incarnation can never change, which is
+ * why the overflow path below cannot catch this case however carefully it is
+ * written. rss_ring_stale() compares the inode we mapped against the one the
+ * name resolves to now, which is the only thing that can tell the difference.
+ *
+ * Only asked of a ring that owes us a frame and has not produced one for
+ * longer than a frame interval, so the cost is a shm_open and an fstat on a
+ * path that was already waiting. rsd asks the same question, but only after
+ * ten idle ticks -- twenty seconds is nothing to a recording and an age to
+ * someone watching the preview they just changed.
+ */
+#define JPEG_QUIET_MS 1500
+
+static bool jpeg_ring_gone(rhd_server_t *srv, int j, int64_t now)
+{
+	if (!srv->jpeg_rings[j])
+		return false;
+	if (now - srv->jpeg_last_frame_ms[j] < JPEG_QUIET_MS)
+		return false;
+	if (!rss_ring_stale(srv->jpeg_rings[j])) {
+		/* Merely idle. Restart the clock so the question is asked
+		 * again a frame interval from now, not on every pass. */
+		srv->jpeg_last_frame_ms[j] = now;
+		return false;
+	}
+	return true;
+}
+
 static void jpeg_ring_drop(rhd_server_t *srv, int j)
 {
 	if (j < 0 || j >= RHD_MAX_JPEG || !srv->jpeg_rings[j])
@@ -403,6 +444,13 @@ static void snap_poll(rhd_server_t *srv)
 		 * request keeps its deadline and is served from the new ring
 		 * on a later pass. */
 		if (ret == RSS_EOVERFLOW && c->snap_seq == pre_seq) {
+			jpeg_ring_drop(srv, c->snap_stream);
+			continue;
+		}
+
+		if (ret == 0)
+			srv->jpeg_last_frame_ms[c->snap_stream] = now;
+		else if (jpeg_ring_gone(srv, c->snap_stream, now)) {
 			jpeg_ring_drop(srv, c->snap_stream);
 			continue;
 		}
@@ -777,6 +825,12 @@ static void server_run(rhd_server_t *srv)
 							srv->frame_buf, srv->frame_buf_size, &len,
 							&meta);
 				if (ret == RSS_EOVERFLOW && srv->jpeg_read_seqs[j] == pre_seq) {
+					jpeg_ring_drop(srv, j);
+					continue;
+				}
+				if (ret == 0)
+					srv->jpeg_last_frame_ms[j] = rhd_now_ms();
+				else if (jpeg_ring_gone(srv, j, rhd_now_ms())) {
 					jpeg_ring_drop(srv, j);
 					continue;
 				}

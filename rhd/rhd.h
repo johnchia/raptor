@@ -132,6 +132,10 @@ typedef struct {
 	 * loop's stack so that whoever closes a ring can release it first --
 	 * an incarnation change is discovered in a read, not in the loop. */
 	bool jpeg_acquired[RHD_MAX_JPEG];
+	/* When each ring last yielded a frame, monotonic ms. A ring that has
+	 * gone quiet for longer than a frame interval is asked whether it is
+	 * still the ring we opened. */
+	int64_t jpeg_last_frame_ms[RHD_MAX_JPEG];
 
 	/* Audio ring for audio streaming */
 	rss_ring_t *audio_ring;
