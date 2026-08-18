@@ -23,7 +23,7 @@
 #include "rmq_cmd.h"
 #include "rmq_ha.h"
 #include "rmq_mdns.h"
-#include "rmq_restart.h"
+#include "rmq_rcd.h"
 
 #include <cJSON.h>
 
@@ -155,19 +155,13 @@ static void load_config(rmq_state_t *st)
 	 * exactly as they were. */
 	st->commands_enabled = rss_config_get_bool(c, "mqtt", "commands", true);
 
-	st->save_debounce_ms = rss_config_get_int(c, "mqtt", "save_debounce_ms", 3000);
-	if (st->save_debounce_ms < 0)
-		st->save_debounce_ms = 0;
-	if (st->save_debounce_ms > RMQ_SAVE_MAX_DELAY_MS)
-		st->save_debounce_ms = RMQ_SAVE_MAX_DELAY_MS;
-
-	/* Longer than the save window: what it coalesces is a daemon restart,
-	 * and commissioning a section key by key should cost one outage. */
-	st->restart_debounce_ms = rss_config_get_int(c, "mqtt", "restart_debounce_ms", 5000);
-	if (st->restart_debounce_ms < 0)
-		st->restart_debounce_ms = 0;
-	if (st->restart_debounce_ms > RMQ_RESTART_MAX_DELAY_MS)
-		st->restart_debounce_ms = RMQ_RESTART_MAX_DELAY_MS;
+	/*
+	 * Whether a saved edit is enacted without being asked. Off by default:
+	 * an edit that needs a restart is applied when somebody presses Apply,
+	 * because the restart is an outage and a dashboard control is not where
+	 * one should be started by accident.
+	 */
+	st->auto_apply = rss_config_get_bool(c, "mqtt", "auto_apply", false);
 
 	/*
 	 * Stills. The sub stream by default because the size difference is not
@@ -193,8 +187,8 @@ static void load_config(rmq_state_t *st)
 		st->snapshot_interval_sec = 0;
 
 	/* rhd's credential, so the picture URL carries one when rhd demands
-	 * one. Kept in step with the file by rmq_restart.c, which is the only
-	 * thing that changes it after this point. */
+	 * one. Refreshed from the file by the command path after any write rcd
+	 * accepted, which is the only thing that changes it after this point. */
 	rmq_http_creds(st, c);
 
 	/* Home Assistant discovery */
@@ -315,8 +309,7 @@ static int rmq_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 				     "\"host_discovered\":%s,\"mdns\":%s,"
 				     "\"port\":%d,\"tls\":%s,\"client_id\":\"%s\","
 				     "\"topic_prefix\":\"%s\",\"commands\":%s,"
-				     "\"save_pending\":%s,\"restart_pending\":%s,"
-				     "\"staged_edits\":%d}",
+				     "\"auto_apply\":%s,\"rcd\":%s}",
 				     rmq_mqtt_connected(st->mqtt) ? "true" : "false", st->host,
 				     st->host_discovered ? "true" : "false",
 				     /* Whether this build could discover a broker, not
@@ -326,8 +319,12 @@ static int rmq_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 				     rmq_mdns_available() ? "true" : "false", st->port,
 				     st->use_tls ? "true" : "false", st->client_id,
 				     st->topic_prefix, st->commands_enabled ? "true" : "false",
-				     st->save_due_ms ? "true" : "false",
-				     st->restart_due_ms ? "true" : "false", st->cfg_write_count);
+				     st->auto_apply ? "true" : "false",
+				     /* Whether the daemon every write goes through is
+				      * answering. A bridge that cannot reach it can
+				      * still publish state it has already collected,
+				      * so this is not visible any other way. */
+				     rmq_rcd_available() ? "true" : "false");
 	}
 
 	/*
@@ -445,7 +442,6 @@ static void rmq_poll_cycle(rmq_state_t *st)
 
 	/* The bridge's own state, added to the daemons': a pending restart is
 	 * the reason a control can read back the value it had a moment ago. */
-	rmq_restart_report(st, state);
 	rmq_system_report(st, state);
 
 	char *payload = cJSON_PrintUnformatted(state);
@@ -506,21 +502,6 @@ static void serve_loop(rmq_state_t *st)
 
 		if (rmq_snapshot_due(st, now))
 			rmq_snapshot_publish(st);
-
-		if (st->save_due_ms && now >= st->save_due_ms)
-			rmq_cmd_flush_saves(st);
-
-		if (rmq_restart_due(st, now)) {
-			/*
-			 * This blocks for as long as the slowest daemon takes
-			 * to come back — tens of seconds for rvd. That is
-			 * within the keepalive, and serialising it against the
-			 * poll is deliberate: state collected mid-restart
-			 * describes a camera that does not exist yet.
-			 */
-			rmq_restart_apply(st);
-			next_poll_ms = 0; /* publish the settled state at once */
-		}
 	}
 }
 
@@ -581,11 +562,6 @@ int main(int argc, char **argv)
 	serve_loop(&st);
 
 	RSS_INFO("rmq shutting down");
-
-	/* A change made moments before the stop is still owed to flash, and
-	 * the daemons that hold it may be going down with us. */
-	rmq_cmd_flush_saves(&st);
-	rmq_restart_flush_writes(&st);
 
 	/* A graceful DISCONNECT tells the broker to discard the will, so the
 	 * retained status would otherwise stay "online" forever. Publish the

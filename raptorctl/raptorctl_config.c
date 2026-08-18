@@ -3,6 +3,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <cJSON.h>
@@ -61,12 +62,110 @@ static void print_section_json(const char *section, const char *json_str)
 	cJSON_Delete(root);
 }
 
+/*
+ * A value typed the way rcd's schema expects it.
+ *
+ * The shell hands everything over as a string, and rcd wants a number for a
+ * number and a boolean for a boolean -- so the shape is recovered here rather
+ * than each caller being asked to quote correctly. An enum and a credential
+ * are strings either way, and a string that happens to look like a number is
+ * refused by the table rather than silently written as one.
+ */
+static void add_typed(cJSON *j, const char *key, const char *val)
+{
+	if (strcmp(val, "true") == 0 || strcmp(val, "false") == 0) {
+		cJSON_AddBoolToObject(j, key, strcmp(val, "true") == 0);
+		return;
+	}
+	char *end;
+	long lv = strtol(val, &end, 10);
+	if (*end == '\0' && end != val)
+		cJSON_AddNumberToObject(j, key, (double)lv);
+	else
+		cJSON_AddStringToObject(j, key, val);
+}
+
+/*
+ * Writes go through rcd rather than to the file.
+ *
+ * Editing raptor.conf from here would skip the validation, skip applying the
+ * keys that can be applied without a restart, and leave nothing to record that
+ * a daemon is now running behind -- so a write that rcd cannot carry is
+ * refused rather than done a worse way. Which is why an absent rcd is an
+ * error naming the fix, and not a quiet fallback.
+ */
+static int config_set_via_rcd(const char *section, const char *key, const char *value)
+{
+	cJSON *j = jcmd("set");
+	if (!j)
+		return 1;
+	jadd_s(j, "section", section);
+	jadd_s(j, "key", key);
+	add_typed(j, "value", value);
+
+	char req[512];
+	jstr(j, req, sizeof(req));
+	if (!req[0]) {
+		fprintf(stderr, "config set: request too large\n");
+		return 1;
+	}
+
+	char sock[64];
+	snprintf(sock, sizeof(sock), RSS_SOCK_FMT, "rcd");
+
+	char *resp = NULL;
+	if (rss_ctrl_send_command_alloc(sock, req, &resp, 30000) < 0) {
+		fprintf(stderr, "config set: rcd is not running, and writes go "
+				"through it.\nStart it (/etc/init.d/S31raptor start) "
+				"and try again.\n");
+		return 1;
+	}
+
+	cJSON *root = cJSON_Parse(resp);
+	free(resp);
+	if (!root) {
+		fprintf(stderr, "config set: rcd answered unusably\n");
+		return 1;
+	}
+
+	const cJSON *status = cJSON_GetObjectItemCaseSensitive(root, "status");
+	int rc = 0;
+	if (!cJSON_IsString(status) || strcmp(status->valuestring, "ok") != 0) {
+		const cJSON *why = cJSON_GetObjectItemCaseSensitive(root, "reason");
+		fprintf(stderr, "config set: %s\n",
+			cJSON_IsString(why) ? why->valuestring : "refused");
+		rc = 1;
+	} else {
+		/*
+		 * Said out loud, because it is the whole difference between the
+		 * two tiers and it is otherwise invisible: the value is in the
+		 * file and the running daemon has not read it.
+		 */
+		const cJSON *results = cJSON_GetObjectItemCaseSensitive(root, "results");
+		const cJSON *first = cJSON_GetArrayItem(results, 0);
+		const cJSON *applied = cJSON_GetObjectItemCaseSensitive(first, "applied");
+		if (cJSON_IsString(applied) && strcmp(applied->valuestring, "saved") == 0)
+			printf("saved; run 'raptorctl config apply' to restart what needs it\n");
+	}
+
+	cJSON_Delete(root);
+	return rc;
+}
+
 int handle_config(int argc, char **argv)
 {
 	if (argc < 3) {
-		fprintf(stderr, "Usage: raptorctl config <get|set|save> ...\n");
+		fprintf(stderr, "Usage: raptorctl config <get|set|save|apply|pending> ...\n");
 		return 1;
 	}
+
+	/* Enacting saved edits, and asking what is owed. Both belong to rcd
+	 * because both are about the difference between the file and what is
+	 * running, which is the one thing only rcd tracks. */
+	if (strcmp(argv[2], "apply") == 0)
+		return send_cmd_verb("rcd", "apply");
+	if (strcmp(argv[2], "pending") == 0)
+		return send_cmd_verb("rcd", "pending");
 
 	/* config save — tell all daemons to save */
 	if (strcmp(argv[2], "save") == 0) {
@@ -176,22 +275,9 @@ int handle_config(int argc, char **argv)
 			fprintf(stderr, "Usage: raptorctl config set <section> <key> <value>\n");
 			return 1;
 		}
-		const char *cfgpath = RSS_CONFIG_PATH;
-		rss_config_t *cfg = rss_config_load(cfgpath);
-		if (!cfg) {
-			fprintf(stderr, "Failed to load %s\n", cfgpath);
-			return 1;
-		}
-		rss_config_set_str(cfg, argv[3], argv[4], argv[5]);
-		int ret = rss_config_save(cfg, cfgpath);
-		rss_config_free(cfg);
-		if (ret != 0) {
-			fprintf(stderr, "Failed to save %s\n", cfgpath);
-			return 1;
-		}
-		return 0;
+		return config_set_via_rcd(argv[3], argv[4], argv[5]);
 	}
 
-	fprintf(stderr, "Usage: raptorctl config <get|set|save> ...\n");
+	fprintf(stderr, "Usage: raptorctl config <get|set|save|apply|pending> ...\n");
 	return 1;
 }

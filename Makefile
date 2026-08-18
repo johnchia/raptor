@@ -294,7 +294,7 @@ LIVE555_LIBS ?= $(LIVE555_SYSROOT)/usr/lib/libliveMedia.a \
                 $(LIVE555_SYSROOT)/usr/lib/libUsageEnvironment.a
 
 # Targets
-DAEMONS := rvd rsd rad rhd rod ric rmr rmd rwd rwc rfs rsp rsr rsd-555 rmq
+DAEMONS := rvd rsd rad rhd rod ric rmr rmd rwd rwc rfs rsp rsr rsd-555 rmq rcd
 TOOLS   := raptorctl ringdump rac rlatency rverify mdnsprobe
 
 .PHONY: all clean libs $(DAEMONS) $(TOOLS) install
@@ -468,6 +468,12 @@ rsr: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	$(Q)$(MAKE) -C rsr CC="$(CC)" CFLAGS="$(CFLAGS) $(CFLAGS_SRT)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS) $(LDFLAGS_SRT)" Q="$(Q)"
+
+rcd: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+	@echo "  BUILD   rcd"
+	$(Q)$(MAKE) -C rcd CC="$(CC)" CFLAGS="$(CFLAGS)" \
+		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
+		LDFLAGS="$(LDFLAGS)" Q="$(Q)"
 
 rmq: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rmq"

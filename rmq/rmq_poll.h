@@ -1,11 +1,11 @@
 /*
- * rmq_poll.h -- Daemon discovery and state collection
+ * rmq_poll.h -- The camera's state, as rcd reports it
  *
  * Raptor is modular: an install runs only the daemons it needs, and which
- * ones those are is discovered at runtime rather than configured. So the
- * bridge probes the control sockets each cycle and reports on what answered,
- * which is also what lets Home Assistant entities appear and disappear with
- * the daemons that back them.
+ * ones those are is discovered at runtime rather than configured. rcd does
+ * that discovery for every client, so the bridge asks it once a cycle instead
+ * of probing nine control sockets itself -- which is also what lets Home
+ * Assistant entities appear and disappear with the daemons that back them.
  *
  * The control protocol is strictly request/response with no event push
  * (raptor-ipc/src/rss_ctrl.c), so state has to be polled — that is a property
@@ -52,9 +52,12 @@ typedef struct {
 bool rmq_daemons_differ(const rmq_daemons_t *a, const rmq_daemons_t *b);
 
 /*
- * Probe every daemon and collect state into one JSON document. Returns a
- * cJSON object the caller must delete, or NULL on allocation failure.
- * `out` receives which daemons answered.
+ * Ask rcd for the camera's state. Returns a cJSON object the caller must
+ * delete, or NULL when rcd did not answer -- in which case there is nothing
+ * to publish, and publishing an empty document instead would withdraw every
+ * entity and read as a camera that had lost its daemons.
+ *
+ * `out` receives which daemons rcd found running.
  *
  * One document rather than a topic per value: MQTT gives no ordering across
  * topics, so a single retained publish keeps every entity mutually consistent

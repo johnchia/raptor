@@ -224,6 +224,23 @@ static const ha_entity_t entities[] = {
 	 .icon = "mdi:account-eye",
 	 .cat = CAT_PRIMARY,
 	 .owner = RMQ_D_RSD},
+	/*
+	 * Saved settings a running daemon has not read.
+	 *
+	 * The one thing a dashboard cannot show by itself: a dropdown that has
+	 * moved looks applied whether it is or not, because Home Assistant
+	 * echoes what it published. This says which of the two happened, and
+	 * the Apply button beside it is what resolves it.
+	 *
+	 * Owned by no daemon: it describes the difference between the file and
+	 * whatever is running, which outlives any one of them.
+	 */
+	{.key = "changes_pending",
+	 .name = "Changes pending restart",
+	 .bin_on = "value_json.stale | default([]) | count > 0",
+	 .icon = "mdi:content-save-alert",
+	 .cat = CAT_DIAGNOSTIC,
+	 .owner = RMQ_D_COUNT},
 	{.key = "mjpeg_clients",
 	 .measurement = true,
 	 .name = "MJPEG viewers",
@@ -620,7 +637,7 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
  */
 
 /* [image]: a live rvd command, a reading back from the ISP, a ceiling. */
-#define ISP_NUM(k, nm, cmd, ic, hi)                                                                \
+#define ISP_NUM(k, nm, ic, hi)                                                                     \
 	{.key = "image_" k,                                                                        \
 	 .name = nm,                                                                               \
 	 .kind = CTRL_NUMBER,                                                                      \
@@ -629,7 +646,8 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 	 .owner = RMQ_D_RVD,                                                                       \
 	 .cap = k,                                                                                 \
 	 .value = "image." k,                                                                      \
-	 .cmd_tpl = "{\"cmd\":\"" cmd "\",\"value\":{{ value | int }}}",                           \
+	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"image\",\"key\":\"" k "\","                    \
+		    "\"value\":{{ value | int }}}",                                                \
 	 .min = 0,                                                                                 \
 	 .max = hi,                                                                                \
 	 .step = 1}
@@ -655,7 +673,7 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 	 .owner = RMQ_D_RVD,                                                                       \
 	 .cap = k,                                                                                 \
 	 .value = "image." k,                                                                      \
-	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"image\",\"key\":\"" k "\","             \
+	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"image\",\"key\":\"" k "\","                    \
 		    "\"value\":{{ value | int }}}",                                                \
 	 .min = 0,                                                                                 \
 	 .max = hi,                                                                                \
@@ -671,9 +689,8 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 	 .owner = RMQ_D_RVD,                                                                       \
 	 .cap = k,                                                                                 \
 	 .value = "image." k,                                                                      \
-	 .payload = "{\"cmd\":\"config-set\",\"section\":\"image\",\"key\":\"" k "\","             \
-		    "\"value\":1}",                                                                \
-	 .payload_off = "{\"cmd\":\"config-set\",\"section\":\"image\",\"key\":\"" k "\","         \
+	 .payload = "{\"cmd\":\"set\",\"section\":\"image\",\"key\":\"" k "\",\"value\":1}",       \
+	 .payload_off = "{\"cmd\":\"set\",\"section\":\"image\",\"key\":\"" k "\","                \
 			"\"value\":0}",                                                            \
 	 .restarts = true}
 
@@ -686,7 +703,7 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 	 .cat = CAT_CONFIG,                                                                        \
 	 .owner = RMQ_D_RIC,                                                                       \
 	 .value = "ir." k,                                                                         \
-	 .cmd_tpl = "{\"cmd\":\"ircut-threshold\",\"key\":\"" k "\","                              \
+	 .cmd_tpl = "{\"cmd\":\"action\",\"action\":\"ircut-threshold\",\"key\":\"" k "\","        \
 		    "\"value\":{{ value | int }}}",                                                \
 	 .min = 0,                                                                                 \
 	 .max = hi,                                                                                \
@@ -706,7 +723,7 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 	 .icon = ic,                                                                               \
 	 .cat = CAT_CONFIG,                                                                        \
 	 .owner = RMQ_D_RIC,                                                                       \
-	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"ircut\",\"key\":\"" k "\","             \
+	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"ircut\",\"key\":\"" k "\","                    \
 		    "\"value\":{{ value | int }}}",                                                \
 	 .min = lo,                                                                                \
 	 .max = hi,                                                                                \
@@ -727,7 +744,8 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 	 .owner = RMQ_D_RVD,                                                                       \
 	 .group = grp,                                                                             \
 	 .value = "stream" n ".bitrate",                                                           \
-	 .cmd_tpl = "{\"cmd\":\"set-bitrate\",\"channel\":" n ",\"value\":{{ value | int }}}",     \
+	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"stream" n "\",\"key\":\"bitrate\","            \
+		    "\"value\":{{ value | int }}}",                                                \
 	 .min = 100000,                                                                            \
 	 .max = 50000000,                                                                          \
 	 .step = 100000,                                                                           \
@@ -740,7 +758,8 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 		 .owner = RMQ_D_RVD,                                                               \
 		 .group = grp,                                                                     \
 		 .value = "stream" n ".fps",                                                       \
-		 .cmd_tpl = "{\"cmd\":\"set-fps\",\"channel\":" n ",\"value\":{{ value | int }}}", \
+		 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"stream" n "\",\"key\":\"fps\","        \
+			    "\"value\":{{ value | int }}}",                                        \
 		 .min = 5,                                                                         \
 		 .max = 60,                                                                        \
 		 .step = 5,                                                                        \
@@ -753,7 +772,8 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 		 .owner = RMQ_D_RVD,                                                               \
 		 .group = grp,                                                                     \
 		 .value = "stream" n ".gop",                                                       \
-		 .cmd_tpl = "{\"cmd\":\"set-gop\",\"channel\":" n ",\"value\":{{ value | int }}}", \
+		 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"stream" n "\",\"key\":\"gop\","        \
+			    "\"value\":{{ value | int }}}",                                        \
 		 .min = 5,                                                                         \
 		 .max = 300,                                                                       \
 		 .step = 5},                                                                       \
@@ -765,9 +785,11 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 		 .owner = RMQ_D_RVD,                                                               \
 		 .group = grp,                                                                     \
 		 .value = "stream" n ".resolution",                                                \
-		 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"stream" n "\",\"values\":"      \
-			    "{\"width\":{{ value.split('x')[0] | int }},"                          \
-			    "\"height\":{{ value.split('x')[1] | int }}}}", /* .options left NULL: \
+		 .cmd_tpl = "{\"cmd\":\"set\",\"edits\":["                                         \
+			    "{\"section\":\"stream" n "\",\"key\":\"width\","                      \
+			    "\"value\":{{ value.split('x')[0] | int }}},"                          \
+			    "{\"section\":\"stream" n "\",\"key\":\"height\","                     \
+			    "\"value\":{{ value.split('x')[1] | int }}}]}", /* .options left NULL: \
 									       derived from the    \
 									       sensor at publish   \
 									       time. */            \
@@ -776,9 +798,8 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 		.key = "stream" n "_codec_set", .name = "Codec", .kind = CTRL_SELECT,              \
 		.icon = "mdi:video", .cat = CAT_CONFIG, .owner = RMQ_D_RVD, .group = grp,          \
 		.value = "stream" n ".codec",                                                      \
-		.cmd_tpl =                                                                         \
-			"{\"cmd\":\"config-set\",\"section\":\"stream" n "\",\"key\":\"codec\","   \
-			"\"value\":\"{{ value }}\"}",                                              \
+		.cmd_tpl = "{\"cmd\":\"set\",\"section\":\"stream" n "\",\"key\":\"codec\","       \
+			   "\"value\":\"{{ value }}\"}",                                           \
 		.options = opt_vcodec, .restarts = true                                            \
 	}
 
@@ -791,8 +812,8 @@ static const ha_control_t controls[] = {
 	 .cat = CAT_PRIMARY,
 	 .owner = RMQ_D_ROD,
 	 .value = "osd.enabled",
-	 .payload = "{\"cmd\":\"osd-enable\"}",
-	 .payload_off = "{\"cmd\":\"osd-disable\"}"},
+	 .payload = "{\"cmd\":\"action\",\"action\":\"osd-enable\"}",
+	 .payload_off = "{\"cmd\":\"action\",\"action\":\"osd-disable\"}"},
 
 	/* Two gain stages, deliberately both exposed: volume is the digital
 	 * trim and gain the analog front end, and only the second one can
@@ -804,7 +825,8 @@ static const ha_control_t controls[] = {
 	 .cat = CAT_CONFIG,
 	 .owner = RMQ_D_RAD,
 	 .value = "audio.volume",
-	 .cmd_tpl = "{\"cmd\":\"set-volume\",\"value\":{{ value | int }}}",
+	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"audio\",\"key\":\"volume\","
+		    "\"value\":{{ value | int }}}",
 	 .min = 0,
 	 .max = 100,
 	 .step = 1},
@@ -815,7 +837,8 @@ static const ha_control_t controls[] = {
 	 .cat = CAT_CONFIG,
 	 .owner = RMQ_D_RAD,
 	 .value = "audio.gain",
-	 .cmd_tpl = "{\"cmd\":\"set-gain\",\"value\":{{ value | int }}}",
+	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"audio\",\"key\":\"gain\","
+		    "\"value\":{{ value | int }}}",
 	 .min = 0,
 	 .max = 31,
 	 .step = 1},
@@ -826,7 +849,7 @@ static const ha_control_t controls[] = {
 	 .cat = CAT_CONFIG,
 	 .owner = RMQ_D_RAD,
 	 .value = "audio.codec",
-	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"audio\",\"key\":\"codec\","
+	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"audio\",\"key\":\"codec\","
 		    "\"value\":\"{{ value }}\"}",
 	 .options = opt_acodec,
 	 .restarts = true},
@@ -837,7 +860,7 @@ static const ha_control_t controls[] = {
 	 .cat = CAT_CONFIG,
 	 .owner = RMQ_D_RAD,
 	 .value = "audio.sample_rate",
-	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"audio\",\"key\":\"sample_rate\","
+	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"audio\",\"key\":\"sample_rate\","
 		    "\"value\":\"{{ value }}\"}",
 	 .options = opt_arate,
 	 .restarts = true},
@@ -860,6 +883,24 @@ static const ha_control_t controls[] = {
 	 * this is the reboot, so the thing needed to finish the job is beside
 	 * the job. device_class restart is what makes Home Assistant draw it as
 	 * the disruptive action it is rather than as another button. */
+	/*
+	 * Enact the saved settings, and nothing else.
+	 *
+	 * This is where the restart lives now. It used to happen a few seconds
+	 * after any restart-tier edit, with no way to decline it and nothing
+	 * saying it was about to -- so moving a resolution dropdown stopped
+	 * capture for tens of seconds as a side effect. Now the edit is saved,
+	 * "Changes pending restart" turns on, and somebody presses this.
+	 *
+	 * A no-op when nothing is pending, so it is safe to press twice.
+	 */
+	{.key = "apply",
+	 .name = "Apply pending changes",
+	 .kind = CTRL_BUTTON,
+	 .icon = "mdi:content-save-cog",
+	 .cat = CAT_CONFIG,
+	 .owner = RMQ_D_COUNT,
+	 .payload = "{\"cmd\":\"apply\"}"},
 	{.key = "reboot",
 	 .name = "Reboot camera",
 	 .kind = CTRL_BUTTON,
@@ -884,7 +925,7 @@ static const ha_control_t controls[] = {
 	 .cat = CAT_CONFIG,
 	 .owner = RMQ_D_RSD,
 	 .value = "rtsp.port",
-	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"rtsp\",\"key\":\"port\","
+	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"rtsp\",\"key\":\"port\","
 		    "\"value\":{{ value | int }}}",
 	 .min = 1,
 	 .max = 65535,
@@ -894,7 +935,7 @@ static const ha_control_t controls[] = {
 	 * The camera's account: one username and one password, applied to
 	 * RTSP and to HTTP together. They are separate keys in the config
 	 * file and separate daemons behind it, but two accounts on one camera
-	 * is one account plus a forgotten one, so `credentials-set` writes
+	 * is one account plus a forgotten one, so `credentials` writes
 	 * both halves from each field.
 	 *
 	 * Both daemons authenticate only when a username and a password are
@@ -923,7 +964,7 @@ static const ha_control_t controls[] = {
 	 .cat = CAT_CONFIG,
 	 .owner = RMQ_D_RSD,
 	 .value = "rtsp.username",
-	 .cmd_tpl = "{\"cmd\":\"credentials-set\",\"username\":\"{{ value }}\"}",
+	 .cmd_tpl = "{\"cmd\":\"credentials\",\"username\":\"{{ value }}\"}",
 	 .max = 63,
 	 .restarts = true},
 	{.key = "cam_pass",
@@ -933,7 +974,7 @@ static const ha_control_t controls[] = {
 	 .cat = CAT_CONFIG,
 	 .owner = RMQ_D_RSD,
 	 .value = "rtsp.password",
-	 .cmd_tpl = "{\"cmd\":\"credentials-set\",\"password\":\"{{ value }}\"}",
+	 .cmd_tpl = "{\"cmd\":\"credentials\",\"password\":\"{{ value }}\"}",
 	 .max = 63,
 	 .restarts = true,
 	 .secret = true},
@@ -943,7 +984,7 @@ static const ha_control_t controls[] = {
 	 .icon = "mdi:image-refresh",
 	 .cat = CAT_DIAGNOSTIC,
 	 .owner = RMQ_D_RVD,
-	 .payload = "{\"cmd\":\"request-idr\",\"channel\":0}"},
+	 .payload = "{\"cmd\":\"action\",\"action\":\"request-idr\",\"channel\":0}"},
 
 	/* ---- Image: the ISP tuning ----
 	 *
@@ -952,23 +993,20 @@ static const ha_control_t controls[] = {
 	 * They read back from the ISP rather than the config, so a platform
 	 * that ignores a block shows it unchanged rather than pretending.
 	 */
-	ISP_NUM("brightness", "Brightness", "set-brightness", "mdi:brightness-6", 255),
-	ISP_NUM("contrast", "Contrast", "set-contrast", "mdi:contrast-circle", 255),
-	ISP_NUM("saturation", "Saturation", "set-saturation", "mdi:palette", 255),
-	ISP_NUM("sharpness", "Sharpness", "set-sharpness", "mdi:triangle-outline", 255),
-	ISP_NUM("hue", "Hue", "set-hue", "mdi:palette-swatch", 255),
-	ISP_NUM("sinter", "Spatial noise reduction", "set-sinter", "mdi:blur", 255),
-	ISP_NUM("ae_comp", "AE compensation", "set-ae-comp", "mdi:brightness-auto", 255),
-	ISP_NUM("max_again", "Max analog gain", "set-max-again", "mdi:signal", 160),
-	ISP_NUM("max_dgain", "Max digital gain", "set-max-dgain", "mdi:signal-variant", 160),
-	ISP_NUM("dpc_strength", "Dead pixel correction", "set-dpc", "mdi:grain", 255),
-	ISP_NUM("drc_strength", "Dynamic range compression", "set-drc", "mdi:gradient-vertical",
-		255),
-	ISP_NUM("defog_strength", "Defog", "set-defog-strength", "mdi:weather-fog", 255),
-	ISP_NUM("highlight_depress", "Highlight depression", "set-highlight-depress",
-		"mdi:white-balance-sunny", 255),
-	ISP_NUM("backlight_comp", "Backlight compensation", "set-backlight-comp",
-		"mdi:brightness-4", 10),
+	ISP_NUM("brightness", "Brightness", "mdi:brightness-6", 255),
+	ISP_NUM("contrast", "Contrast", "mdi:contrast-circle", 255),
+	ISP_NUM("saturation", "Saturation", "mdi:palette", 255),
+	ISP_NUM("sharpness", "Sharpness", "mdi:triangle-outline", 255),
+	ISP_NUM("hue", "Hue", "mdi:palette-swatch", 255),
+	ISP_NUM("sinter", "Spatial noise reduction", "mdi:blur", 255),
+	ISP_NUM("ae_comp", "AE compensation", "mdi:brightness-auto", 255),
+	ISP_NUM("max_again", "Max analog gain", "mdi:signal", 160),
+	ISP_NUM("max_dgain", "Max digital gain", "mdi:signal-variant", 160),
+	ISP_NUM("dpc_strength", "Dead pixel correction", "mdi:grain", 255),
+	ISP_NUM("drc_strength", "Dynamic range compression", "mdi:gradient-vertical", 255),
+	ISP_NUM("defog_strength", "Defog", "mdi:weather-fog", 255),
+	ISP_NUM("highlight_depress", "Highlight depression", "mdi:white-balance-sunny", 255),
+	ISP_NUM("backlight_comp", "Backlight compensation", "mdi:brightness-4", 10),
 
 	IMG_CFG_NUM("temper", "Temporal noise reduction", "mdi:blur-linear", 255),
 	IMG_CFG_SW("hflip", "Flip horizontally", "mdi:flip-horizontal"),
@@ -982,7 +1020,7 @@ static const ha_control_t controls[] = {
 	 .cat = CAT_CONFIG,
 	 .owner = RMQ_D_RIC,
 	 .value = "ir.mode",
-	 .cmd_tpl = "{\"cmd\":\"ircut-mode\",\"value\":\"{{ value }}\"}",
+	 .cmd_tpl = "{\"cmd\":\"action\",\"action\":\"ircut-mode\",\"value\":\"{{ value }}\"}",
 	 .options = opt_daynight},
 	/* ric reports the trigger it settled on, which need not be the one in
 	 * the file: a platform that reports no EV demotes `photo` to `luma` at
@@ -995,7 +1033,7 @@ static const ha_control_t controls[] = {
 	 .cat = CAT_CONFIG,
 	 .owner = RMQ_D_RIC,
 	 .value = "ir.trigger",
-	 .cmd_tpl = "{\"cmd\":\"config-set\",\"section\":\"ircut\",\"key\":\"trigger\","
+	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"ircut\",\"key\":\"trigger\","
 		    "\"value\":\"{{ value }}\"}",
 	 .options = opt_trigger,
 	 .restarts = true},
@@ -1015,7 +1053,7 @@ static const ha_control_t controls[] = {
 	 * The ADC and photo trigger calibration is deliberately not here. Both
 	 * are commissioning for a trigger most boards do not use, and eight
 	 * entities is a lot of page to charge every camera for that. They stay
-	 * writable over MQTT — `config-set` on the [ircut] section reaches them
+	 * writable over MQTT — a `set` on the [ircut] section reaches them
 	 * by name, and rmq_cmd.c still bounds them.
 	 */
 	IRC_CFG("gpio_ircut", "IR-cut GPIO", "mdi:chip", -1, 127),

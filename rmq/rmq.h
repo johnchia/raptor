@@ -13,7 +13,6 @@
 
 #include "rmq_mqtt.h"
 #include "rmq_poll.h"
-#include "rmq_restart.h"
 #include "rmq_snapshot.h"
 #include "rmq_system.h"
 
@@ -21,9 +20,6 @@
  * enough that appending the longest suffix cannot truncate. */
 #define RMQ_TOPIC_MAX  256
 #define RMQ_PREFIX_MAX 192
-
-/* However long a burst of commands runs, a change reaches flash within this. */
-#define RMQ_SAVE_MAX_DELAY_MS 15000
 
 /*
  * Where to look for a broker when the config names none, and how long to wait.
@@ -72,8 +68,18 @@ struct rmq_state {
 	int keepalive_sec;
 	int reconnect_delay_ms;
 	int poll_interval_sec;
-	int save_debounce_ms;
-	int restart_debounce_ms;
+
+	/*
+	 * Whether a saved edit should be enacted without being asked.
+	 *
+	 * Off by default, and that is the point: restarting rvd stops capture
+	 * for tens of seconds, and nobody moving a dropdown in a dashboard
+	 * asked for that. The Apply button is how it gets asked for. This key
+	 * exists for installations that would rather not be asked -- and for
+	 * anyone who relied on the old behaviour, where every restart-tier
+	 * edit bounced its daemon a few seconds later with no way to decline.
+	 */
+	bool auto_apply;
 
 	/* The picture. On by default, and withheld when the camera cannot
 	 * serve one rather than when a key says not to: what it costs is a URL
@@ -90,10 +96,10 @@ struct rmq_state {
 	 * Together they are the picture URL. Port 0 means rhd is not answering
 	 * and there is no URL to name.
 	 *
-	 * The credential is here rather than read at use because rmq writes
-	 * the config file without re-reading it: the copy loaded at startup
-	 * goes stale exactly when the password is changed over MQTT, so
-	 * rmq_restart.c refreshes these two from the file it just wrote.
+	 * The credential is here rather than read at use because rmq holds a
+	 * config it loaded at startup: the copy goes stale exactly when the
+	 * password is changed over MQTT, so the command path refreshes these
+	 * two from the file after any write that rcd accepted.
 	 */
 	int http_port;
 	bool http_tls;
@@ -125,22 +131,6 @@ struct rmq_state {
 	int jpeg_channels; /* rvd's JPEG channels; 0 = no picture to offer */
 	char stream_res[RMQ_STREAM_COUNT][16];
 	char isp_settable[320]; /* ",key,key," — see rvd's get-isp */
-
-	/* Config writes owed to daemons, deferred so that a burst of commands
-	 * costs one flash write rather than one per command. */
-	bool save_owed[RMQ_D_COUNT];
-	uint64_t save_due_ms;	/* 0 = nothing owed */
-	uint64_t save_first_ms; /* when the oldest owed change arrived */
-
-	/* Restart tier: edits a daemon only sees when it re-reads the config,
-	 * held until the burst ends so a section costs one write and one
-	 * restart rather than one of each per key. */
-	rmq_cfg_write_t cfg_writes[RMQ_CFG_PENDING_MAX];
-	int cfg_write_count;
-	bool restart_owed[RMQ_D_COUNT];
-	uint64_t restart_due_ms;   /* 0 = nothing staged */
-	uint64_t restart_first_ms; /* when the oldest staged edit arrived */
-	char restart_error[160];   /* last failure, until the next apply */
 
 	/* Control socket */
 	rss_ctrl_t *ctrl;

@@ -117,9 +117,14 @@ start() {
 	start_daemon rsp
 	start_daemon rsr
 
-	# rmq last: it polls the other daemons over their control sockets and
-	# restarts them for config keys that only apply at bring-up, so it wants
-	# everything it talks to already up.
+	# rcd owns the configuration: it validates every edit, writes
+	# raptor.conf, and sequences the restarts that some edits need. Started
+	# before rmq because rmq is one of its clients, and after the daemons it
+	# manages so its first state answer describes a camera that is already up.
+	start_daemon rcd
+
+	# rmq last: it polls the other daemons through rcd and needs both rcd
+	# and everything it reports on already running.
 	start_daemon rmq
 
 	echo "Done."

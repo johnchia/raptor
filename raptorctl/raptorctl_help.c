@@ -13,7 +13,9 @@ const struct help_entry help_entries[] = {
 	{NULL, "cpu                                 Show CPU usage (1s sample)"},
 	{NULL, "config get <section> <key>           Read config value"},
 	{NULL, "config get <section>                Show all keys in section"},
-	{NULL, "config set <section> <key> <value>  Set config value"},
+	{NULL, "config set <section> <key> <value>  Set config value (through rcd)"},
+	{NULL, "config apply                        Restart whatever is running behind"},
+	{NULL, "config pending                      What is saved but not yet in effect"},
 	{NULL, "config save                         Save running config to disk"},
 	{NULL, "<daemon> status                     Show daemon details"},
 	{NULL, "<daemon> config                     Show running config"},
@@ -219,7 +221,6 @@ void usage(FILE *out)
 		"  -j '{\"daemon\":\"rvd\",\"cmd\":\"...\"}'\n"
 		"  -j "
 		"'[{\"daemon\":\"rvd\",\"cmd\":\"...\"},{\"daemon\":\"rad\",\"cmd\":\"...\"}]'\n");
-	fprintf(out,
-		"\nDaemons: rvd, rsd, rad, rod, rhd, ric, rmr, rmd, rwd, rwc, rfs, rsp, rsr, "
-		"rmq\n");
+	fprintf(out, "\nDaemons: rvd, rsd, rad, rod, rhd, ric, rmr, rmd, rwd, rwc, rfs, rsp, rsr, "
+		     "rmq, rcd\n");
 }

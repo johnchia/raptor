@@ -85,8 +85,11 @@ int send_cmd(const char *daemon, const char *json)
 	char sock_path[64];
 	snprintf(sock_path, sizeof(sock_path), RSS_SOCK_FMT, daemon);
 
-	char resp[2048];
-	int ret = rss_ctrl_send_command(sock_path, json, resp, sizeof(resp), 5000);
+	/* Allocated: rcd's schema is larger than any buffer worth declaring
+	 * here, and a reply cut to fit one would be printed as invalid JSON
+	 * with nothing to show it had been cut. */
+	char *resp = NULL;
+	int ret = rss_ctrl_send_command_alloc(sock_path, json, &resp, 5000);
 	if (ret < 0) {
 		fprintf(stderr, "Failed to send to %s: %s\n", daemon,
 			ret == -2 ? "timeout" : "connection failed");
@@ -94,6 +97,7 @@ int send_cmd(const char *daemon, const char *json)
 	}
 
 	printf("%s\n", resp);
+	free(resp);
 	return 0;
 }
 

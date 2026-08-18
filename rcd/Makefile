@@ -1,6 +1,6 @@
-SRCS := rmq_main.c rmq_mqtt.c rmq_poll.c rmq_ha.c rmq_cmd.c rmq_rcd.c rmq_snapshot.c rmq_system.c rmq_mdns.c
+SRCS := rcd_main.c rcd_proto.c rcd_schema.c rcd_config.c rcd_apply.c rcd_state.c rcd_ipc.c
 OBJS := $(SRCS:.c=.o)
-BIN  := rmq
+BIN  := rcd
 
 all: $(BIN)
 
