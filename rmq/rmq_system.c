@@ -356,19 +356,6 @@ static const struct {
 
 #define ZONE_COUNT ((int)(sizeof(zones) / sizeof(zones[0])))
 
-/* Built once, NULL-terminated, because the enum validator wants that shape. */
-static const char *zone_names[ZONE_COUNT + 1];
-
-const char *const *rmq_system_zone_names(void)
-{
-	if (!zone_names[0]) {
-		for (int i = 0; i < ZONE_COUNT; i++)
-			zone_names[i] = zones[i].name;
-		zone_names[ZONE_COUNT] = NULL;
-	}
-	return zone_names;
-}
-
 const char *rmq_system_zone_posix(const char *name)
 {
 	for (int i = 0; i < ZONE_COUNT; i++) {

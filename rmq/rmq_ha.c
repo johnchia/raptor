@@ -4,9 +4,12 @@
  * Entity triage follows the rule that a Home Assistant entity implies live
  * state: everything here reads something the camera actually reports.
  * Categorisation decides where they land on the device page — uncategorised
- * entities form the short primary card, while `config` and `diagnostic`
- * collapse into their own sections, which is what keeps the page legible as
- * the entity count grows.
+ * entities form the short primary card, while `diagnostic` collapses into its
+ * own section, which is what keeps the page legible as the entity count grows.
+ *
+ * One device, one document. The camera's settings belong to the web console,
+ * and the sub-devices this once published a stream's controls on went with
+ * them; what is left describes one camera and fits on one page.
  *
  * Controls all publish to the one command topic, with the JSON the bridge
  * expects carried in the entity's own command template or payload. That keeps
@@ -19,44 +22,26 @@
 
 #include <rss_common.h>
 
+#include <netinet/in.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <cJSON.h>
 
-/* Where an entity appears on the device page. */
-typedef enum {
-	CAT_PRIMARY = 0, /* uncategorised — the short card at the top */
-	CAT_CONFIG,
-	CAT_DIAGNOSTIC,
-} ha_category_t;
-
 /*
- * Which device page an entity lands on.
+ * Where an entity appears on the device page.
  *
- * Only the two encoded streams are separate devices. They earn it by being
- * genuinely parallel — the same six entities twice, where the page title is
- * the only thing distinguishing "Bitrate" from "Bitrate". Everything else
- * describes one camera and belongs on the camera's own page, sorted by the
- * category above; splitting those out bought a tidier list at the cost of
- * making an ordinary adjustment a journey through three pages.
+ * No `config`: the camera's settings are the web console's, and a second
+ * place to change them is a second place for them to disagree. What is left
+ * here is what a dashboard is for — readings, the live picture controls, and
+ * the two actions.
  */
 typedef enum {
-	GRP_CAMERA = 0,
-	GRP_MAIN,
-	GRP_SUB,
-	GRP_COUNT,
-} ha_group_t;
-
-static const struct {
-	const char *suffix; /* NULL: the camera itself, no via_device */
-	const char *name;   /* appended to the camera's name */
-} groups[GRP_COUNT] = {
-	[GRP_CAMERA] = {NULL, NULL},
-	[GRP_MAIN] = {"main", "Main stream"},
-	[GRP_SUB] = {"sub", "Sub stream"},
-};
+	CAT_PRIMARY = 0, /* uncategorised — the short card at the top */
+	CAT_DIAGNOSTIC,
+} ha_category_t;
 
 /*
  * Sub-devices an earlier build published and this one does not. Their
@@ -67,7 +52,7 @@ static const struct {
  * Deletable once no camera in the fleet still runs a build that published
  * them — they cost one empty publish per discovery cycle until then.
  */
-static const char *const retired_groups[] = {"image", "daynight", NULL};
+static const char *const retired_devices[] = {"image", "daynight", "main", "sub", NULL};
 
 /*
  * There is deliberately no equivalent list for retired *components*.
@@ -97,14 +82,13 @@ static const char *const retired_groups[] = {"image", "daynight", NULL};
  */
 
 /*
- * What each group's last document actually contained.
+ * What the last document actually contained.
  *
  * A withdrawal may only name a component Home Assistant is known to have, and
  * the only thing that knows is a record of what was published. Availability is
  * not that record: a control can be absent because its daemon is down, but
- * also because the ISP has no such block, or because the camera reported no
- * geometry to build a list from — and a document withdrawing one of those has
- * never been published, so it takes every other entity down with it.
+ * also because the ISP has no such block — and a document withdrawing one that
+ * was never published takes every other entity down with it.
  *
  * Module state rather than rmq_state, because it describes this file's own
  * output rather than anything about the camera. It starts empty after a
@@ -115,8 +99,8 @@ static const char *const retired_groups[] = {"image", "daynight", NULL};
 #define HA_KEYS_MAX 96
 #define HA_KEY_MAX  32
 
-static char published_keys[GRP_COUNT][HA_KEYS_MAX][HA_KEY_MAX];
-static int published_count[GRP_COUNT];
+static char published_keys[HA_KEYS_MAX][HA_KEY_MAX];
+static int published_count;
 
 typedef struct {
 	char key[HA_KEYS_MAX][HA_KEY_MAX];
@@ -153,7 +137,7 @@ static bool key_has(const key_set_t *s, const char *key)
 
 static const char *category_name(ha_category_t c)
 {
-	return c == CAT_CONFIG ? "config" : c == CAT_DIAGNOSTIC ? "diagnostic" : NULL;
+	return c == CAT_DIAGNOSTIC ? "diagnostic" : NULL;
 }
 
 /*
@@ -199,7 +183,6 @@ typedef struct {
 
 	ha_category_t cat;
 	rmq_daemon_t owner; /* component exists only while this daemon runs */
-	ha_group_t group;
 
 	/* When set, the entity is a binary_sensor rather than a sensor, and
 	 * this is the Jinja expression that makes it ON. */
@@ -210,10 +193,9 @@ typedef struct {
  * Units and constraints belong in the name: it is the only string visible
  * without opening the entity, and HA has no help-text field of any kind.
  *
- * A name carries whatever context its page does not. The stream pages supply
- * "Main" and "Sub", so their entities are bare; everything on the camera's own
- * page has to say what it is about, which is why the day/night entities name
- * themselves and the image ones do not need to.
+ * Every name stands on its own, because every entity is on the one page: a
+ * bare "Bitrate" said which stream it meant only while the stream had a page
+ * of its own to say it.
  */
 static const ha_entity_t entities[] = {
 	/* -- Primary: what an operator actually looks at -- */
@@ -274,22 +256,20 @@ static const ha_entity_t entities[] = {
 	 *    target. -- */
 	{.key = "stream0_avg_bitrate",
 	 .measurement = true,
-	 .name = "Bitrate (actual)",
+	 .name = "Main stream bitrate (actual)",
 	 .value = "stream0.avg_bitrate",
 	 .unit = "bit/s",
 	 .dev_class = "data_rate",
 	 .cat = CAT_DIAGNOSTIC,
-	 .owner = RMQ_D_RVD,
-	 .group = GRP_MAIN},
+	 .owner = RMQ_D_RVD},
 	{.key = "stream1_avg_bitrate",
 	 .measurement = true,
-	 .name = "Bitrate (actual)",
+	 .name = "Sub stream bitrate (actual)",
 	 .value = "stream1.avg_bitrate",
 	 .unit = "bit/s",
 	 .dev_class = "data_rate",
 	 .cat = CAT_DIAGNOSTIC,
-	 .owner = RMQ_D_RVD,
-	 .group = GRP_SUB},
+	 .owner = RMQ_D_RVD},
 
 	/* -- Day/night: the decision, and the exposure readings behind it.
 	 *    Raw platform units, not lux or seconds: total_gain is the
@@ -321,7 +301,7 @@ static const ha_entity_t entities[] = {
 	 .value = "ir.exposure_us",
 	 .unit = "μs",
 	 .icon = "mdi:camera-iris",
-	 .cat = CAT_DIAGNOSTIC,
+	 .cat = CAT_PRIMARY,
 	 .owner = RMQ_D_RIC},
 
 	/* Whether a viewer is actually challenged. Worth an entity of its own
@@ -387,7 +367,6 @@ typedef struct {
 	const char *icon;
 	ha_category_t cat;
 	rmq_daemon_t owner;
-	ha_group_t group;
 
 	/* Where the current value sits in the state document, so the control
 	 * shows what the camera is rather than what it was last told. NULL
@@ -404,8 +383,7 @@ typedef struct {
 	int min, max, step; /* CTRL_NUMBER */
 	const char *unit;
 
-	/* CTRL_SELECT, NULL-terminated. NULL itself means the options are
-	 * derived at publish time — see res_build below. */
+	/* CTRL_SELECT, NULL-terminated. Required for that kind. */
 	const char *const *options;
 
 	/*
@@ -424,11 +402,6 @@ typedef struct {
 	 */
 	const char *cap;
 
-	/* CTRL_SELECT: options come from the timezone table rather than from
-	 * `options` above, which would otherwise be forty-odd lines of names
-	 * repeated in a second place. */
-	bool zones;
-
 	/* HA device_class, NULL for none. On a button it is what decides how
 	 * the action is drawn — `restart` reads as disruptive where the
 	 * default reads as another press. */
@@ -439,112 +412,6 @@ typedef struct {
 	 * keeps the value out of sight is that nothing reports it. */
 	bool secret;
 } ha_control_t;
-
-static const char *const opt_daynight[] = {"auto", "day", "night", NULL};
-static const char *const opt_trigger[] = {"luma", "gain", "adc", "photo", NULL};
-static const char *const opt_vcodec[] = {"h264", "h265", NULL};
-static const char *const opt_acodec[] = {"pcmu", "pcma", "l16", "aac", "opus", NULL};
-static const char *const opt_arate[] = {"8000", "16000", "32000", "48000", NULL};
-
-/*
- * The resolution list, derived from the sensor rather than written down.
- *
- * A sensor's sizes are its own. 2560x1920 is 4:3 and 1920x1080 is 16:9, and a
- * fixed list written for one of them crops or stretches on the other — which
- * is what the list here used to do on every 4:3 camera in the fleet. So the
- * ladder is the native size and fractions of it: the aspect ratio survives
- * whatever the sensor is, and the sizes anyone recognises fall out of the
- * arithmetic anyway, since two thirds of 1080p is 720p.
- *
- * Fractions rather than real modes because nothing on the camera enumerates
- * modes: rvd's get-enc-caps carries feature flags and no geometry at all. What
- * the native size does buy is the ceiling — the scaler will produce any size
- * below it, and cannot invent one above.
- *
- * A list rather than a pair of width/height boxes, because a free-typed size
- * the ISP cannot produce fails at pipeline init: after the restart, with no
- * picture left to explain it.
- */
-#define RES_OPT_MAX 10
-
-typedef struct {
-	int w[RES_OPT_MAX], h[RES_OPT_MAX];
-	char text[RES_OPT_MAX][16];
-	const char *opt[RES_OPT_MAX + 1]; /* NULL-terminated, for the entity */
-	int count;
-} res_list_t;
-
-/*
- * Encoders want even dimensions and the hardware scaler is happiest on a
- * multiple of 8. Nearest rather than down, so half of 1080 is 544 and not 536
- * — both are legal and the first is the one encoders are built around.
- */
-static int align8(int v)
-{
-	return ((v + 4) / 8) * 8;
-}
-
-/* Insert descending by area: Home Assistant shows options in the order given,
- * and a list that is not sorted reads as a list that is not thought about. */
-static void res_add(res_list_t *l, int w, int h)
-{
-	if (w < 160 || h < 120 || l->count >= RES_OPT_MAX)
-		return;
-
-	for (int i = 0; i < l->count; i++) {
-		if (l->w[i] == w && l->h[i] == h)
-			return;
-	}
-
-	int at = l->count;
-	while (at > 0 && l->w[at - 1] * l->h[at - 1] < w * h) {
-		l->w[at] = l->w[at - 1];
-		l->h[at] = l->h[at - 1];
-		rss_strlcpy(l->text[at], l->text[at - 1], sizeof(l->text[at]));
-		at--;
-	}
-
-	l->w[at] = w;
-	l->h[at] = h;
-	snprintf(l->text[at], sizeof(l->text[at]), "%dx%d", w, h);
-	l->count++;
-}
-
-static void res_build(res_list_t *l, const struct rmq_state *st)
-{
-	/* Halves, thirds and quarters, plus the two ratios that land on sizes
-	 * people ask for by name. Native is added unrounded: that one size is
-	 * the sensor's own and not ours to tidy. */
-	static const struct {
-		int num, den;
-	} fracs[] = {{3, 4}, {2, 3}, {1, 2}, {1, 3}, {1, 4}};
-
-	memset(l, 0, sizeof(*l));
-
-	int w = st->sensor_width, h = st->sensor_height;
-	if (w > 0 && h > 0) {
-		res_add(l, w, h);
-		for (size_t i = 0; i < sizeof(fracs) / sizeof(fracs[0]); i++)
-			res_add(l, align8(w * fracs[i].num / fracs[i].den),
-				align8(h * fracs[i].num / fracs[i].den));
-	}
-
-	/*
-	 * Whatever the streams are actually running, which need not be one of
-	 * ours: a size set from the config file or by raptorctl is just as
-	 * real. Home Assistant matches state against the option list exactly,
-	 * so without this the control shows blank on the camera it describes.
-	 */
-	for (int i = 0; i < RMQ_STREAM_COUNT; i++) {
-		int sw = 0, sh = 0;
-		if (sscanf(st->stream_res[i], "%dx%d", &sw, &sh) == 2)
-			res_add(l, sw, sh);
-	}
-
-	for (int i = 0; i < l->count; i++)
-		l->opt[i] = l->text[i];
-	l->opt[l->count] = NULL;
-}
 
 /* Membership in the comma-terminated list rvd reports. Empty means the camera
  * said nothing, which is treated as "everything" — an older rvd that does not
@@ -561,35 +428,7 @@ static bool isp_settable(const struct rmq_state *st, const char *key)
 
 bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 {
-	int w = 0, h = 0;
-	const cJSON *sensor = cJSON_GetObjectItemCaseSensitive(state, "sensor");
-	if (cJSON_IsObject(sensor)) {
-		const cJSON *jw = cJSON_GetObjectItemCaseSensitive(sensor, "width");
-		const cJSON *jh = cJSON_GetObjectItemCaseSensitive(sensor, "height");
-		if (cJSON_IsNumber(jw) && cJSON_IsNumber(jh)) {
-			w = jw->valueint;
-			h = jh->valueint;
-		}
-	}
-
-	bool changed = (w != st->sensor_width || h != st->sensor_height);
-	st->sensor_width = w;
-	st->sensor_height = h;
-
-	for (int i = 0; i < RMQ_STREAM_COUNT; i++) {
-		char key[16], res[16] = "";
-		snprintf(key, sizeof(key), "stream%d", i);
-
-		const cJSON *s = cJSON_GetObjectItemCaseSensitive(state, key);
-		const cJSON *r = s ? cJSON_GetObjectItemCaseSensitive(s, "resolution") : NULL;
-		if (cJSON_IsString(r) && r->valuestring)
-			rss_strlcpy(res, r->valuestring, sizeof(res));
-
-		if (strcmp(res, st->stream_res[i]) != 0) {
-			rss_strlcpy(st->stream_res[i], res, sizeof(st->stream_res[i]));
-			changed = true;
-		}
-	}
+	bool changed = false;
 
 	/* Whether there is a picture to offer at all. A change here adds or
 	 * removes the image component, so it belongs among the facts that
@@ -694,115 +533,19 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 			"\"value\":0}",                                                            \
 	 .restarts = true}
 
-/* [ircut] thresholds ric applies and records live. */
-#define IRC_LIVE(k, nm, ic, hi, un)                                                                \
-	{.key = "ircut_" k,                                                                        \
-	 .name = nm,                                                                               \
-	 .kind = CTRL_NUMBER,                                                                      \
-	 .icon = ic,                                                                               \
-	 .cat = CAT_CONFIG,                                                                        \
-	 .owner = RMQ_D_RIC,                                                                       \
-	 .value = "ir." k,                                                                         \
-	 .cmd_tpl = "{\"cmd\":\"action\",\"action\":\"ircut-threshold\",\"key\":\"" k "\","        \
-		    "\"value\":{{ value | int }}}",                                                \
-	 .min = 0,                                                                                 \
-	 .max = hi,                                                                                \
-	 .step = 1,                                                                                \
-	 .unit = un}
-
 /*
- * [ircut] keys ric reads only at startup: a config write and a restart. ric
- * reports none of them back, so the control is write-only and shows blank
- * until it is set — which is honest, and the alternative would be echoing the
- * value we sent as though the daemon had confirmed it.
+ * What a dashboard can do to the camera.
+ *
+ * Every setting that only ever gets typed once — geometry, codecs, ports,
+ * credentials, the day/night wiring, the audio front end — is the web
+ * console's, and none of it is here. Two interfaces offering the same key is
+ * two answers to the question of what the camera is set to, and the loser is
+ * whoever reads the stale one.
+ *
+ * What survives is what a dashboard is actually for: the picture controls
+ * somebody adjusts while looking at the picture, and the two actions that
+ * finish a job started elsewhere.
  */
-#define IRC_CFG(k, nm, ic, lo, hi)                                                                 \
-	{.key = "ircut_" k,                                                                        \
-	 .name = nm,                                                                               \
-	 .kind = CTRL_NUMBER,                                                                      \
-	 .icon = ic,                                                                               \
-	 .cat = CAT_CONFIG,                                                                        \
-	 .owner = RMQ_D_RIC,                                                                       \
-	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"ircut\",\"key\":\"" k "\","                    \
-		    "\"value\":{{ value | int }}}",                                                \
-	 .min = lo,                                                                                \
-	 .max = hi,                                                                                \
-	 .step = 1,                                                                                \
-	 .restarts = true}
-
-/*
- * One encoded stream. `n` is a string so it can be pasted into both the
- * component key and the channel number inside the command template — the
- * concatenation puts the digit into the JSON unquoted, which is what the
- * command expects.
- */
-#define STREAM_CTRLS(n, grp)                                                                       \
-	{.key = "stream" n "_bitrate_set",                                                         \
-	 .name = "Bitrate",                                                                        \
-	 .kind = CTRL_NUMBER,                                                                      \
-	 .cat = CAT_CONFIG,                                                                        \
-	 .owner = RMQ_D_RVD,                                                                       \
-	 .group = grp,                                                                             \
-	 .value = "stream" n ".bitrate",                                                           \
-	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"stream" n "\",\"key\":\"bitrate\","            \
-		    "\"value\":{{ value | int }}}",                                                \
-	 .min = 100000,                                                                            \
-	 .max = 50000000,                                                                          \
-	 .step = 100000,                                                                           \
-	 .unit = "bit/s"},                                                                         \
-		{.key = "stream" n "_fps_set",                                                     \
-		 .name = "Frame rate",                                                             \
-		 .kind = CTRL_NUMBER,                                                              \
-		 .icon = "mdi:filmstrip",                                                          \
-		 .cat = CAT_CONFIG,                                                                \
-		 .owner = RMQ_D_RVD,                                                               \
-		 .group = grp,                                                                     \
-		 .value = "stream" n ".fps",                                                       \
-		 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"stream" n "\",\"key\":\"fps\","        \
-			    "\"value\":{{ value | int }}}",                                        \
-		 .min = 5,                                                                         \
-		 .max = 60,                                                                        \
-		 .step = 5,                                                                        \
-		 .unit = "fps"},                                                                   \
-		{.key = "stream" n "_gop_set",                                                     \
-		 .name = "GOP",                                                                    \
-		 .kind = CTRL_NUMBER,                                                              \
-		 .icon = "mdi:key-variant",                                                        \
-		 .cat = CAT_CONFIG,                                                                \
-		 .owner = RMQ_D_RVD,                                                               \
-		 .group = grp,                                                                     \
-		 .value = "stream" n ".gop",                                                       \
-		 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"stream" n "\",\"key\":\"gop\","        \
-			    "\"value\":{{ value | int }}}",                                        \
-		 .min = 5,                                                                         \
-		 .max = 300,                                                                       \
-		 .step = 5},                                                                       \
-		{.key = "stream" n "_resolution_set",                                              \
-		 .name = "Resolution",                                                             \
-		 .kind = CTRL_SELECT,                                                              \
-		 .icon = "mdi:television",                                                         \
-		 .cat = CAT_CONFIG,                                                                \
-		 .owner = RMQ_D_RVD,                                                               \
-		 .group = grp,                                                                     \
-		 .value = "stream" n ".resolution",                                                \
-		 .cmd_tpl = "{\"cmd\":\"set\",\"edits\":["                                         \
-			    "{\"section\":\"stream" n "\",\"key\":\"width\","                      \
-			    "\"value\":{{ value.split('x')[0] | int }}},"                          \
-			    "{\"section\":\"stream" n "\",\"key\":\"height\","                     \
-			    "\"value\":{{ value.split('x')[1] | int }}}]}", /* .options left NULL: \
-									       derived from the    \
-									       sensor at publish   \
-									       time. */            \
-		 .restarts = true},                                                                \
-	{                                                                                          \
-		.key = "stream" n "_codec_set", .name = "Codec", .kind = CTRL_SELECT,              \
-		.icon = "mdi:video", .cat = CAT_CONFIG, .owner = RMQ_D_RVD, .group = grp,          \
-		.value = "stream" n ".codec",                                                      \
-		.cmd_tpl = "{\"cmd\":\"set\",\"section\":\"stream" n "\",\"key\":\"codec\","       \
-			   "\"value\":\"{{ value }}\"}",                                           \
-		.options = opt_vcodec, .restarts = true                                            \
-	}
-
 static const ha_control_t controls[] = {
 	/* ---- The camera itself ---- */
 	{.key = "osd_enabled",
@@ -815,82 +558,14 @@ static const ha_control_t controls[] = {
 	 .payload = "{\"cmd\":\"action\",\"action\":\"osd-enable\"}",
 	 .payload_off = "{\"cmd\":\"action\",\"action\":\"osd-disable\"}"},
 
-	/* Two gain stages, deliberately both exposed: volume is the digital
-	 * trim and gain the analog front end, and only the second one can
-	 * rescue a quiet microphone. */
-	{.key = "audio_volume_set",
-	 .name = "Mic volume (80 = unity)",
-	 .kind = CTRL_NUMBER,
-	 .icon = "mdi:microphone",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RAD,
-	 .value = "audio.volume",
-	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"audio\",\"key\":\"volume\","
-		    "\"value\":{{ value | int }}}",
-	 .min = 0,
-	 .max = 100,
-	 .step = 1},
-	{.key = "audio_gain_set",
-	 .name = "Mic gain (analog step)",
-	 .kind = CTRL_NUMBER,
-	 .icon = "mdi:microphone-settings",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RAD,
-	 .value = "audio.gain",
-	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"audio\",\"key\":\"gain\","
-		    "\"value\":{{ value | int }}}",
-	 .min = 0,
-	 .max = 31,
-	 .step = 1},
-	{.key = "audio_codec_set",
-	 .name = "Audio codec",
-	 .kind = CTRL_SELECT,
-	 .icon = "mdi:waveform",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RAD,
-	 .value = "audio.codec",
-	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"audio\",\"key\":\"codec\","
-		    "\"value\":\"{{ value }}\"}",
-	 .options = opt_acodec,
-	 .restarts = true},
-	{.key = "audio_sample_rate_set",
-	 .name = "Audio sample rate",
-	 .kind = CTRL_SELECT,
-	 .icon = "mdi:sine-wave",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RAD,
-	 .value = "audio.sample_rate",
-	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"audio\",\"key\":\"sample_rate\","
-		    "\"value\":\"{{ value }}\"}",
-	 .options = opt_arate,
-	 .restarts = true},
-	/* ---- System: the two settings that live in /etc ---- *
-	 *
-	 * Owner RMQ_D_COUNT — "always present" — because neither depends on a
-	 * daemon running. They are the camera's, not any one component's.
-	 */
-	{.key = "timezone",
-	 .name = "Timezone (reboot to apply)",
-	 .kind = CTRL_SELECT,
-	 .icon = "mdi:earth",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_COUNT,
-	 .value = "system.timezone",
-	 .cmd_tpl = "{\"cmd\":\"system-set\",\"key\":\"timezone\",\"value\":\"{{ value }}\"}",
-	 /* .options filled at publish time from the zone table. */
-	 .zones = true},
-	/* Next to the timezone deliberately: that setting applies on reboot and
-	 * this is the reboot, so the thing needed to finish the job is beside
-	 * the job. device_class restart is what makes Home Assistant draw it as
-	 * the disruptive action it is rather than as another button. */
 	/*
 	 * Enact the saved settings, and nothing else.
 	 *
-	 * This is where the restart lives now. It used to happen a few seconds
-	 * after any restart-tier edit, with no way to decline it and nothing
-	 * saying it was about to -- so moving a resolution dropdown stopped
-	 * capture for tens of seconds as a side effect. Now the edit is saved,
-	 * "Changes pending restart" turns on, and somebody presses this.
+	 * Kept although the settings themselves went to the console, because a
+	 * saved edit is not an applied one wherever it was made: the console,
+	 * raptorctl and the restart-tier switches below all leave the camera
+	 * holding changes nothing has read yet. "Changes pending restart" is
+	 * how that shows, and this is what resolves it.
 	 *
 	 * A no-op when nothing is pending, so it is safe to press twice.
 	 */
@@ -898,86 +573,18 @@ static const ha_control_t controls[] = {
 	 .name = "Apply pending changes",
 	 .kind = CTRL_BUTTON,
 	 .icon = "mdi:content-save-cog",
-	 .cat = CAT_CONFIG,
+	 .cat = CAT_PRIMARY,
 	 .owner = RMQ_D_COUNT,
 	 .payload = "{\"cmd\":\"apply\"}"},
+	/* device_class restart is what makes Home Assistant draw it as the
+	 * disruptive action it is rather than as another button. */
 	{.key = "reboot",
 	 .name = "Reboot camera",
 	 .kind = CTRL_BUTTON,
-	 .cat = CAT_CONFIG,
+	 .cat = CAT_PRIMARY,
 	 .owner = RMQ_D_COUNT,
 	 .dev_class = "restart",
 	 .payload = "{\"cmd\":\"reboot\"}"},
-	{.key = "ntp_server",
-	 .name = "NTP server",
-	 .kind = CTRL_TEXT,
-	 .icon = "mdi:clock-check",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_COUNT,
-	 .value = "system.ntp_server",
-	 .cmd_tpl = "{\"cmd\":\"system-set\",\"key\":\"ntp_server\",\"value\":\"{{ value }}\"}",
-	 .max = 63},
-
-	{.key = "rtsp_port_set",
-	 .name = "RTSP port",
-	 .kind = CTRL_NUMBER,
-	 .icon = "mdi:lan-connect",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RSD,
-	 .value = "rtsp.port",
-	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"rtsp\",\"key\":\"port\","
-		    "\"value\":{{ value | int }}}",
-	 .min = 1,
-	 .max = 65535,
-	 .step = 1,
-	 .restarts = true},
-	/*
-	 * The camera's account: one username and one password, applied to
-	 * RTSP and to HTTP together. They are separate keys in the config
-	 * file and separate daemons behind it, but two accounts on one camera
-	 * is one account plus a forgotten one, so `credentials` writes
-	 * both halves from each field.
-	 *
-	 * Both daemons authenticate only when a username and a password are
-	 * both set, so clearing either field turns authentication off — which
-	 * is the only way to turn it off. Each field is still its own command,
-	 * so a viewer can be locked out for the moment between two edits;
-	 * setting the password first and the username second is the order that
-	 * avoids it.
-	 *
-	 * The password reads back empty always: nothing on the camera reports
-	 * it, so an empty box is what it actually knows, and a mask would be a
-	 * value that could be typed back. What can be typed is narrowed where
-	 * it is applied — letters, digits and '-', '_', '.', '~' — so that a
-	 * credential cannot become a second config directive or a URL that
-	 * parses as something else.
-	 *
-	 * Owned by rsd because rsd is the one that reports the username back.
-	 * A camera running rhd alone still accepts the command; it just has no
-	 * box to type it into, which is the same rule every other control here
-	 * follows.
-	 */
-	{.key = "cam_user",
-	 .name = "Camera username",
-	 .kind = CTRL_TEXT,
-	 .icon = "mdi:account",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RSD,
-	 .value = "rtsp.username",
-	 .cmd_tpl = "{\"cmd\":\"credentials\",\"username\":\"{{ value }}\"}",
-	 .max = 63,
-	 .restarts = true},
-	{.key = "cam_pass",
-	 .name = "Camera password (blank = no auth)",
-	 .kind = CTRL_TEXT,
-	 .icon = "mdi:key",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RSD,
-	 .value = "rtsp.password",
-	 .cmd_tpl = "{\"cmd\":\"credentials\",\"password\":\"{{ value }}\"}",
-	 .max = 63,
-	 .restarts = true,
-	 .secret = true},
 	{.key = "request_idr",
 	 .name = "Request keyframe",
 	 .kind = CTRL_BUTTON,
@@ -1011,61 +618,6 @@ static const ha_control_t controls[] = {
 	IMG_CFG_NUM("temper", "Temporal noise reduction", "mdi:blur-linear", 255),
 	IMG_CFG_SW("hflip", "Flip horizontally", "mdi:flip-horizontal"),
 	IMG_CFG_SW("vflip", "Flip vertically", "mdi:flip-vertical"),
-
-	/* ---- Day/night ---- */
-	{.key = "ircut_mode",
-	 .name = "Day/night mode",
-	 .kind = CTRL_SELECT,
-	 .icon = "mdi:theme-light-dark",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RIC,
-	 .value = "ir.mode",
-	 .cmd_tpl = "{\"cmd\":\"action\",\"action\":\"ircut-mode\",\"value\":\"{{ value }}\"}",
-	 .options = opt_daynight},
-	/* ric reports the trigger it settled on, which need not be the one in
-	 * the file: a platform that reports no EV demotes `photo` to `luma` at
-	 * startup rather than running blind. Showing the setting rather than
-	 * the outcome would hide exactly that. */
-	{.key = "ircut_trigger",
-	 .name = "Day/night trigger",
-	 .kind = CTRL_SELECT,
-	 .icon = "mdi:target",
-	 .cat = CAT_CONFIG,
-	 .owner = RMQ_D_RIC,
-	 .value = "ir.trigger",
-	 .cmd_tpl = "{\"cmd\":\"set\",\"section\":\"ircut\",\"key\":\"trigger\","
-		    "\"value\":\"{{ value }}\"}",
-	 .options = opt_trigger,
-	 .restarts = true},
-
-	/* The luma thresholds are live: ric applies and records them itself. */
-	IRC_LIVE("night_luma", "Day/night luma threshold", "mdi:brightness-3", 255, NULL),
-	IRC_LIVE("night_gain", "Day/night gain threshold", "mdi:signal", 1000000, NULL),
-	IRC_LIVE("day_gain_pct", "Day/night day gain", "mdi:percent", 100, "%"),
-	IRC_LIVE("hysteresis_sec", "Day/night hysteresis", "mdi:timer-sand", 300, "s"),
-	IRC_LIVE("poll_interval_ms", "Day/night poll interval", "mdi:timer", 60000, "ms"),
-
-	/*
-	 * How the board is wired, which ric reads only at startup. These would
-	 * normally come from /etc/thingino.json; on an OpenIPC base there is no
-	 * such file, so this is where a board gets described.
-	 *
-	 * The ADC and photo trigger calibration is deliberately not here. Both
-	 * are commissioning for a trigger most boards do not use, and eight
-	 * entities is a lot of page to charge every camera for that. They stay
-	 * writable over MQTT — a `set` on the [ircut] section reaches them
-	 * by name, and rmq_cmd.c still bounds them.
-	 */
-	IRC_CFG("gpio_ircut", "IR-cut GPIO", "mdi:chip", -1, 127),
-	IRC_CFG("gpio_ircut2", "IR-cut GPIO (H-bridge)", "mdi:chip", -1, 127),
-	IRC_CFG("gpio_irled", "IR 850nm GPIO", "mdi:led-on", -1, 127),
-	IRC_CFG("gpio_irled2", "IR 940nm GPIO", "mdi:led-on", -1, 127),
-	IRC_CFG("pulse_ms", "H-bridge pulse width", "mdi:pulse", 1, 1000),
-
-	/* ---- Main stream ---- */
-	STREAM_CTRLS("0", GRP_MAIN),
-	/* ---- Sub stream ---- */
-	STREAM_CTRLS("1", GRP_SUB),
 };
 
 static const int control_count = (int)(sizeof(controls) / sizeof(controls[0]));
@@ -1129,7 +681,7 @@ static cJSON *make_component(struct rmq_state *st, const ha_entity_t *e)
 }
 
 /* Build one control entry. */
-static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct, const res_list_t *res)
+static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct)
 {
 	static const char *const platforms[] = {"number", "select", "switch", "button", "text"};
 
@@ -1211,12 +763,9 @@ static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct, const r
 			cJSON_AddStringToObject(c, "mode", "password");
 		break;
 	case CTRL_SELECT: {
-		const char *const *choices = ct->zones	   ? rmq_system_zone_names()
-					     : ct->options ? ct->options
-							   : res->opt;
 		cJSON *opts = cJSON_AddArrayToObject(c, "ops");
-		for (int i = 0; opts && choices[i]; i++)
-			cJSON_AddItemToArray(opts, cJSON_CreateString(choices[i]));
+		for (int i = 0; opts && ct->options[i]; i++)
+			cJSON_AddItemToArray(opts, cJSON_CreateString(ct->options[i]));
 		break;
 	}
 	case CTRL_SWITCH:
@@ -1241,17 +790,7 @@ static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct, const r
 	return c;
 }
 
-/* The discovery topic for one group. */
-static void group_topic(struct rmq_state *st, ha_group_t g, char *out, size_t outsz)
-{
-	if (!groups[g].suffix)
-		rss_strlcpy(out, st->topic_discovery, outsz);
-	else
-		snprintf(out, outsz, "%s/device/%s_%s/config", st->discovery_prefix, st->client_id,
-			 groups[g].suffix);
-}
-
-static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t *now)
+static int publish_device(struct rmq_state *st, const rmq_daemons_t *now)
 {
 	key_set_t present = {0};
 	cJSON *root = cJSON_CreateObject();
@@ -1260,36 +799,33 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 
 	/* Device identity. All components collapse under this on one page. */
 	cJSON *dev = cJSON_AddObjectToObject(root, "dev");
-	if (groups[g].suffix) {
-		char ids[192], name[128];
-		snprintf(ids, sizeof(ids), "%s_%s", st->client_id, groups[g].suffix);
-		snprintf(name, sizeof(name), "%s %s", st->device_name, groups[g].name);
-		cJSON_AddStringToObject(dev, "ids", ids);
-		cJSON_AddStringToObject(dev, "name", name);
-		/*
-		 * Linked to the camera rather than free-standing, so Home
-		 * Assistant nests it under the camera and an area assigned
-		 * once covers the lot.
-		 */
-		cJSON_AddStringToObject(dev, "via_device", st->client_id);
-	} else {
-		cJSON_AddStringToObject(dev, "ids", st->client_id);
-		cJSON_AddStringToObject(dev, "name", st->device_name);
+	cJSON_AddStringToObject(dev, "ids", st->client_id);
+	cJSON_AddStringToObject(dev, "name", st->device_name);
 
-		/*
-		 * rhd's own page, which Home Assistant renders as "Visit
-		 * device" on the device page — the one place a link to the
-		 * camera itself belongs, and where the MJPEG stream is. Left
-		 * out rather than pointing at a port nothing is listening on
-		 * when rhd is absent, and without the credential because a
-		 * person is going to click it.
-		 */
-		char url[RMQ_URL_MAX];
-		if (rmq_snapshot_url(st, "/", false, url, sizeof(url)) == 0)
-			cJSON_AddStringToObject(dev, "cu", url);
-	}
+	/*
+	 * rhd's own page, which Home Assistant renders as "Visit device" on
+	 * the device page — the one place a link to the camera itself belongs,
+	 * and where the MJPEG stream is. Left out rather than pointing at a
+	 * port nothing is listening on when rhd is absent, and without the
+	 * credential because a person is going to click it.
+	 */
+	char url[RMQ_URL_MAX];
+	if (rmq_snapshot_url(st, "/", false, url, sizeof(url)) == 0)
+		cJSON_AddStringToObject(dev, "cu", url);
+
 	cJSON_AddStringToObject(dev, "mf", "Raptor");
-	cJSON_AddStringToObject(dev, "mdl", st->model);
+	/*
+	 * The model field is the line Home Assistant prints under the device
+	 * name, and every raptor camera would otherwise print the same word
+	 * there. The address is what tells two of them apart — and it is the
+	 * thing anyone reading the page next wants anyway, since the console
+	 * is a click away from it.
+	 */
+	char subtitle[INET6_ADDRSTRLEN];
+	if (st->subtitle[0])
+		cJSON_AddStringToObject(dev, "mdl", st->subtitle);
+	else if (rmq_local_addr(st, subtitle, sizeof(subtitle)) == 0)
+		cJSON_AddStringToObject(dev, "mdl", subtitle);
 	if (&rss_build_hash)
 		cJSON_AddStringToObject(dev, "sw", rss_build_hash);
 
@@ -1316,9 +852,6 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 	int published = 0;
 	for (int i = 0; i < entity_count; i++) {
 		const ha_entity_t *e = &entities[i];
-
-		if (e->group != g)
-			continue;
 
 		if (!owner_available(e->owner, now))
 			continue;
@@ -1352,38 +885,23 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 	 * with [jpeg] off gets no tile instead of a tile that 404s, and
 	 * neither has to be restated in [mqtt].
 	 */
-	if (g == GRP_CAMERA) {
-		bool offer = st->snapshot_enabled && st->jpeg_channels > 0 &&
-			     owner_available(RMQ_D_RHD, now);
-		cJSON *img = offer ? make_common(st, "picture", "Picture", "mdi:camera",
+	bool offer_picture =
+		st->snapshot_enabled && st->jpeg_channels > 0 && owner_available(RMQ_D_RHD, now);
+	cJSON *img = offer_picture ? make_common(st, "picture", "Picture", "mdi:camera",
 						 CAT_PRIMARY, true, "image")
 				   : NULL;
-		if (img) {
-			cJSON_AddStringToObject(img, "url_t", st->topic_snapshot);
-			cJSON_AddStringToObject(img, "url_tpl", "{{ value_json.snapshot }}");
-			cJSON_AddItemToObject(cmps, "picture", img);
-			key_add(&present, "picture");
-			published++;
-		}
+	if (img) {
+		cJSON_AddStringToObject(img, "url_t", st->topic_snapshot);
+		cJSON_AddStringToObject(img, "url_tpl", "{{ value_json.snapshot }}");
+		cJSON_AddItemToObject(cmps, "picture", img);
+		key_add(&present, "picture");
+		published++;
 	}
-
-	res_list_t res;
-	res_build(&res, st);
 
 	for (int i = 0; i < control_count; i++) {
 		const ha_control_t *ct = &controls[i];
 
-		if (ct->group != g)
-			continue;
-
 		bool live = st->commands_enabled && owner_available(ct->owner, now);
-
-		/* A derived list with nothing in it means the camera reported no
-		 * geometry at all. Offering an empty dropdown would be worse
-		 * than offering nothing, so the control waits for a poll that
-		 * knows something. */
-		if (ct->kind == CTRL_SELECT && !ct->options && res.count == 0)
-			live = false;
 
 		/* An ISP block this part does not have. The daemon is up and
 		 * the command would be accepted; it is the silicon underneath
@@ -1394,7 +912,7 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 		if (!live)
 			continue;
 
-		cJSON *c = make_control(st, ct, &res);
+		cJSON *c = make_control(st, ct);
 		if (c) {
 			cJSON_AddItemToObject(cmps, ct->key, c);
 			key_add(&present, ct->key);
@@ -1413,9 +931,9 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 	 * one absent because the silicon never had it are the same thing from
 	 * here, and only the first was ever in a document.
 	 */
-	for (int i = 0; !present.overflowed && i < published_count[g]; i++) {
-		if (!key_has(&present, published_keys[g][i]))
-			cJSON_AddItemToObject(cmps, published_keys[g][i], cJSON_CreateObject());
+	for (int i = 0; !present.overflowed && i < published_count; i++) {
+		if (!key_has(&present, published_keys[i]))
+			cJSON_AddItemToObject(cmps, published_keys[i], cJSON_CreateObject());
 	}
 
 	char *payload = cJSON_PrintUnformatted(root);
@@ -1423,24 +941,20 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 	if (!payload)
 		return -1;
 
-	char topic[RMQ_TOPIC_MAX];
-	group_topic(st, g, topic, sizeof(topic));
-
-	int rc = rmq_mqtt_publish(st->mqtt, topic, payload, strlen(payload), 1, true);
-	const char *what = groups[g].name ? groups[g].name : "camera";
+	int rc = rmq_mqtt_publish(st->mqtt, st->topic_discovery, payload, strlen(payload), 1, true);
 
 	if (rc < 0) {
-		RSS_WARN("ha: %s discovery not published, %zu bytes", what, strlen(payload));
+		RSS_WARN("ha: discovery not published, %zu bytes", strlen(payload));
 	} else {
-		RSS_INFO("ha: %s discovery published, %d entities, %zu bytes", what, published,
+		RSS_INFO("ha: discovery published, %d entities, %zu bytes", published,
 			 strlen(payload));
 
 		/* Only once it is on the broker. A document that failed to
 		 * publish did not change what Home Assistant holds, and
 		 * recording it would lose the withdrawal for anything dropped
 		 * by the attempt. */
-		memcpy(published_keys[g], present.key, sizeof(published_keys[g]));
-		published_count[g] = present.count;
+		memcpy(published_keys, present.key, sizeof(published_keys));
+		published_count = present.count;
 	}
 	free(payload);
 
@@ -1449,21 +963,12 @@ static int publish_group(struct rmq_state *st, ha_group_t g, const rmq_daemons_t
 
 int rmq_ha_publish_discovery(struct rmq_state *st, const rmq_daemons_t *now)
 {
-	/*
-	 * One document per group, each its own retained topic. The camera goes
-	 * first so Home Assistant has the device the others point at before
-	 * they arrive — out of order it still resolves, but only after a retry.
-	 */
-	int rc = 0;
-	for (int g = 0; g < GRP_COUNT; g++) {
-		if (publish_group(st, (ha_group_t)g, now) < 0)
-			rc = -1;
-	}
+	int rc = publish_device(st, now);
 
-	for (int i = 0; retired_groups[i]; i++) {
+	for (int i = 0; retired_devices[i]; i++) {
 		char topic[RMQ_TOPIC_MAX];
 		snprintf(topic, sizeof(topic), "%s/device/%s_%s/config", st->discovery_prefix,
-			 st->client_id, retired_groups[i]);
+			 st->client_id, retired_devices[i]);
 		rmq_mqtt_publish(st->mqtt, topic, "", 0, 1, true);
 	}
 
@@ -1472,21 +977,15 @@ int rmq_ha_publish_discovery(struct rmq_state *st, const rmq_daemons_t *now)
 
 int rmq_ha_clear_discovery(struct rmq_state *st)
 {
-	int rc = 0;
-	for (int g = 0; g < GRP_COUNT; g++) {
-		char topic[RMQ_TOPIC_MAX];
-		group_topic(st, (ha_group_t)g, topic, sizeof(topic));
-		if (rmq_mqtt_publish(st->mqtt, topic, "", 0, 1, true) < 0)
-			rc = -1;
+	int rc = rmq_mqtt_publish(st->mqtt, st->topic_discovery, "", 0, 1, true) < 0 ? -1 : 0;
 
-		/*
-		 * Home Assistant now holds nothing for this device, so neither
-		 * does the record of what it holds. Without this the next
-		 * document would withdraw whatever the last one carried and is
-		 * no longer offered — naming components that were just deleted,
-		 * which is precisely what costs the whole document.
-		 */
-		published_count[g] = 0;
-	}
+	/*
+	 * Home Assistant now holds nothing for this device, so neither does the
+	 * record of what it holds. Without this the next document would
+	 * withdraw whatever the last one carried and is no longer offered —
+	 * naming components that were just deleted, which is precisely what
+	 * costs the whole document.
+	 */
+	published_count = 0;
 	return rc;
 }

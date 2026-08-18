@@ -34,6 +34,13 @@ struct rmq_state;
 #define RMQ_URL_MAX 320
 
 /*
+ * The camera's address on the interface that reaches the broker, which is the
+ * one address known to route to a reader of these topics. Returns 0, or -1
+ * while there is no connection to take it from.
+ */
+int rmq_local_addr(const struct rmq_state *st, char *out, size_t outsz);
+
+/*
  * Build one of rhd's URLs, addressed so that whoever reads the broker can
  * reach it. Returns 0, or -1 when rhd is not answering — a URL to a port
  * nothing is listening on is worse than no URL at all.

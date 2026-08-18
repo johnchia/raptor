@@ -61,7 +61,9 @@ struct rmq_state {
 	char topic_prefix[RMQ_PREFIX_MAX];
 	char discovery_prefix[64];
 	char device_name[64];
-	char model[64];
+	/* The line under the device name, or empty to use the camera's own
+	 * address — see [mqtt] device_subtitle. */
+	char subtitle[64];
 	bool use_tls;
 	bool ha_discovery;
 	bool commands_enabled;
@@ -126,10 +128,7 @@ struct rmq_state {
 	 * definitions that depend on it. Cached rather than asked for at
 	 * publish time so that what an entity offers and what it reports come
 	 * from the same document, and cannot disagree. */
-	int sensor_width;
-	int sensor_height;
-	int jpeg_channels; /* rvd's JPEG channels; 0 = no picture to offer */
-	char stream_res[RMQ_STREAM_COUNT][16];
+	int jpeg_channels;	/* rvd's JPEG channels; 0 = no picture to offer */
 	char isp_settable[320]; /* ",key,key," — see rvd's get-isp */
 
 	/* Control socket */

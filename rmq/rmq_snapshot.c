@@ -33,7 +33,7 @@ static uint64_t now_ms(void)
  * addresses is the useful one, and the guess an interface list invites is
  * wrong precisely on the cameras where it matters.
  */
-static int local_addr(const struct rmq_state *st, char *out, size_t outsz)
+int rmq_local_addr(const struct rmq_state *st, char *out, size_t outsz)
 {
 	int fd = rmq_mqtt_get_fd(st->mqtt);
 	if (fd < 0)
@@ -95,7 +95,7 @@ int rmq_snapshot_url(const struct rmq_state *st, const char *path, bool with_aut
 		return -1;
 
 	char addr[INET6_ADDRSTRLEN];
-	if (local_addr(st, addr, sizeof(addr)) < 0)
+	if (rmq_local_addr(st, addr, sizeof(addr)) < 0)
 		return -1;
 
 	char auth[136] = "";

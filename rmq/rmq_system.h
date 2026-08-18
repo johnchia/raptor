@@ -33,10 +33,10 @@ struct rmq_state;
  * rules and is not something anyone should be asked to type. The list maps a
  * name people recognise to the string musl needs, which also keeps the
  * writable surface an enum: no free text reaches /etc/TZ.
+ *
+ * Returns the POSIX TZ string for a name from that list, or NULL if the name
+ * is not one of them.
  */
-const char *const *rmq_system_zone_names(void);
-
-/* The POSIX TZ string for a name from the list above, or NULL if unknown. */
 const char *rmq_system_zone_posix(const char *name);
 
 /*

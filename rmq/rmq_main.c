@@ -199,27 +199,32 @@ static void load_config(rmq_state_t *st)
 	snprintf(st->topic_discovery, sizeof(st->topic_discovery), "%s/device/%s/config",
 		 st->discovery_prefix, st->client_id);
 
+	/*
+	 * What the camera is called in Home Assistant. The hostname, because on
+	 * these images it is already the answer: S00hostname builds it as
+	 * vendor-soc-unit, so openipc-ssc377qe-4825 both names the part and
+	 * tells two cameras of the same build apart — which the client id, a
+	 * MAC nobody recognises, does only in the second sense.
+	 */
 	const char *dname = rss_config_get_str(c, "mqtt", "device_name", "");
+	char host[64] = "";
+	if (gethostname(host, sizeof(host) - 1) != 0)
+		host[0] = '\0';
+
 	if (dname && dname[0])
 		rss_strlcpy(st->device_name, dname, sizeof(st->device_name));
 	else
-		rss_strlcpy(st->device_name, st->client_id, sizeof(st->device_name));
+		rss_strlcpy(st->device_name, host[0] ? host : st->client_id,
+			    sizeof(st->device_name));
 
 	/*
-	 * Model reported to HA. The hostname, because on these images it is
-	 * already the answer: S00hostname builds it as vendor-soc-unit, so
-	 * openipc-ssc377qe-4825 names the SoC part more precisely than anything
-	 * the running system can be asked for, and distinguishes two cameras of
-	 * the same build where the platform alone cannot.
-	 *
-	 * The build platform remains the fallback for a host with no name set.
+	 * The line Home Assistant prints under that name. Left empty for the
+	 * camera's own address, which rmq_ha fills in at publish time because
+	 * it is a property of the connection rather than of the config file —
+	 * see the note there for why an address is the useful thing to print.
 	 */
-	char host[64] = "";
-	if (gethostname(host, sizeof(host) - 1) == 0 && host[0])
-		rss_strlcpy(st->model, host, sizeof(st->model));
-	else
-		rss_strlcpy(st->model, &rss_build_platform ? rss_build_platform : "raptor",
-			    sizeof(st->model));
+	rss_strlcpy(st->subtitle, rss_config_get_str(c, "mqtt", "device_subtitle", ""),
+		    sizeof(st->subtitle));
 
 	st->poll_interval_sec = rss_config_get_int(c, "mqtt", "poll_interval", 10);
 	if (st->poll_interval_sec < 1)
