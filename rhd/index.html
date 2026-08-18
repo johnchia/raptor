@@ -55,7 +55,6 @@ main{display:flex;flex-direction:column;min-width:0;min-height:100vh}
 .screen .tag{position:absolute;font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;
              padding:2px 5px;background:rgba(8,11,12,.72);color:#c3ced3}
 .screen .tag.tl{top:6px;left:6px}
-.screen .tag.tr{top:6px;right:6px;color:var(--accent)}
 .screen .curtain{position:absolute;inset:0;background:rgba(6,8,9,.92);display:none;
                  place-items:center;font-size:12px;letter-spacing:.16em;text-transform:uppercase;
                  color:var(--amber);text-align:center;padding:12px}
@@ -64,8 +63,8 @@ main{display:flex;flex-direction:column;min-width:0;min-height:100vh}
 .screen.noimg img{display:none}
 .screen.noimg .fallback{display:block}
 
-.status{padding:12px 18px;border-bottom:1px solid var(--line);display:grid;
-        grid-template-columns:1fr 1fr;gap:8px 14px}
+.status{padding:12px 18px;display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;
+        align-content:start;flex:1;min-height:0;overflow-y:auto}
 .stat .k{font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-faint);
          display:block}
 .stat .v{font-family:var(--mono);font-size:12.5px;font-variant-numeric:tabular-nums;
@@ -73,11 +72,20 @@ main{display:flex;flex-direction:column;min-width:0;min-height:100vh}
 .stat .v.good{color:var(--ok)}
 .stat .v.bad{color:var(--amber)}
 
-.wire{flex:1;min-height:0;display:flex;flex-direction:column}
-.wire h2{margin:0;padding:11px 18px 8px;font-size:10.5px;letter-spacing:.15em;
-         text-transform:uppercase;color:var(--ink-faint);display:flex;gap:8px;align-items:baseline}
-.wire h2 .sub{font-family:var(--mono);font-size:10px;letter-spacing:0;text-transform:none;
-              opacity:.75}
+/* Collapsed by default: it is a diagnostic, and a page that opens showing its
+   own network traffic looks like something has gone wrong. */
+.wire{flex:0 0 auto;min-height:0;display:flex;flex-direction:column;border-top:1px solid var(--line)}
+.wire.open{flex:1}
+.wiretoggle{width:100%;background:none;border:0;text-align:left;cursor:pointer;
+            padding:11px 18px;font-size:10.5px;letter-spacing:.15em;text-transform:uppercase;
+            color:var(--ink-faint);display:flex;gap:8px;align-items:baseline}
+.wiretoggle:hover{color:var(--ink-dim)}
+.wiretoggle .sub{font-family:var(--mono);font-size:10px;letter-spacing:0;text-transform:none;
+                 opacity:.75}
+.wiretoggle .chev{display:inline-block;transition:transform .12s;font-size:9px}
+@media (prefers-reduced-motion:reduce){.wiretoggle .chev{transition:none}}
+.wire.open .wiretoggle .chev{transform:rotate(90deg)}
+.wirelog[hidden]{display:none}
 .wirelog{flex:1;min-height:0;overflow-y:auto;padding:0 14px 16px;font-family:var(--mono);
          font-size:11px;line-height:1.55;display:flex;flex-direction:column-reverse;gap:2px}
 .wirelog div{white-space:pre-wrap;word-break:break-word;color:var(--ink-dim)}
@@ -238,16 +246,18 @@ select{background:var(--sink);border:1px solid var(--line);border-radius:var(--r
         <img id="cam" alt="Live preview">
         <div class="fallback">No preview.<br>The JPEG encoder is off, or no stream is running.</div>
         <span class="tag tl" id="tagL">preview</span>
-        <span class="tag tr" id="tagR">live</span>
         <div class="curtain" id="curtain">restarting</div>
       </div>
     </div>
 
     <div class="status" id="status"></div>
 
-    <div class="wire">
-      <h2>Wire <span class="sub">POST /api/v1/rcd</span></h2>
-      <div class="wirelog" id="log"></div>
+    <div class="wire" id="wire">
+      <button class="wiretoggle" id="wiretoggle" aria-expanded="false" aria-controls="log">
+        <span class="chev" aria-hidden="true">&#9656;</span>
+        Wire <span class="sub">POST /api/v1/rcd</span>
+      </button>
+      <div class="wirelog" id="log" hidden></div>
     </div>
   </aside>
 
@@ -985,10 +995,11 @@ function previewStream() {
 }
 
 /* ═══ status ═════════════════════════════════════════════════════════════ */
-function statLine(box, k, v, cls) {
+function statLine(box, k, v, cls, title) {
   const d = document.createElement("div"); d.className = "stat";
   const ke = document.createElement("span"); ke.className = "k"; ke.textContent = k;
   const ve = document.createElement("span"); ve.className = "v " + (cls || ""); ve.textContent = v;
+  if (title) d.title = title;
   d.append(ke, ve); box.append(d);
 }
 function hhmm(secs) {
@@ -1021,9 +1032,56 @@ async function loadState() {
   if (s.rtsp && s.rtsp.clients !== undefined) statLine(box, "RTSP clients", String(s.rtsp.clients));
   if (s.http && s.http.clients !== undefined) statLine(box, "HTTP clients", String(s.http.clients));
 
-  const tagR = document.getElementById("tagR");
-  tagR.textContent = (s.ir && s.ir.mode) ? String(s.ir.mode) : "live";
+  /*
+   * Day/night sits here rather than over the picture. It is a reading, and
+   * the two readings that decide it belong beside it: on a gain trigger the
+   * switch happens when total gain crosses a threshold, so an operator
+   * wondering why the camera has not gone to night wants to see the gain.
+   */
+  const ir = s.ir || {};
+  if (ir.state || ir.mode) {
+    const auto = ir.mode === "auto" || ir.mode === undefined;
+    statLine(box, "Day / night",
+             String(ir.state || ir.mode) + (auto ? "" : " (forced " + ir.mode + ")"),
+             ir.state === "night" ? "bad" : "good");
+  }
+  if (ir.exposure_us)
+    statLine(box, "Exposure", shutter(ir.exposure_us), "", ir.exposure_us + " \u00b5s");
+  if (ir.total_gain)
+    statLine(box, "Gain", gain(ir.total_gain), "", "raw " + ir.total_gain + " (1024 = 1\u00d7)");
 }
+
+/*
+ * Exposure as a shutter fraction, which is how it is read everywhere else,
+ * with the microseconds kept in the tooltip because that is what the daemon
+ * reports and what a bug report should quote.
+ */
+function shutter(us) {
+  if (!us) return "—";
+  if (us >= 1000000) return (us / 1000000).toFixed(1) + " s";
+  return "1/" + Math.round(1000000 / us) + " s";
+}
+
+/* Total gain arrives at 1024 per unit -- analogue and ISP gain multiplied,
+ * with one factor of the unit divided back out. */
+function gain(g) {
+  const x = g / 1024;
+  return (x < 10 ? x.toFixed(2) : x.toFixed(1)) + "\u00d7";
+}
+
+/* The log keeps filling while folded away, so opening it shows what already
+ * happened rather than starting a fresh empty pane. */
+(function () {
+  const wire = document.getElementById("wire");
+  const btn = document.getElementById("wiretoggle");
+  const log = document.getElementById("log");
+  btn.addEventListener("click", () => {
+    const open = !wire.classList.contains("open");
+    wire.classList.toggle("open", open);
+    btn.setAttribute("aria-expanded", String(open));
+    log.hidden = !open;
+  });
+})();
 
 /* ═══ boot ═══════════════════════════════════════════════════════════════ */
 function banner(title, detail) {
@@ -1082,8 +1140,13 @@ async function boot() {
       ". rcd answers on /var/run/rss/rcd.sock and rhd forwards this page's requests to it.");
     return;
   }
-  document.getElementById("host").textContent =
-    [hello.platform, hello.build].filter(Boolean).join(" · ") || "raptor";
+  /* The bare hash read as a mystery number. It is the raptor commit these
+   * daemons were built from, which is the first thing a bug report needs. */
+  const host = document.getElementById("host");
+  host.textContent = [hello.platform, hello.build ? "build " + hello.build : null]
+    .filter(Boolean).join(" · ") || "raptor";
+  host.title = "rcd " + (hello.daemon || "") + " · config " + (hello.config || "") +
+               (hello.build ? " · built from raptor " + hello.build : "");
 
   Object.entries(hello.daemons || {}).forEach(([name, d]) => {
     if (d && d.installed === false) MISSING_DAEMON.add(name);
