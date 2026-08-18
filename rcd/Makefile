@@ -1,4 +1,5 @@
-SRCS := rcd_main.c rcd_proto.c rcd_schema.c rcd_config.c rcd_apply.c rcd_state.c rcd_ipc.c
+SRCS := rcd_main.c rcd_proto.c rcd_schema.c rcd_config.c rcd_apply.c rcd_state.c rcd_ipc.c \
+        rcd_system.c
 OBJS := $(SRCS:.c=.o)
 BIN  := rcd
 

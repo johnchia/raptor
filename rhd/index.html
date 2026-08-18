@@ -138,10 +138,14 @@ main{display:flex;flex-direction:column;min-width:0;min-height:100vh}
 
 .chip{font-size:10px;letter-spacing:.11em;text-transform:uppercase;padding:2px 6px;
       border:1px solid;border-radius:2px;white-space:nowrap}
+.txt{width:100%;max-width:20rem;background:var(--sink);border:1px solid var(--line);
+     border-radius:var(--r);padding:5px 8px;font-family:var(--mono);font-size:12px;
+     color:var(--ink);min-width:0}
 .chip.live{color:var(--accent);border-color:var(--accent-dim);background:rgba(53,183,194,.07)}
 .chip.service{color:var(--steel);border-color:#39464d}
 .chip.stream{color:var(--amber);border-color:#5a4525}
 .chip.pipeline{color:var(--red);border-color:#5e2b27}
+.chip.reboot{color:var(--amber);border-color:#5a4525;background:rgba(214,164,69,.07)}
 .row:not(.dirty) .chip.service,.row:not(.dirty) .chip.stream,
 .row:not(.dirty) .chip.pipeline{opacity:.42}
 .readback{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);text-align:right;
@@ -322,6 +326,8 @@ async function api(req, quiet) {
    Wording and grouping live here and nowhere on the camera. A key missing
    from this map still renders -- see label() below. */
 const L = {
+ "system.timezone":["Timezone","","Sets the clock's zone and its daylight-saving rule. Nothing running re-reads it, so the camera has to restart before timestamps move."],
+ "system.ntp_server":["Time server","","The host to sync the clock from. Applied at once — ntpd is restarted with it."],
  "sensor.fps":["Sensor frame rate","fps","The rate the sensor is driven at. Every stream is capped by it."],
  "sensor.antiflicker":["Anti-flicker","","Locks exposure to the mains period so lighting does not band."],
  "image.brightness":["Brightness"],"image.contrast":["Contrast"],
@@ -405,6 +411,8 @@ const TABS = [
  {id:"record",  name:"Recording",   groups:[{title:"Motion", section:"motion"},
                                             {title:"Recording", section:"recording"},
                                             {title:"Time-lapse", section:"timelapse"}]},
+ {id:"system",  name:"System",       groups:[{title:"Time", section:"system",
+                                             note:"The camera has no zoneinfo database, so the list is the one this build carries."}]},
  {id:"services",name:"Services",    groups:[{title:"RTSP", section:"rtsp"},
                                             {title:"Snapshots & MJPEG", section:"http"},
                                             {title:"Overlay", section:"osd"},
@@ -484,6 +492,7 @@ function isIdentifier(k) { return IDENTIFIER.test(k.key); }
 function widgetFor(k) {
   if (k.type === "bool") return "switch";
   if (k.type === "credential") return "cred";
+  if (k.type === "host") return "text";
   if (k.type === "enum") return (k.choices || []).length <= 4 ? "seg" : "select";
   if (k.labels) return k.labels.length <= 4 ? "seg" : "select";
   const span = k.max - k.min;
@@ -575,7 +584,11 @@ async function commitLive(id, val, el, prev) {
       mark(el, res.note || "saved — needs apply", true);
       refreshBar();
     } else {
-      mark(el, V[id] !== val ? "device " + labelOf(k, V[id]) : "applied", false, V[id] !== val);
+      /* rcd's own words when it has any: a stored value that nothing has
+         read yet says so, and "applied" would be a smaller truth. */
+      mark(el, res.note ? res.note
+                        : (V[id] !== val ? "device " + labelOf(k, V[id]) : "applied"),
+           false, V[id] !== val);
       if (el) { el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
     }
   } catch (e) {
@@ -599,6 +612,8 @@ function syncControl(el, k, val) {
   if (sl) sl.value = val;
   const nm = el.querySelector(".num");
   if (nm) nm.value = val;
+  const tx = el.querySelector(".txt");
+  if (tx && document.activeElement !== tx) tx.value = val === undefined || val === null ? "" : val;
 }
 
 /* ═══ controls ═══════════════════════════════════════════════════════════ */
@@ -665,6 +680,16 @@ function buildControl(id, onChange) {
     wrap.append(n); return wrap;
   }
 
+  if (w === "text") {
+    const inp = document.createElement("input");
+    inp.type = "text"; inp.className = "txt";
+    inp.value = V[id] === undefined || V[id] === null ? "" : V[id];
+    inp.maxLength = k.max_length || 63;
+    inp.spellcheck = false; inp.autocapitalize = "off"; inp.autocomplete = "off";
+    inp.addEventListener("change", () => onChange(inp.value.trim()));
+    wrap.append(inp); return wrap;
+  }
+
   if (w === "slider") {
     const row = document.createElement("div"); row.className = "sl";
     const sl = document.createElement("input"); sl.type = "range";
@@ -697,14 +722,26 @@ const COST = {
   none:"nothing is interrupted",
   service:"nothing a viewer notices",
   stream:"connected viewers are dropped",
-  pipeline:"capture stops, everything downstream reconnects"
+  pipeline:"capture stops, everything downstream reconnects",
+  reboot:"the camera has to restart before anything reads it"
 };
+/* Two different questions, and a key can answer them differently. The tier
+   says whether anything is owed to Apply; the impact says what it costs to be
+   in force. The timezone is the one that separates them: it is stored the
+   moment it is set, so Apply has nothing to do, and nothing running reads it
+   until the camera comes back. */
 function chip(k) {
   const c = document.createElement("span");
-  if (k.tier === "live") { c.className = "chip live"; c.textContent = "live";
-    c.title = "Applied to " + k.owner + " the moment you change it"; }
-  else { c.className = "chip " + k.impact; c.textContent = k.impact;
-    c.title = "Needs " + k.owner + " restarted — " + COST[k.impact]; }
+  if (k.tier === "live" && k.impact && k.impact !== "none") {
+    c.className = "chip " + k.impact; c.textContent = k.impact;
+    c.title = "Stored at once — " + COST[k.impact];
+  } else if (k.tier === "live") {
+    c.className = "chip live"; c.textContent = "live";
+    c.title = "Applied to " + k.owner + " the moment you change it";
+  } else {
+    c.className = "chip " + k.impact; c.textContent = k.impact;
+    c.title = "Needs " + k.owner + " restarted — " + COST[k.impact];
+  }
   return c;
 }
 

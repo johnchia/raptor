@@ -92,67 +92,6 @@ static void do_reboot(rmq_state_t *st, const char *cmd_name, const char *nonce)
 		RSS_WARN("reboot: /sbin/reboot did not run");
 }
 
-/*
- * Settings in /etc, which raptor.conf does not hold and rcd's table therefore
- * cannot describe. Each carries its own grammar: the timezone is checked
- * against the name list, so nothing free-form reaches /etc/TZ, and the NTP
- * server is narrowed to what a hostname may contain, so it cannot become a
- * path or a second directive on the line it is written to.
- */
-static void do_system_set(rmq_state_t *st, const cJSON *root, const char *cmd_name,
-			  const char *nonce)
-{
-	const cJSON *jk = cJSON_GetObjectItemCaseSensitive(root, "key");
-	const cJSON *jv = cJSON_GetObjectItemCaseSensitive(root, "value");
-
-	if (!cJSON_IsString(jk) || !cJSON_IsString(jv)) {
-		publish_result(st, cmd_name, nonce, "system-set needs a 'key' and a 'value'", NULL);
-		return;
-	}
-
-	char value[128];
-	if (rss_strlcpy(value, jv->valuestring, sizeof(value)) >= sizeof(value)) {
-		publish_result(st, cmd_name, nonce, "value is too long", NULL);
-		return;
-	}
-
-	bool tz = strcmp(jk->valuestring, "timezone") == 0;
-	if (tz) {
-		if (!rmq_system_zone_posix(value)) {
-			publish_result(st, cmd_name, nonce, "not a timezone this build knows",
-				       NULL);
-			return;
-		}
-	} else if (strcmp(jk->valuestring, "ntp_server") == 0) {
-		if (!rmq_system_valid_host(value)) {
-			publish_result(st, cmd_name, nonce, "not a hostname or address", NULL);
-			return;
-		}
-	} else {
-		publish_result(st, cmd_name, nonce, "not a settable system key", NULL);
-		return;
-	}
-
-	if ((tz ? rmq_system_set_timezone(value) : rmq_system_set_ntp_server(value)) != 0) {
-		publish_result(st, cmd_name, nonce, "the file could not be written", NULL);
-		return;
-	}
-
-	cJSON *r = cJSON_CreateObject();
-	if (r) {
-		cJSON_AddStringToObject(r, "status", "ok");
-		cJSON_AddStringToObject(r, jk->valuestring, value);
-		/* Said in the answer as well as in the entity name: the
-		 * timezone is exported once at boot and a daemon restart
-		 * re-execs with the environment it already had, so nothing
-		 * short of a reboot moves the clock a running daemon renders
-		 * with. */
-		if (tz)
-			cJSON_AddStringToObject(r, "applies", "on reboot");
-	}
-	publish_result(st, cmd_name, nonce, NULL, r);
-}
-
 static void do_snapshot(rmq_state_t *st, const char *cmd_name, const char *nonce)
 {
 	if (!st->snapshot_enabled) {
@@ -298,8 +237,6 @@ void rmq_cmd_handle(rmq_state_t *st, const char *topic, const uint8_t *payload, 
 
 	if (strcmp(cmd_name, "reboot") == 0)
 		do_reboot(st, cmd_name, nonce);
-	else if (strcmp(cmd_name, "system-set") == 0)
-		do_system_set(st, root, cmd_name, nonce);
 	else if (strcmp(cmd_name, "snapshot") == 0)
 		do_snapshot(st, cmd_name, nonce);
 	else

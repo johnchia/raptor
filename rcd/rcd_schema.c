@@ -4,6 +4,8 @@
 
 #include "rcd_schema.h"
 
+#include "rcd_system.h"
+
 #include <rss_common.h>
 
 #include <stddef.h>
@@ -44,6 +46,8 @@ const char *rcd_impact_name(rcd_impact_t i)
 		return "stream";
 	case RCD_IMPACT_PIPELINE:
 		return "pipeline";
+	case RCD_IMPACT_REBOOT:
+		return "reboot";
 	}
 	return "none";
 }
@@ -99,11 +103,11 @@ static const struct {
 	const char *section;
 	rcd_daemon_t owner;
 } writable[] = {
-	{"sensor", RCD_D_RVD},	  {"stream0", RCD_D_RVD}, {"stream1", RCD_D_RVD},
-	{"image", RCD_D_RVD},	  {"jpeg", RCD_D_RVD},	  {"audio", RCD_D_RAD},
-	{"rtsp", RCD_D_RSD},	  {"http", RCD_D_RHD},	  {"osd", RCD_D_ROD},
-	{"ircut", RCD_D_RIC},	  {"motion", RCD_D_RMD},  {"recording", RCD_D_RMR},
-	{"timelapse", RCD_D_RMR}, {NULL, RCD_D_COUNT},
+	{"sensor", RCD_D_RVD},	  {"stream0", RCD_D_RVD},  {"stream1", RCD_D_RVD},
+	{"image", RCD_D_RVD},	  {"jpeg", RCD_D_RVD},	   {"audio", RCD_D_RAD},
+	{"rtsp", RCD_D_RSD},	  {"http", RCD_D_RHD},	   {"osd", RCD_D_ROD},
+	{"ircut", RCD_D_RIC},	  {"motion", RCD_D_RMD},   {"recording", RCD_D_RMR},
+	{"timelapse", RCD_D_RMR}, {"system", RCD_D_COUNT}, {NULL, RCD_D_COUNT},
 };
 
 const char *rcd_section_reader(const char *section)
@@ -177,9 +181,16 @@ static const char *const choices_threshold[] = {
 /* two a key is belongs here rather than in any caller.                 */
 /* ------------------------------------------------------------------ */
 
-#define LIVE(cmd)     cmd, "value", -1
-#define LIVE_CH(c, n) c, "value", n
-#define SAVED	      NULL, NULL, -1
+/*
+ * The tail of an entry: how it is applied, where it is kept, what it costs.
+ * Written as macros because that tail is the same for almost every key, and
+ * because -Werror=missing-field-initializers means the whole of it has to be
+ * spelled out either way.
+ */
+#define LIVE(cmd)	 cmd, "value", -1, NULL, RCD_IMPACT_NONE
+#define LIVE_CH(c, n)	 c, "value", n, NULL, RCD_IMPACT_NONE
+#define SAVED		 NULL, NULL, -1, NULL, RCD_IMPACT_NONE
+#define PROVIDED(p, imp) NULL, NULL, -1, &(p), (imp)
 
 static const rcd_key_t keys[] = {
 	/* -- Sensor -- */
@@ -350,8 +361,53 @@ static const rcd_key_t keys[] = {
 	{"timelapse", "playback_fps", V_INT, 1, 120, NULL, SAVED},
 	{"timelapse", "max_mb", V_INT, 0, 1000000, NULL, SAVED},
 
+	/*
+	 * -- The camera itself. No daemon owns these and no line of
+	 *    raptor.conf holds them: each names a provider that reads and
+	 *    writes the file in /etc that does. See rcd_system.h.
+	 *
+	 *    The timezone is the one key in the table that costs a reboot. TZ
+	 *    is exported once by rcS and a raptor daemon restarts by re-execing
+	 *    itself, keeping the environment it already had -- so nothing short
+	 *    of a reboot moves the clock a running daemon renders with, and
+	 *    saying anything else here would be a promise the camera cannot
+	 *    keep. --
+	 */
+	{"system", "timezone", V_ENUM, 0, 0, rcd_zone_names,
+	 PROVIDED(rcd_provider_timezone, RCD_IMPACT_REBOOT)},
+	{"system", "ntp_server", V_HOST, 0, 63, NULL,
+	 PROVIDED(rcd_provider_ntp_server, RCD_IMPACT_NONE)},
+
 	{NULL, NULL, V_INT, 0, 0, NULL, SAVED},
 };
+
+/*
+ * The tier answers one question: does this key still owe something to `apply`?
+ *
+ * A live command does not -- the daemon has the value. Neither does a
+ * provider: its store is the value, so once it is written rcd has nothing
+ * further to do and `apply` would find nothing to enact. What the *running*
+ * system does with it is a separate question, and the impact is where that is
+ * answered -- the timezone is stored the moment it is set and read once, at
+ * boot, so it is live and costs a reboot.
+ */
+bool rcd_key_live(const rcd_key_t *k)
+{
+	return k && (k->live_cmd || k->provider);
+}
+
+rcd_impact_t rcd_key_impact(const rcd_key_t *k)
+{
+	if (!k)
+		return RCD_IMPACT_NONE;
+	/* A declared impact is the answer whether or not the key is live: it
+	 * is what taking effect costs, not what applying it costs. */
+	if (k->impact != RCD_IMPACT_NONE)
+		return k->impact;
+	if (rcd_key_live(k))
+		return RCD_IMPACT_NONE;
+	return rcd_daemon_impact(rcd_section_owner(k->section));
+}
 
 const rcd_key_t *rcd_key_find(const char *section, const char *key)
 {
@@ -468,6 +524,8 @@ static const char *type_name(rcd_val_type_t t)
 		return "enum";
 	case V_CRED:
 		return "credential";
+	case V_HOST:
+		return "host";
 	}
 	return "int";
 }
@@ -504,29 +562,35 @@ static void emit_key(cJSON *arr, const rcd_key_t *k)
 		 * correctly, as a number within the range above. */
 		if (k->choices)
 			emit_labels(o, k->choices);
-	} else if (k->type == V_CRED) {
+	} else if (k->type == V_CRED || k->type == V_HOST) {
 		cJSON_AddNumberToObject(o, "max_length", k->max);
 	} else if (k->type == V_ENUM) {
 		emit_choices(o, k->choices);
 	}
 
-	rcd_daemon_t owner = rcd_section_owner(k->section);
-	cJSON_AddStringToObject(o, "owner", rcd_daemon_name(owner));
+	/*
+	 * Who re-reads this key. "system" for a provider-backed one: no daemon
+	 * owns it, and a client that groups by owner needs a name it can group
+	 * under rather than the "?" an absent daemon renders as -- one that
+	 * cannot collide with a daemon it might otherwise try to restart.
+	 */
+	cJSON_AddStringToObject(o, "owner",
+				k->provider ? "system"
+					    : rcd_daemon_name(rcd_section_owner(k->section)));
 
 	/*
 	 * The whole point of serving this table: a client knows before it
 	 * submits whether a field costs nothing or costs an outage, and can
 	 * say so next to the field rather than after the fact.
 	 */
-	bool live = k->live_cmd != NULL;
-	cJSON_AddStringToObject(o, "tier", live ? "live" : "restart");
-	cJSON_AddStringToObject(o, "impact",
-				rcd_impact_name(live ? RCD_IMPACT_NONE : rcd_daemon_impact(owner)));
+	cJSON_AddStringToObject(o, "tier", rcd_key_live(k) ? "live" : "restart");
+	cJSON_AddStringToObject(o, "impact", rcd_impact_name(rcd_key_impact(k)));
 
 	/* A credential is settable and never readable, and a client that does
 	 * not know that draws an input which always looks empty and calls it a
-	 * bug. Said plainly instead. */
-	if (k->type == V_CRED || !rcd_section_reader(k->section))
+	 * bug. Said plainly instead. A provider-backed key has no daemon to ask
+	 * and is read anyway -- from the store it is written to. */
+	if (k->type == V_CRED || (!k->provider && !rcd_section_reader(k->section)))
 		cJSON_AddBoolToObject(o, "readable", false);
 
 	cJSON_AddItemToArray(arr, o);

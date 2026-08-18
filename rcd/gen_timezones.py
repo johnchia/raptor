@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Generate rmq's timezone table from tzdata, verifying every entry.
+"""Generate rcd's timezone table from tzdata, verifying every entry.
+
+Emits the two parallel arrays rcd_system.c holds -- names and POSIX rules at
+the same subscript -- because the names are also the schema's `choices` for
+[system] timezone. One array of pairs would mean a second copy of the names to
+offer, and a test asserts the two arrays are the same length.
 
 The TZif footer is NOT usable: for zones with a legislated future change it
 describes the rule after the file's last transition, not today's. America/
@@ -171,9 +176,13 @@ ok.sort(key=lambda kv: (kv[0] != "UTC", kv[0]))
 if not any(k == "UTC" for k, _ in ok):
     ok.insert(0, ("UTC", "UTC0"))
 
-with open("/home/john/.claude/jobs/d647cc3f/tmp/zones.inc", "w") as f:
-    for zone, p in ok:
-        f.write(f'\t{{"{zone}", "{p}"}},\n')
+with open("zone_names.inc", "w") as f:
+    for zone, _ in ok:
+        f.write(f'\t"{zone}",\n')
+with open("zone_posix.inc", "w") as f:
+    for _, p in ok:
+        f.write(f'\t"{p}",\n')
+print("wrote zone_names.inc and zone_posix.inc -- paste each into rcd_system.c")
 
 print(f"verified {len(ok)} zones, rejected {len(bad)}")
 print(f"rules changing soon (described by the rule before the change): {shifting}")

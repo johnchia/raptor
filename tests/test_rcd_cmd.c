@@ -27,6 +27,10 @@
 #include "../rcd/rcd_config.h"
 #include "../rcd/rcd_proto.h"
 #include "../rcd/rcd_schema.h"
+#include "../rcd/rcd_system.h"
+
+#include <sys/stat.h>
+#include <unistd.h>
 
 static char code[64];
 static char reason[256];
@@ -532,6 +536,10 @@ TEST every_writable_key_has_an_owner(void)
 		const rcd_key_t *k = rcd_key_at(i);
 		if (!k)
 			break;
+		/* A key belongs to a daemon that re-reads it, or to a provider
+		 * that stores it. A key with neither is one nothing enacts. */
+		if (k->provider)
+			continue;
 		ASSERT_EQm(k->section, 1, rcd_section_owner(k->section) != RCD_D_COUNT);
 	}
 	PASS();
@@ -550,6 +558,182 @@ TEST impact_separates_the_pipeline_from_the_stream(void)
 	ASSERT_EQ(RCD_IMPACT_SERVICE, rcd_daemon_impact(RCD_D_RAD));
 	ASSERT_STR_EQ("pipeline", rcd_impact_name(RCD_IMPACT_PIPELINE));
 	ASSERT_STR_EQ("none", rcd_impact_name(RCD_IMPACT_NONE));
+	ASSERT_STR_EQ("reboot", rcd_impact_name(RCD_IMPACT_REBOOT));
+	PASS();
+}
+
+/* ------------------------------------------------------------------ */
+/* [system]: keys whose store is a file rather than raptor.conf        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The providers write real files. RCD_SYSCONF_DIR points them at a scratch
+ * directory under /run for the test build -- see tests/Makefile -- so what is
+ * exercised here is the writer itself, not a stand-in for it.
+ */
+static int sysconf_dir_ready(void)
+{
+	if (mkdir(RCD_SYSCONF_DIR, 0755) == 0)
+		return 1;
+	return access(RCD_SYSCONF_DIR, W_OK) == 0;
+}
+
+TEST the_zone_table_is_two_arrays_of_one_length(void)
+{
+	int n = 0;
+	while (rcd_zone_names[n])
+		n++;
+
+	/* Not a tautology: the names are the schema's choices and the rules
+	 * are indexed by the same subscript, so a generator that dropped a
+	 * line from one array would otherwise hand out the wrong rule for
+	 * every zone after it. */
+	ASSERT(n > 100);
+	for (int i = 0; i < n; i++) {
+		const char *posix = rcd_zone_posix(rcd_zone_names[i]);
+		ASSERT_EQm(rcd_zone_names[i], 1, posix != NULL);
+		ASSERT(posix[0] != '\0');
+	}
+	ASSERT_EQ(NULL, rcd_zone_posix("Mars/Olympus"));
+	ASSERT_EQ(NULL, rcd_zone_posix(""));
+	PASS();
+}
+
+TEST the_timezone_is_an_enum_over_the_zone_table(void)
+{
+	rcd_edit_t e[RCD_EDITS_MAX];
+	int n = 0;
+
+	ASSERT_EQ(0, validate_set("{\"section\":\"system\",\"key\":\"timezone\","
+				  "\"value\":\"America/Los_Angeles\"}",
+				  e, &n));
+	ASSERT_STR_EQ("America/Los_Angeles", e[0].rendered);
+
+	/* A zone this build does not carry is refused by name rather than
+	 * written and discovered at the next boot. */
+	ASSERT_EQ(-1, validate_set("{\"section\":\"system\",\"key\":\"timezone\","
+				   "\"value\":\"Mars/Olympus\"}",
+				   e, &n));
+	ASSERT_STR_EQ(RCD_E_CHOICE, code);
+	PASS();
+}
+
+TEST a_host_is_a_hostname_or_an_address_and_nothing_else(void)
+{
+	rcd_edit_t e[RCD_EDITS_MAX];
+	int n = 0;
+
+	static const char *const good[] = {"pool.ntp.org", "192.168.1.1", "ntp", "a-b.example.com",
+					   NULL};
+	for (int i = 0; good[i]; i++) {
+		char req[192];
+		snprintf(req, sizeof(req),
+			 "{\"section\":\"system\",\"key\":\"ntp_server\",\"value\":\"%s\"}",
+			 good[i]);
+		ASSERT_EQm(good[i], 0, validate_set(req, e, &n));
+		ASSERT_STR_EQ(good[i], e[0].rendered);
+	}
+
+	/* Each of these could become something other than a hostname on the
+	 * line it is written to: a path, a second directive, a shell word, an
+	 * option. None of them reaches the file. */
+	static const char *const bad[] = {
+		"/etc/passwd", "host name",	     "host;reboot", "-host", "host-", ".host",
+		"host.",       "host\\nserver evil", "$(reboot)",   "",	     NULL};
+	for (int i = 0; bad[i]; i++) {
+		char req[192];
+		snprintf(req, sizeof(req),
+			 "{\"section\":\"system\",\"key\":\"ntp_server\",\"value\":\"%s\"}",
+			 bad[i]);
+		ASSERT_EQm(bad[i], -1, validate_set(req, e, &n));
+	}
+
+	/* And it is a string: a number is not a lenient spelling of one. */
+	ASSERT_EQ(-1, validate_set("{\"section\":\"system\",\"key\":\"ntp_server\","
+				   "\"value\":8}",
+				   e, &n));
+	ASSERT_STR_EQ(RCD_E_TYPE, code);
+	PASS();
+}
+
+TEST a_provider_key_round_trips_through_its_store(void)
+{
+	if (!sysconf_dir_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	ASSERT_EQ(0, rcd_provider_timezone.set("Asia/Tokyo"));
+
+	char out[RCD_VAL_MAX] = "";
+	ASSERT_EQ(0, rcd_provider_timezone.get(out, sizeof(out)));
+	ASSERT_STR_EQ("Asia/Tokyo", out);
+
+	ASSERT_EQ(0, rcd_provider_ntp_server.set("pool.ntp.org"));
+	out[0] = '\0';
+	ASSERT_EQ(0, rcd_provider_ntp_server.get(out, sizeof(out)));
+	ASSERT_STR_EQ("pool.ntp.org", out);
+
+	/* The rule reaches the file the C library reads, not just the name. */
+	FILE *f = fopen(RCD_SYSCONF_DIR "/TZ", "r");
+	ASSERT(f != NULL);
+	char rule[64] = "";
+	ASSERT(fgets(rule, sizeof(rule), f) != NULL);
+	fclose(f);
+	rule[strcspn(rule, "\r\n")] = '\0';
+	ASSERT_STR_EQ(rcd_zone_posix("Asia/Tokyo"), rule);
+	PASS();
+}
+
+TEST the_schema_says_where_a_system_key_takes_effect(void)
+{
+	cJSON *out = cJSON_CreateObject();
+	rcd_schema_emit(out, "system");
+	const cJSON *keys = cJSON_GetObjectItemCaseSensitive(out, "keys");
+	ASSERT(cJSON_IsArray(keys));
+	ASSERT_EQ(2, cJSON_GetArraySize(keys));
+
+	int checked = 0;
+	const cJSON *k = NULL;
+	cJSON_ArrayForEach(k, keys)
+	{
+		const cJSON *key = cJSON_GetObjectItemCaseSensitive(k, "key");
+		const cJSON *tier = cJSON_GetObjectItemCaseSensitive(k, "tier");
+		const cJSON *imp = cJSON_GetObjectItemCaseSensitive(k, "impact");
+		const cJSON *ro = cJSON_GetObjectItemCaseSensitive(k, "readable");
+		const cJSON *own = cJSON_GetObjectItemCaseSensitive(k, "owner");
+		ASSERT(cJSON_IsString(key));
+
+		/* A provider-backed key is read from its store, so it must not
+		 * be advertised as write-only the way a credential is. */
+		ASSERT_EQ(NULL, ro);
+		/* And it is owned by the camera, not by a daemon a client
+		 * could be invited to restart. */
+		ASSERT_STR_EQ("system", own->valuestring);
+
+		if (strcmp(key->valuestring, "timezone") == 0) {
+			/* Live because nothing is owed to `apply` -- the file
+			 * is written and rcd is done. The reboot is what the
+			 * running system needs, and the impact is where that
+			 * is said. */
+			ASSERT_STR_EQ("live", tier->valuestring);
+			ASSERT_STR_EQ("reboot", imp->valuestring);
+			/* The whole table, offered as choices. */
+			const cJSON *ch = cJSON_GetObjectItemCaseSensitive(k, "choices");
+			ASSERT(cJSON_IsArray(ch));
+			ASSERT(cJSON_GetArraySize(ch) > 100);
+			checked++;
+		}
+		if (strcmp(key->valuestring, "ntp_server") == 0) {
+			/* Written and in force at once: ntpd is restarted by
+			 * the setter, so nothing is owed and nothing waits. */
+			ASSERT_STR_EQ("live", tier->valuestring);
+			ASSERT_STR_EQ("none", imp->valuestring);
+			ASSERT_STR_EQ("host",
+				      cJSON_GetObjectItemCaseSensitive(k, "type")->valuestring);
+			checked++;
+		}
+	}
+	ASSERT_EQ(2, checked);
+	cJSON_Delete(out);
 	PASS();
 }
 
@@ -813,6 +997,11 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(channelled_keys_carry_their_own_channel);
 	RUN_TEST(every_writable_key_has_an_owner);
 	RUN_TEST(impact_separates_the_pipeline_from_the_stream);
+	RUN_TEST(the_zone_table_is_two_arrays_of_one_length);
+	RUN_TEST(the_timezone_is_an_enum_over_the_zone_table);
+	RUN_TEST(a_host_is_a_hostname_or_an_address_and_nothing_else);
+	RUN_TEST(a_provider_key_round_trips_through_its_store);
+	RUN_TEST(the_schema_says_where_a_system_key_takes_effect);
 	RUN_TEST(nothing_is_unavailable_until_the_camera_says_so);
 	RUN_TEST(availability_matches_whole_key_names);
 	RUN_TEST(schema_carries_the_labels);

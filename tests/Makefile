@@ -38,6 +38,7 @@ CTRL_SRCS = ../rvd/rvd_ctrl.c mock_hal.c \
 # what cost. Every source but rcd_main.c, which carries main() -- the rest link
 # clean without a socket or a config file, which is the point of the split.
 RCD_SRCS = ../rcd/rcd_config.c ../rcd/rcd_schema.c ../rcd/rcd_proto.c \
+           ../rcd/rcd_system.c \
            ../rcd/rcd_apply.c ../rcd/rcd_state.c ../rcd/rcd_ipc.c
 IPC_SRCS = ../../raptor-ipc/src/rss_ring.c ../../raptor-ipc/src/rss_ctrl.c \
            ../../raptor-ipc/src/rss_osd_shm.c ../../raptor-ipc/src/rss_ipc_log.c
@@ -48,8 +49,15 @@ SDP_SRC = sdp_parse.c
 $(SDP_SRC): ../rwd/rwd_sdp.c
 	sed '/^int rwd_sdp_generate_answer/,$$d' $< > $@
 
+# rcd's [system] providers write real files -- /etc/TZ, /etc/ntp.conf. Pointed
+# at a scratch directory under the tmpfs the suite already mounts on /run, so
+# the tests exercise the writers themselves rather than a mock of them, and a
+# suite run outside that sandbox fails to write rather than editing this host.
+RCD_TEST_ETC = /run/rss/rcd-test-etc
+
 tests: $(TEST_SRCS) $(LIB_SRCS) $(CTRL_SRCS) $(IPC_SRCS) $(RCD_SRCS) $(SDP_SRC) greatest.h
-	$(CC) $(CFLAGS) -DRWD_H -include ../fuzz/fuzz_rwd_shim.h \
+	$(CC) $(CFLAGS) -DRWD_H -DRCD_SYSCONF_DIR='"$(RCD_TEST_ETC)"' \
+		-include ../fuzz/fuzz_rwd_shim.h \
 		-o $@ $(TEST_SRCS) $(LIB_SRCS) $(CTRL_SRCS) $(IPC_SRCS) $(RCD_SRCS) $(SDP_SRC) $(LDFLAGS)
 
 test_slow_rtsp: test_slow_rtsp.c

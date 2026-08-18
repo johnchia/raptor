@@ -58,6 +58,7 @@ typedef enum {
 	RCD_IMPACT_SERVICE,  /* one feature pauses; no client notices */
 	RCD_IMPACT_STREAM,   /* connected viewers are dropped */
 	RCD_IMPACT_PIPELINE, /* capture stops and everything downstream reconnects */
+	RCD_IMPACT_REBOOT,   /* the camera restarts */
 } rcd_impact_t;
 
 const char *rcd_impact_name(rcd_impact_t i);
@@ -87,7 +88,19 @@ typedef enum {
 	V_BOOL,
 	V_ENUM,
 	V_CRED,
+	V_HOST,
 } rcd_val_type_t;
+
+/*
+ * V_HOST is a hostname or an IPv4 address and nothing else: letters, digits,
+ * '.' and '-', with no leading or trailing punctuation. No slash, space, quote
+ * or shell metacharacter can appear, which is what lets such a value be
+ * written to a line of its own in a file this daemon does not otherwise parse
+ * -- it cannot become a path or a second directive there.
+ *
+ * It is not a relaxed V_CRED and must not be used for one: it is reported back
+ * like any other value.
+ */
 
 /*
  * A V_INT may still carry `choices`, and then it is a labelled integer: an
@@ -110,17 +123,58 @@ typedef enum {
  * no live command however much one would be convenient -- and a caller never
  * has to know, because the answer is here and is reported back.
  */
+/*
+ * Where a key is kept, when it is not kept in raptor.conf.
+ *
+ * A key naming one of these is read and written through it instead of through
+ * the config file and the owning daemon -- see rcd_system.h. Nothing else
+ * about the key changes: the same table validates it, the same `set` batches
+ * it, the same `schema` describes it.
+ *
+ * `set` is handed a value that has already been validated against the table
+ * entry, so a provider never parses and never bounds-checks. It returns 0, or
+ * -1 for a store that could not be written. `get` returns 0 and fills `out`,
+ * or -1 for a value that is not set or not recognisable -- which is reported
+ * as unset, exactly like a key absent from the config file.
+ */
+typedef struct rcd_provider {
+	int (*get)(char *out, size_t outsz);
+	int (*set)(const char *value);
+} rcd_provider_t;
+
 typedef struct rcd_key {
 	const char *section;
 	const char *key;
 	rcd_val_type_t type;
-	int min, max;		    /* V_INT range; V_CRED length, min 0 */
+	int min, max;		    /* V_INT range; V_CRED/V_HOST length, min 0 */
 	const char *const *choices; /* V_ENUM values, or V_INT labels for
 				     * min+i; NULL-terminated */
 	const char *live_cmd;	    /* NULL: restart tier */
 	const char *live_arg;	    /* field name the live command expects */
 	int live_chn;		    /* channel the command needs, or -1 */
+
+	/* Where the value is kept, for a key that is not in raptor.conf. */
+	const rcd_provider_t *provider;
+
+	/*
+	 * What enacting this key costs, when the owning daemon's impact is not
+	 * the answer -- which is every provider-backed key, because no daemon
+	 * owns one. Left RCD_IMPACT_NONE to derive it from the owner, which is
+	 * what every key in raptor.conf does.
+	 */
+	rcd_impact_t impact;
 } rcd_key_t;
+
+/*
+ * What a client is told about when a key takes effect.
+ *
+ * Live means the value is in force the moment `set` returns: a command reached
+ * the running daemon, or a provider wrote a store that is read continuously.
+ * Everything else waits for `apply`, or -- for RCD_IMPACT_REBOOT -- for the
+ * camera to come back.
+ */
+bool rcd_key_live(const rcd_key_t *k);
+rcd_impact_t rcd_key_impact(const rcd_key_t *k);
 
 /* Argument grammars for the actions below. */
 typedef enum {

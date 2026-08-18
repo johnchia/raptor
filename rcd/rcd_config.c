@@ -235,8 +235,20 @@ static void err_choices(char *err, size_t errsz, const char *key, const char *co
 	/* Naming the alternatives is safe -- a closed enum is the whole point
 	 * of the field -- and turns a rejection into something fixable. */
 	int n = snprintf(err, errsz, "'%s' must be one of:", key);
-	for (int i = 0; choices[i] && n > 0 && (size_t)n < errsz; i++)
+
+	int i = 0;
+	for (; choices[i] && n > 0 && (size_t)n < errsz; i++)
 		n += snprintf(err + n, errsz - (size_t)n, " %s", choices[i]);
+
+	/*
+	 * The timezone list is three hundred entries and none of them fits
+	 * past the first dozen. Saying so beats a sentence that stops in the
+	 * middle of Africa and reads like the list ends there -- a caller can
+	 * fetch the whole thing from `schema`, which is where it belongs.
+	 */
+	static const char tail[] = " ... (see schema)";
+	if (choices[i] && errsz > sizeof(tail))
+		memcpy(err + errsz - sizeof(tail), tail, sizeof(tail));
 }
 
 /*
@@ -380,6 +392,36 @@ static const char *render(const rcd_key_t *k, const cJSON *v, rcd_edit_t *e, cha
 		return NULL;
 	}
 
+	if (k->type == V_HOST) {
+		if (!cJSON_IsString(v) || !v->valuestring) {
+			snprintf(err, errsz, "'%s' must be a string", k->key);
+			return RCD_E_TYPE;
+		}
+		const char *s = v->valuestring;
+		size_t n = strlen(s);
+		if (n < 1 || n > (size_t)k->max || n >= sizeof(e->rendered)) {
+			snprintf(err, errsz, "'%s' must be 1 to %d characters", k->key, k->max);
+			return RCD_E_RANGE;
+		}
+		for (size_t i = 0; i < n; i++) {
+			unsigned char c = (unsigned char)s[i];
+			if (isalnum(c) || c == '.' || c == '-')
+				continue;
+			snprintf(err, errsz, "'%s' must be a hostname or an IPv4 address", k->key);
+			return RCD_E_CHOICE;
+		}
+		/* Leading or trailing punctuation is not a hostname anyone
+		 * meant, and a leading '-' would be an option to whatever
+		 * eventually reads the file. */
+		if (s[0] == '.' || s[0] == '-' || s[n - 1] == '.' || s[n - 1] == '-') {
+			snprintf(err, errsz, "'%s' may not start or end with '.' or '-'", k->key);
+			return RCD_E_CHOICE;
+		}
+		memcpy(e->rendered, s, n);
+		e->rendered[n] = '\0';
+		return NULL;
+	}
+
 	/* V_ENUM. A number is accepted as well as a string so that the numeric
 	 * enums -- sample rate is the one -- still match when a client renders
 	 * 16000 rather than "16000". */
@@ -499,6 +541,21 @@ static void emit_value(cJSON *arr, const rcd_key_t *k, rss_config_t *file, const
 
 	const char *raw = NULL;
 	const char *source = "daemon";
+
+	/*
+	 * A provider-backed key is neither in the file nor in a daemon: its
+	 * store is the answer, and the only one. Reported as unset when the
+	 * store says nothing, which is what an unconfigured camera looks like.
+	 */
+	char provided[RCD_VAL_MAX];
+	if (k->provider) {
+		if (k->provider->get(provided, sizeof(provided)) == 0) {
+			raw = provided;
+			source = "system";
+		}
+		from_daemon = NULL;
+		file = NULL;
+	}
 
 	if (from_daemon) {
 		const cJSON *v = cJSON_GetObjectItemCaseSensitive(from_daemon, k->key);
@@ -805,11 +862,37 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 	cJSON *results = cJSON_AddArrayToObject(resp, "results");
 
 	bool to_file[RCD_EDITS_MAX] = {false};
+	bool provided[RCD_EDITS_MAX] = {false};
 	const char *note[RCD_EDITS_MAX] = {NULL};
 	char notebuf[RCD_EDITS_MAX][192];
 
 	for (int i = 0; i < n; i++) {
 		const rcd_key_t *k = edits[i].k;
+
+		/*
+		 * A provider is the store, so there is no file to fall back to
+		 * and nothing to stage: `stage` exists so that a form's live
+		 * fields land together with its saved ones, and these have no
+		 * second half to wait for.
+		 *
+		 * A failure here is reported as the whole request failing, the
+		 * same as a config file that could not be written. Both can
+		 * leave an earlier edit in the batch applied; both mean the
+		 * storage is broken, which is not a state a partial success
+		 * report helps anyone with.
+		 */
+		if (k->provider) {
+			if (k->provider->set(edits[i].rendered) != 0) {
+				cJSON_Delete(resp);
+				cJSON *e = rcd_err(RCD_E_IO, "the setting could not be stored");
+				rcd_err_where(e, k->section, k->key);
+				return e;
+			}
+			provided[i] = true;
+			if (rcd_key_impact(k) == RCD_IMPACT_REBOOT)
+				note[i] = "stored -- takes effect on reboot";
+			continue;
+		}
 
 		if (!k->live_cmd || stage_only) {
 			to_file[i] = true;
@@ -875,7 +958,14 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 			if (v)
 				cJSON_AddItemToObject(o, "value", v);
 		}
-		cJSON_AddStringToObject(o, "applied", to_file[i] ? "saved" : "live");
+		/*
+		 * "saved" means rcd still owes this to a daemon restart, which
+		 * is what `apply` is for. A provider is never that: its store
+		 * is the value. Whether the running system has read it yet is
+		 * what the key's impact says, and the note beside it.
+		 */
+		cJSON_AddStringToObject(o, "applied",
+					(provided[i] || !to_file[i]) ? "live" : "saved");
 		if (note[i] && note[i][0])
 			cJSON_AddStringToObject(o, "note", note[i]);
 		cJSON_AddItemToArray(results, o);
