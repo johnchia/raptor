@@ -71,11 +71,18 @@ rcd_impact_t rcd_daemon_impact(rcd_daemon_t d)
 /* ------------------------------------------------------------------ */
 /* Sections                                                            */
 /*                                                                     */
-/* Readable and writable are different lists on purpose. [rtsp] and     */
-/* [http] hold a password, so neither can be read in bulk -- but their  */
-/* individual keys can still be written, because a credential that      */
-/* cannot be set is a credential stuck at whatever the image shipped.   */
-/* Settable, never reported back.                                       */
+/* Readable and writable are different lists on purpose: a section may  */
+/* have no daemon able to answer for it, and then its values come from  */
+/* the file alone.                                                      */
+/*                                                                     */
+/* [rtsp] and [http] hold a password and are read anyway. What protects */
+/* it is not the section being absent from this list -- it is that a    */
+/* value is emitted key by key from the table and a V_CRED returns      */
+/* before any value is looked at, so the password is never on the wire  */
+/* whatever the daemon put in its reply. Keeping the sections out of    */
+/* here bought nothing and cost the truth: with every key commented out */
+/* of raptor.conf, which is the shipped state, a client asking whether  */
+/* RTSP is on was told "unset" while the server was serving.            */
 /* ------------------------------------------------------------------ */
 
 static const struct {
@@ -85,7 +92,7 @@ static const struct {
 	{"sensor", "rvd"},    {"image", "rvd"}, {"stream0", "rvd"}, {"stream1", "rvd"},
 	{"jpeg", "rvd"},      {"ring", "rvd"},	{"log", "rvd"},	    {"audio", "rad"},
 	{"osd", "rod"},	      {"ircut", "ric"}, {"motion", "rmd"},  {"recording", "rmr"},
-	{"timelapse", "rmr"}, {NULL, NULL},
+	{"timelapse", "rmr"}, {"rtsp", "rsd"},	{"http", "rhd"},    {NULL, NULL},
 };
 
 static const struct {

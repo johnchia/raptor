@@ -16,6 +16,7 @@
   Self-contained on purpose: no font host, no CDN, no external anything. The
   camera is often on a network with no route off it.
 -->
+<meta charset="utf-8">
 <title>Raptor</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -415,13 +416,44 @@ const byId = {};
 const V = {};             /* current value per key id */
 const SAVED = {};         /* last value known to be on disk */
 const CREDSET = {};
+const UNSET = new Set();   /* no value from the daemon and none in the file */
 const dirty = new Set();
 let active = TABS[0].id;
 let armed = false;
 
 const id_of = k => k.section + "." + k.key;
 
-/* ═══ widget choice — from the schema alone ══════════════════════════════ */
+/*
+ * What restarting a key's owner costs.
+ *
+ * A live key is published with impact "none", which is true of setting it and
+ * false of every other thing that can happen to it: when the platform refuses
+ * the live command -- SigmaStar takes orientation at channel creation, so
+ * hflip always does -- the edit falls back to the file and the only way to
+ * enact it is to restart rvd. Reading "none" then told the operator that
+ * applying it costs nothing, in the confirmation step that exists precisely to
+ * tell them otherwise. The owner's real cost is in the schema already, carried
+ * by its restart-tier keys, so it is derived rather than assumed.
+ */
+const OWNER_IMPACT = {};
+function learnImpacts() {
+  KEYS.forEach(k => {
+    if (k.tier !== "live" && k.impact && k.impact !== "none") OWNER_IMPACT[k.owner] = k.impact;
+  });
+}
+const costOf = k => (k.impact && k.impact !== "none") ? k.impact
+                  : (OWNER_IMPACT[k.owner] || "service");
+
+/* ═══ widget choice — from the schema alone ══════════════════════════════
+   With one exception the control follows from the type and the range. The
+   exception is that a range says nothing about whether the numbers in it are
+   quantities or names: a GPIO is picked from a wiring diagram and never
+   nudged, so a slider over it is an invitation to sweep every pin on the SoC
+   looking for the one that moves the filter. Identity keys get a plain field.
+   This is presentation, so it belongs here rather than in rcd's table. */
+const IDENTIFIER = /^(gpio_|adc_channel$)/;
+function isIdentifier(k) { return IDENTIFIER.test(k.key); }
+
 function widgetFor(k) {
   if (k.type === "bool") return "switch";
   if (k.type === "credential") return "cred";
@@ -429,6 +461,7 @@ function widgetFor(k) {
   if (k.labels) return k.labels.length <= 4 ? "seg" : "select";
   const span = k.max - k.min;
   if (span === 1) return "switch";
+  if (isIdentifier(k)) return "number";
   if (span <= 4) return "seg";
   if (span <= 1000) return "slider";
   return "number";
@@ -476,7 +509,13 @@ async function commit(id, val, el) {
     }
     if (res.applied === "saved") {
       dirty.add(id);
-      if (el) el.classList.add("dirty");
+      if (el) {
+        el.classList.add("dirty");
+        /* The badge said "live" a moment ago and is now wrong. */
+        const c = el.querySelector(".chip");
+        if (c) { c.className = "chip " + costOf(k); c.textContent = costOf(k);
+                 c.title = "Needs " + k.owner + " restarted — " + COST[costOf(k)]; }
+      }
       mark(el, res.note || "saved — needs apply", true);
       refreshBar();
     } else {
@@ -626,7 +665,9 @@ function buildRow(id) {
   const ctl = buildControl(id, v => commit(id, v, row));
   const mk = document.createElement("div"); mk.className = "mark";
   mk.append(chip(k));
-  const rb = document.createElement("span"); rb.className = "readback"; mk.append(rb);
+  const rb = document.createElement("span"); rb.className = "readback";
+  if (UNSET.has(id)) rb.textContent = "not set";
+  mk.append(rb);
   row.append(lab, ctl, mk);
   return row;
 }
@@ -786,8 +827,7 @@ function refreshBar() {
   armed = false; btnApply.className = "btn primary"; btnApply.textContent = "Apply";
   paintTabs();
   if (!n) return;
-  const worst = [...dirty].map(id => byId[id].impact)
-                          .reduce((a, b) => RANK[b] > RANK[a] ? b : a, "service");
+  const worst = worstCost();
   const daemons = [...new Set([...dirty].map(id => byId[id].owner))];
   document.getElementById("apCount").textContent = n + (n === 1 ? " change pending" : " changes pending");
   document.getElementById("apCost").textContent =
@@ -800,9 +840,13 @@ function refreshBar() {
   if (worst === "pipeline") btnApply.className = "btn danger";
 }
 
+function worstCost() {
+  return [...dirty].map(id => costOf(byId[id]))
+                   .reduce((a, b) => RANK[b] > RANK[a] ? b : a, "service");
+}
+
 btnApply.addEventListener("click", async () => {
-  const worst = [...dirty].map(id => byId[id].impact)
-                          .reduce((a, b) => RANK[b] > RANK[a] ? b : a, "service");
+  const worst = worstCost();
   if (worst !== "service" && !armed) {
     armed = true;
     btnApply.textContent = worst === "pipeline" ? "Confirm — stops capture" : "Confirm — drops viewers";
@@ -839,20 +883,50 @@ async function doApply(worst) {
   } finally {
     btnApply.disabled = false; document.getElementById("btnRevert").disabled = false;
     screen.classList.remove("busy");
+    /*
+     * Twice, and the second one is the one that matters. An <img> showing a
+     * multipart stream that ends does not fire `error` -- it keeps the last
+     * frame it painted and says nothing -- so a restart leaves the picture
+     * looking live and stale, which is worse than a blank. The first attach
+     * happens now; the second is after the ring has had time to refill, since
+     * rcd reports the apply done when rvd is up rather than when it is
+     * producing.
+     */
     startPreview();
+    setTimeout(() => startPreview(), 2500);
     refreshBar(); render();
     loadState();
   }
 }
 
-/* ═══ preview ════════════════════════════════════════════════════════════ */
-function startPreview() {
+/* ═══ preview ════════════════════════════════════════════════════════════
+   The stream this shows is the one an apply tears down, so a failure here is
+   the ordinary case and not an error state. rhd answers /mjpeg with a 404
+   until rvd has recreated the JPEG ring, which is a second or two after rcd
+   reports the apply finished -- giving up on the first refusal is what left a
+   dead preview that only a page reload fixed. */
+const PREVIEW_RETRY_MS = 1200;
+const PREVIEW_GIVE_UP_MS = 25000;
+let previewTimer = null, previewSince = 0;
+
+function startPreview(retrying) {
   const cam = document.getElementById("cam");
   const screen = document.getElementById("screen");
+  clearTimeout(previewTimer);
+  if (!retrying) previewSince = Date.now();
   screen.classList.remove("noimg");
+
+  cam.onerror = () => {
+    cam.removeAttribute("src");
+    if (Date.now() - previewSince > PREVIEW_GIVE_UP_MS) {
+      screen.classList.add("noimg");
+      return;
+    }
+    previewTimer = setTimeout(() => startPreview(true), PREVIEW_RETRY_MS);
+  };
   /* Cache-buster: a restarted pipeline serves a new stream on the same URL. */
   cam.src = "/mjpeg?stream=" + previewStream() + "&t=" + Date.now();
-  cam.onerror = () => screen.classList.add("noimg");
+
   document.getElementById("tagL").textContent =
     "mjpeg · stream " + previewStream() + " · " +
     (V["stream" + previewStream() + ".width"] || "?") + "×" +
@@ -928,7 +1002,15 @@ async function loadValues() {
       const id = v.section + "." + v.key;
       if (!byId[id]) return;
       if (byId[id].type === "credential") { CREDSET[id] = v.set === true; return; }
-      if (v.set === false || v.value === undefined || v.value === null) return;
+      if (v.set === false || v.value === undefined || v.value === null) {
+        /* Nobody has ever set it and no daemon answered for it, so its value
+         * is whatever the daemon's own default turns out to be. Drawing a
+         * switch here would claim "off" about something that may well be on,
+         * which is exactly what [rtsp] did before rcd would answer for it. */
+        UNSET.add(id);
+        return;
+      }
+      UNSET.delete(id);
       V[id] = v.value;
       SAVED[id] = v.value;
     });
@@ -961,6 +1043,7 @@ async function boot() {
   KEYS = s.keys || [];
   ACTIONS = s.actions || [];
   KEYS.forEach(k => byId[id_of(k)] = k);
+  learnImpacts();
 
   /* Any section no tab claims still gets a page, so a key added to rcd cannot
    * become unreachable by forgetting to touch this file. */

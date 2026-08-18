@@ -503,8 +503,12 @@ static void handle_request(rhd_server_t *srv, rhd_client_t *c)
 			else
 				RSS_WARN("%s not found", RHD_INDEX_PATH);
 		}
+		/* The charset is not optional: the console is UTF-8 and a
+		 * browser told only "text/html" decodes it as latin-1, which
+		 * turns every separator in the page into mojibake. */
 		if (index_html)
-			http_send(c, "200 OK", "text/html", index_html, index_html_len);
+			http_send(c, "200 OK", "text/html; charset=utf-8", index_html,
+				  index_html_len);
 		else
 			http_error(c, "404 Not Found", "index page not installed");
 	} else {

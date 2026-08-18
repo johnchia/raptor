@@ -127,16 +127,50 @@ TEST refuses_the_named_hazards(void)
  * never a section. From out here they are the same answer. */
 TEST keeps_credential_sections_unreadable(void)
 {
-	ASSERT_EQ(NULL, rcd_section_reader("rtsp"));
-	ASSERT_EQ(NULL, rcd_section_reader("http"));
+	/* Sections no daemon answers for. A section absent from the table
+	 * entirely is unreadable for the same reason. */
 	ASSERT_EQ(NULL, rcd_section_reader("webrtc"));
 	ASSERT_EQ(NULL, rcd_section_reader("mqtt"));
 	ASSERT_EQ(NULL, rcd_section_reader("not-a-section"));
 
-	/* Readable ones still are, and route to their owner. */
+	/* Readable ones route to their owner. [rtsp] and [http] are among
+	 * them despite holding a password: the section being unreadable was
+	 * never what protected it, and it cost every client the truth about
+	 * whether the server was running. */
 	ASSERT_STR_EQ("rvd", rcd_section_reader("image"));
 	ASSERT_STR_EQ("rad", rcd_section_reader("audio"));
 	ASSERT_STR_EQ("ric", rcd_section_reader("ircut"));
+	ASSERT_STR_EQ("rsd", rcd_section_reader("rtsp"));
+	ASSERT_STR_EQ("rhd", rcd_section_reader("http"));
+	PASS();
+}
+
+/*
+ * What actually keeps a password off the wire: every credential in the table
+ * is marked unreadable in the schema, whatever section it sits in and whether
+ * or not a daemon would happily hand it over. Walked over the whole table so
+ * a credential added to a readable section cannot quietly become reportable.
+ */
+TEST no_credential_is_ever_readable(void)
+{
+	cJSON *out = cJSON_CreateObject();
+	rcd_schema_emit(out, NULL);
+	const cJSON *keys = cJSON_GetObjectItemCaseSensitive(out, "keys");
+	ASSERT(cJSON_IsArray(keys));
+
+	int creds = 0;
+	const cJSON *k = NULL;
+	cJSON_ArrayForEach(k, keys)
+	{
+		const cJSON *type = cJSON_GetObjectItemCaseSensitive(k, "type");
+		if (!cJSON_IsString(type) || strcmp(type->valuestring, "credential") != 0)
+			continue;
+		const cJSON *r = cJSON_GetObjectItemCaseSensitive(k, "readable");
+		ASSERT(cJSON_IsFalse(r));
+		creds++;
+	}
+	ASSERT_EQ(4, creds); /* a username and a password for [rtsp] and [http] */
+	cJSON_Delete(out);
 	PASS();
 }
 
@@ -699,6 +733,7 @@ SUITE(rcd_cmd_suite)
 {
 	RUN_TEST(refuses_the_named_hazards);
 	RUN_TEST(keeps_credential_sections_unreadable);
+	RUN_TEST(no_credential_is_ever_readable);
 	RUN_TEST(refuses_unlisted_actions);
 	RUN_TEST(refuses_near_misses);
 	RUN_TEST(refuses_malformed_payloads);

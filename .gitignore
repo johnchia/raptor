@@ -26,6 +26,7 @@ rsp/rsp
 rsr/rsr
 rsd-555/rsd-555
 rmq/rmq
+rcd/rcd
 rlatency/rlatency
 rverify/rverify
 mdnsprobe/mdnsprobe
