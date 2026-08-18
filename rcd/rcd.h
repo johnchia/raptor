@@ -63,6 +63,19 @@ struct rcd_state {
 	char apply_error[160];
 
 	/*
+	 * Which [image] keys this SoC has a setter for, as rvd reports them:
+	 * ",brightness,contrast,...," -- comma-delimited and comma-terminated so
+	 * a membership test is a search for ",key," and cannot match "again"
+	 * inside "max_again". Empty means rvd has not answered yet, which is not
+	 * the same as nothing being settable, so nothing is hidden until it has.
+	 *
+	 * Not invalidated on a restart: the table behind it is compile-time
+	 * constant for the SoC, so the only reason to ask again is that the
+	 * first attempt found rvd down.
+	 */
+	char isp_settable[320];
+
+	/*
 	 * Live edits a daemon has applied and not yet written to flash. The
 	 * value is already in effect; only the record of it is owed.
 	 */

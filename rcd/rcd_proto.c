@@ -97,7 +97,29 @@ static cJSON *cmd_hello(rcd_state_t *st)
 	return r;
 }
 
-static cJSON *cmd_schema(const cJSON *root)
+/*
+ * Mark the keys this camera does not physically have. Done here rather than in
+ * the table because the table is the same on every platform and this answer
+ * comes from a running daemon; a client hides them, and one that ignores the
+ * field is no worse off than before.
+ */
+static void mark_availability(rcd_state_t *st, cJSON *r)
+{
+	cJSON *keys = cJSON_GetObjectItemCaseSensitive(r, "keys");
+	cJSON *k = NULL;
+	cJSON_ArrayForEach(k, keys)
+	{
+		const cJSON *sec = cJSON_GetObjectItemCaseSensitive(k, "section");
+		const cJSON *key = cJSON_GetObjectItemCaseSensitive(k, "key");
+		if (!cJSON_IsString(sec) || !cJSON_IsString(key))
+			continue;
+		const rcd_key_t *e = rcd_key_find(sec->valuestring, key->valuestring);
+		if (e && !rcd_key_available(st, e))
+			cJSON_AddBoolToObject(k, "available", false);
+	}
+}
+
+static cJSON *cmd_schema(rcd_state_t *st, const cJSON *root)
 {
 	cJSON *r = rcd_ok();
 	if (!r)
@@ -110,6 +132,7 @@ static cJSON *cmd_schema(const cJSON *root)
 	 * table can tell that its copy is stale without diffing it. */
 	cJSON_AddNumberToObject(r, "rev", RCD_API_VERSION);
 	rcd_schema_emit(r, filter);
+	mark_availability(st, r);
 	return r;
 }
 
@@ -141,7 +164,7 @@ static cJSON *dispatch(rcd_state_t *st, const char *name, const cJSON *root)
 	if (strcmp(name, "hello") == 0 || strcmp(name, "status") == 0)
 		return cmd_hello(st);
 	if (strcmp(name, "schema") == 0)
-		return cmd_schema(root);
+		return cmd_schema(st, root);
 	if (strcmp(name, "get") == 0)
 		return rcd_cmd_get(st, root);
 	if (strcmp(name, "set") == 0)

@@ -25,15 +25,16 @@ struct rcd_state;
 
 /* Refusal codes. Adding one is a compatible change; changing what an existing
  * one means is not. */
-#define RCD_E_MALFORMED "malformed" /* not JSON, or not the shape asked for */
-#define RCD_E_UNKNOWN	"unknown"   /* no such command, key or action */
-#define RCD_E_TYPE	"type"	    /* right key, wrong kind of value */
-#define RCD_E_RANGE	"range"	    /* number outside the key's bounds */
-#define RCD_E_CHOICE	"choice"    /* not one of the key's choices */
-#define RCD_E_TOOMANY	"too-many"  /* more edits than one request may carry */
-#define RCD_E_IO	"io"	    /* the config file could not be written */
-#define RCD_E_DAEMON	"daemon"    /* the owning daemon refused or is absent */
-#define RCD_E_BUSY	"busy"	    /* an apply is already running */
+#define RCD_E_MALFORMED	  "malformed"	/* not JSON, or not the shape asked for */
+#define RCD_E_UNKNOWN	  "unknown"	/* no such command, key or action */
+#define RCD_E_TYPE	  "type"	/* right key, wrong kind of value */
+#define RCD_E_RANGE	  "range"	/* number outside the key's bounds */
+#define RCD_E_CHOICE	  "choice"	/* not one of the key's choices */
+#define RCD_E_TOOMANY	  "too-many"	/* more edits than one request may carry */
+#define RCD_E_IO	  "io"		/* the config file could not be written */
+#define RCD_E_DAEMON	  "daemon"	/* the owning daemon refused or is absent */
+#define RCD_E_BUSY	  "busy"	/* an apply is already running */
+#define RCD_E_UNSUPPORTED "unsupported" /* the SoC has no such control */
 
 /* A fresh success envelope, or a refusal. Both are owned by the caller. */
 cJSON *rcd_ok(void);

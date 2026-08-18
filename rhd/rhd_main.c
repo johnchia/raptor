@@ -318,6 +318,33 @@ static void remove_client(rhd_server_t *srv, int idx)
 }
 
 /*
+ * Let go of a ring whose producer has been replaced.
+ *
+ * rss_ring_read refuses with RSS_EOVERFLOW and no progress when the
+ * incarnation has moved, and every retry against the stale mapping refuses
+ * the same way: rvd recreates its rings on restart, so an apply that restarts
+ * the pipeline left this daemon serving one frozen frame -- the same JPEG,
+ * byte for byte -- to snapshots and MJPEG alike. It did recover, after the
+ * idle detector below took twenty seconds to notice write_seq was not moving
+ * and closed the ring for a different reason. Dropping it at the point the
+ * read says so makes that immediate. rsd_ring_reader.c has the same shape.
+ */
+static void jpeg_ring_drop(rhd_server_t *srv, int j)
+{
+	if (j < 0 || j >= RHD_MAX_JPEG || !srv->jpeg_rings[j])
+		return;
+
+	RSS_INFO("jpeg ring %s: producer restarted, reopening", jpeg_ring_names[j]);
+	if (srv->jpeg_acquired[j]) {
+		rss_ring_release(srv->jpeg_rings[j]);
+		srv->jpeg_acquired[j] = false;
+	}
+	rss_ring_close(srv->jpeg_rings[j]);
+	srv->jpeg_rings[j] = NULL;
+	srv->jpeg_read_seqs[j] = 0;
+}
+
+/*
  * Complete every parked snapshot that has a frame waiting, and fail the ones
  * that ran out of time. Runs once per main-loop pass, after ring demand has
  * been applied so an encoder woken by the request has had a chance to produce.
@@ -333,11 +360,30 @@ static void snap_poll(rhd_server_t *srv)
 		if (!c->snap_pending)
 			continue;
 
+		/*
+		 * No ring right now is the state a drop leaves behind, and the
+		 * producer is on its way back. Reopen if it is there, and
+		 * otherwise keep waiting: this request has a deadline of its
+		 * own below, which is the right thing to fail it. Failing here
+		 * turned every snapshot taken across a pipeline restart into a
+		 * 503 that never recovered.
+		 */
 		rss_ring_t *ring = srv->jpeg_rings[c->snap_stream];
 		if (!ring) {
-			c->snap_pending = false;
-			http_error(c, "503 Service Unavailable", "JPEG ring not available");
-			remove_client(srv, i);
+			ring = jpeg_ring_open_slot(srv, c->snap_stream);
+			if (ring) {
+				rss_ring_acquire(ring);
+				srv->jpeg_acquired[c->snap_stream] = true;
+				const rss_ring_header_t *hdr = rss_ring_get_header(ring);
+				c->snap_seq = atomic_load(&hdr->write_seq) + 1;
+			}
+		}
+		if (!ring) {
+			if (now >= c->snap_deadline) {
+				c->snap_pending = false;
+				http_error(c, "503 Service Unavailable", "JPEG ring not available");
+				remove_client(srv, i);
+			}
 			continue;
 		}
 
@@ -348,9 +394,18 @@ static void snap_poll(rhd_server_t *srv)
 		 */
 		uint32_t len = 0;
 		rss_ring_slot_t meta;
+		uint64_t pre_seq = c->snap_seq;
 		int ret = srv->snap_buf ? rss_ring_read(ring, &c->snap_seq, srv->snap_buf,
 							srv->snap_buf_size, &len, &meta)
 					: -1;
+
+		/* No progress means the ring was recreated, not lapped. The
+		 * request keeps its deadline and is served from the new ring
+		 * on a later pass. */
+		if (ret == RSS_EOVERFLOW && c->snap_seq == pre_seq) {
+			jpeg_ring_drop(srv, c->snap_stream);
+			continue;
+		}
 
 		/* Lapped by the writer: resync onto the newest frame and retry. */
 		if (ret == RSS_EOVERFLOW) {
@@ -668,8 +723,6 @@ static void server_run(rhd_server_t *srv)
 	struct epoll_event events[16];
 	int ctrl_fd = srv->ctrl ? rss_ctrl_get_fd(srv->ctrl) : -1;
 
-	bool ring_acquired[RHD_MAX_JPEG] = {false};
-
 	while (rss_running(srv->running)) {
 		/* Per-ring demand: acquire only the rings that streaming
 		 * clients actually watch — each held ring runs a JPEG
@@ -694,14 +747,22 @@ static void server_run(rhd_server_t *srv)
 		}
 
 		for (int j = 0; j < RHD_MAX_JPEG; j++) {
+			/* Something wants this ring and there is no handle:
+			 * either it has never been opened or it was just
+			 * dropped as stale. Either way the answer is to try,
+			 * every pass, for as long as demand lasts -- the idle
+			 * tick below only reopens every twenty seconds, which
+			 * is what made a restarted pipeline look dead. */
+			if (!srv->jpeg_rings[j] && ring_wanted[j])
+				jpeg_ring_open_slot(srv, j);
 			if (!srv->jpeg_rings[j])
 				continue;
-			if (ring_wanted[j] && !ring_acquired[j]) {
+			if (ring_wanted[j] && !srv->jpeg_acquired[j]) {
 				rss_ring_acquire(srv->jpeg_rings[j]);
-				ring_acquired[j] = true;
-			} else if (!ring_wanted[j] && ring_acquired[j]) {
+				srv->jpeg_acquired[j] = true;
+			} else if (!ring_wanted[j] && srv->jpeg_acquired[j]) {
 				rss_ring_release(srv->jpeg_rings[j]);
-				ring_acquired[j] = false;
+				srv->jpeg_acquired[j] = false;
 			}
 		}
 
@@ -711,9 +772,14 @@ static void server_run(rhd_server_t *srv)
 					continue;
 				uint32_t len;
 				rss_ring_slot_t meta;
+				uint64_t pre_seq = srv->jpeg_read_seqs[j];
 				int ret = rss_ring_read(srv->jpeg_rings[j], &srv->jpeg_read_seqs[j],
 							srv->frame_buf, srv->frame_buf_size, &len,
 							&meta);
+				if (ret == RSS_EOVERFLOW && srv->jpeg_read_seqs[j] == pre_seq) {
+					jpeg_ring_drop(srv, j);
+					continue;
+				}
 				if (ret == RSS_EOVERFLOW && srv->jpeg_read_seqs[j] > 0) {
 					srv->jpeg_read_seqs[j]--;
 					ret = rss_ring_read(srv->jpeg_rings[j],
@@ -970,7 +1036,7 @@ static void server_run(rhd_server_t *srv)
 				if (!srv->jpeg_rings[j]) {
 					if (jpeg_ring_open_slot(srv, j) && ring_wanted[j]) {
 						rss_ring_acquire(srv->jpeg_rings[j]);
-						ring_acquired[j] = true;
+						srv->jpeg_acquired[j] = true;
 					}
 					continue;
 				}
@@ -997,9 +1063,9 @@ static void server_run(rhd_server_t *srv)
 				    !snap_waiting_on(srv, j)) { /* ~20s (10 ticks * 2s/tick) */
 					RSS_TRACE("jpeg ring idle, closing (%s)",
 						  jpeg_ring_names[j]);
-					if (ring_acquired[j]) {
+					if (srv->jpeg_acquired[j]) {
 						rss_ring_release(srv->jpeg_rings[j]);
-						ring_acquired[j] = false;
+						srv->jpeg_acquired[j] = false;
 					}
 					rss_ring_close(srv->jpeg_rings[j]);
 					srv->jpeg_rings[j] = NULL;
@@ -1017,7 +1083,7 @@ static void server_run(rhd_server_t *srv)
 	free(srv->snap_buf);
 	for (int j = 0; j < RHD_MAX_JPEG; j++) {
 		if (srv->jpeg_rings[j]) {
-			if (ring_acquired[j])
+			if (srv->jpeg_acquired[j])
 				rss_ring_release(srv->jpeg_rings[j]);
 			rss_ring_close(srv->jpeg_rings[j]);
 		}

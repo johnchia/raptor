@@ -435,6 +435,23 @@ const id_of = k => k.section + "." + k.key;
  * tell them otherwise. The owner's real cost is in the schema already, carried
  * by its restart-tier keys, so it is derived rather than assumed.
  */
+/*
+ * What this camera has at all, as opposed to what the table describes.
+ *
+ * Two different absences, and they need different sources. A key rcd marks
+ * `available:false` is one the SoC has no control for -- more than half of
+ * [image] on an i6c -- and it is answered from rvd's own vtable. A daemon
+ * missing from the build is the other: `hello` reports what is installed, and
+ * a section whose owner is not there can be configured but never enacted, so
+ * a whole tab of it is worse than useless.
+ *
+ * Neither is inferred from a failed live command. Orientation is published on
+ * SigmaStar and refused while the channel is up; hiding it would delete three
+ * working controls.
+ */
+const MISSING_DAEMON = new Set();
+const usable = k => k.available !== false && !MISSING_DAEMON.has(k.owner);
+
 const OWNER_IMPACT = {};
 function learnImpacts() {
   KEYS.forEach(k => {
@@ -474,11 +491,37 @@ const labelOf = (k, v) => (k.labels && k.labels[v - k.min] !== undefined)
   ? k.labels[v - k.min] : String(v);
 const valueOf = (k, name) => k.labels ? k.min + k.labels.indexOf(name) : name;
 
-/* ═══ committing ═════════════════════════════════════════════════════════ */
+/* ═══ committing ═════════════════════════════════════════════════════════
+   One request per key at a time, and the newest value always wins.
+
+   A number spinner held down fires a change per click, each one a round trip
+   to the daemon. Sent as they come, the replies race: an older one lands after
+   a newer click and writes the device's answer back over the value the
+   operator has just chosen, which reads as a control that sticks and drops
+   inputs. So a key with a request in flight parks the latest value instead of
+   sending it, and the reply is only written back into the control when nothing
+   is parked behind it -- otherwise the parked value is about to be sent and
+   would be overwritten by a reading it predates. */
+const inflight = new Set();
+const parked = {};
+
 async function commit(id, val, el) {
   const k = byId[id];
   const prev = V[id];
   V[id] = val;
+
+  if (k.tier === "live" && k.type !== "credential") {
+    if (inflight.has(id)) { parked[id] = {val: val, el: el}; return; }
+    inflight.add(id);
+    try {
+      await commitLive(id, val, el, prev);
+    } finally {
+      inflight.delete(id);
+      const q = parked[id];
+      if (q) { delete parked[id]; commit(id, q.val, q.el); }
+    }
+    return;
+  }
 
   if (k.type === "credential") {
     try {
@@ -489,14 +532,17 @@ async function commit(id, val, el) {
     return;
   }
 
-  if (k.tier !== "live") {
-    if (JSON.stringify(val) === JSON.stringify(SAVED[id])) dirty.delete(id);
-    else dirty.add(id);
-    if (el) el.classList.toggle("dirty", dirty.has(id));
-    refreshBar();
-    return;
-  }
+  if (JSON.stringify(val) === JSON.stringify(SAVED[id])) dirty.delete(id);
+  else dirty.add(id);
+  if (el) el.classList.toggle("dirty", dirty.has(id));
+  refreshBar();
+}
 
+/* `prev` is passed in: V[id] has already been moved to the new value so the
+ * control reflects the click at once, and the error path needs what it was
+ * before that. */
+async function commitLive(id, val, el, prev) {
+  const k = byId[id];
   const wire = k.labels ? labelOf(k, val) : val;
   try {
     const r = await api({cmd:"set", edits:[{section:k.section, key:k.key, value:wire}]});
@@ -505,7 +551,7 @@ async function commit(id, val, el) {
      * live command that was refused falls back to the file and says so. */
     if (res.value !== undefined && res.value !== null) {
       V[id] = k.labels && typeof res.value === "string" ? valueOf(k, res.value) : res.value;
-      syncControl(el, k, V[id]);
+      if (!parked[id]) syncControl(el, k, V[id]);
     }
     if (res.applied === "saved") {
       dirty.add(id);
@@ -524,7 +570,7 @@ async function commit(id, val, el) {
     }
   } catch (e) {
     V[id] = prev;
-    syncControl(el, k, prev);
+    if (!parked[id]) syncControl(el, k, prev);
     mark(el, e.message, true);
   }
 }
@@ -1039,9 +1085,16 @@ async function boot() {
   document.getElementById("host").textContent =
     [hello.platform, hello.build].filter(Boolean).join(" · ") || "raptor";
 
+  Object.entries(hello.daemons || {}).forEach(([name, d]) => {
+    if (d && d.installed === false) MISSING_DAEMON.add(name);
+  });
+
   const s = await api({cmd:"schema"});
-  KEYS = s.keys || [];
   ACTIONS = s.actions || [];
+  const all = s.keys || [];
+  KEYS = all.filter(usable);
+  const dropped = all.length - KEYS.length;
+  if (dropped) wlog("sys", dropped + " keys hidden: not on this SoC or daemon not installed");
   KEYS.forEach(k => byId[id_of(k)] = k);
   learnImpacts();
 
@@ -1055,9 +1108,14 @@ async function boot() {
   }
 
   const tabsEl = document.getElementById("tabs");
+  const shown = [];
   TABS.forEach(t => {
     const secs = tabSections(t);
     const n = KEYS.filter(k => secs.includes(k.section)).length;
+    /* Nothing left and no actions to offer: the build does not have this. */
+    const acts = t.groups.some(g => (g.actions || []).some(a => ACTIONS.find(x => x.name === a)));
+    if (!n && !acts) return;
+    shown.push(t.id);
     const b = document.createElement("button");
     b.className = "tab"; b.dataset.id = t.id; b.setAttribute("role", "tab");
     b.append(document.createTextNode(t.name));
@@ -1069,6 +1127,8 @@ async function boot() {
     });
     tabsEl.append(b);
   });
+
+  if (shown.length && !shown.includes(active)) active = shown[0];
 
   await loadValues();
   await loadPending();

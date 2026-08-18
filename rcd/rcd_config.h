@@ -60,6 +60,13 @@ typedef struct {
 cJSON *rcd_set_validate(const cJSON *root, rcd_edit_t *out, int *count);
 
 /*
+ * Whether this camera has the control at all, as opposed to having it set to
+ * something. True for everything rcd cannot answer for, including every key
+ * while rvd is down.
+ */
+bool rcd_key_available(struct rcd_state *st, const struct rcd_key *k);
+
+/*
  * The same for an action: validate the arguments and render the daemon request
  * the table would send, without sending it. `daemon` receives the owner.
  */

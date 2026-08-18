@@ -405,6 +405,59 @@ static const char *render(const rcd_key_t *k, const cJSON *v, rcd_edit_t *e, cha
 }
 
 /* ------------------------------------------------------------------ */
+/* What this SoC can actually do                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A camera advertises the same table whatever silicon it is running on, and
+ * more than half of [image] is absent on some of it: the i6c has no hue, no
+ * spatial denoise, no DPC, DRC, highlight or backlight control and no gain
+ * ceilings. Offering those and reporting "not supported on this SoC" after the
+ * fact is the worst of both -- the operator has already decided what to
+ * change, and on the old path the value was written to the file and the
+ * pipeline marked stale, inviting a restart to enact something the silicon
+ * cannot do.
+ *
+ * rvd answers this from the vtable it dispatches through, so there is no
+ * second list to drift: a NULL entry is exactly what makes RSS_HAL_CALL
+ * return NOTSUP. It reports that a setter exists, not that a live call will
+ * be honoured -- orientation is published on SigmaStar and refused while the
+ * channel is up -- which is the distinction that keeps hflip visible.
+ */
+static void probe_isp(rcd_state_t *st)
+{
+	if (st->isp_settable[0])
+		return;
+
+	cJSON *resp = rcd_ask_json("rvd", "{\"cmd\":\"get-isp\"}");
+	if (!resp)
+		return; /* rvd is down; ask again next time rather than hide */
+
+	const cJSON *v = cJSON_GetObjectItemCaseSensitive(resp, "settable");
+	if (cJSON_IsString(v) && v->valuestring && v->valuestring[0])
+		rss_strlcpy(st->isp_settable, v->valuestring, sizeof(st->isp_settable));
+	cJSON_Delete(resp);
+}
+
+bool rcd_key_available(rcd_state_t *st, const rcd_key_t *k)
+{
+	/* Only [image] is answered for, and only once rvd has said something.
+	 * Everything else is available until proven otherwise, which is the
+	 * safe direction: hiding a working control is worse than showing one
+	 * that turns out to refuse. */
+	if (!k || strcmp(k->section, "image") != 0)
+		return true;
+
+	probe_isp(st);
+	if (!st->isp_settable[0])
+		return true;
+
+	char needle[RCD_KEY_MAX + 2];
+	snprintf(needle, sizeof(needle), ",%s,", k->key);
+	return strstr(st->isp_settable, needle) != NULL;
+}
+
+/* ------------------------------------------------------------------ */
 /* get                                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -721,6 +774,21 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 	cJSON *refusal = rcd_set_validate(root, edits, &n);
 	if (refusal)
 		return refusal;
+
+	/*
+	 * Refused whole, before anything is written. A batch is all-or-nothing
+	 * everywhere else in this command and an edit the silicon cannot carry
+	 * out is no different -- and writing it anyway would mark the pipeline
+	 * stale, which asks the operator to restart the camera to enact
+	 * something that cannot exist.
+	 */
+	for (int i = 0; i < n; i++) {
+		if (rcd_key_available(st, edits[i].k))
+			continue;
+		cJSON *e = rcd_err(RCD_E_UNSUPPORTED, "this camera has no such control");
+		rcd_err_where(e, edits[i].k->section, edits[i].k->key);
+		return e;
+	}
 
 	/*
 	 * Whether a live key should also be applied now. It is by default: a

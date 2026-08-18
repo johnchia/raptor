@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "greatest.h"
+#include "../rcd/rcd.h"
 #include "../rcd/rcd_config.h"
 #include "../rcd/rcd_proto.h"
 #include "../rcd/rcd_schema.h"
@@ -680,6 +681,59 @@ TEST schema_carries_the_labels(void)
 	PASS();
 }
 
+/* ------------------------------------------------------------------ */
+/* What the silicon actually has                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The table is the same on every platform and more than half of [image] is
+ * absent on some of them. Nothing is hidden until rvd has said so, because
+ * hiding a working control is worse than showing one that turns out to
+ * refuse -- and a key rvd publishes but rejects while the channel is up
+ * (orientation, on SigmaStar) is available and must stay visible.
+ */
+TEST nothing_is_unavailable_until_the_camera_says_so(void)
+{
+	rcd_state_t st = {0};
+
+	/* rvd has not answered: everything stands. */
+	ASSERT(rcd_key_available(&st, rcd_key_find("image", "sinter")));
+	ASSERT(rcd_key_available(&st, rcd_key_find("image", "dpc_strength")));
+
+	/* What an i6c reports. */
+	snprintf(st.isp_settable, sizeof(st.isp_settable),
+		 ",brightness,contrast,saturation,sharpness,temper,hflip,vflip,ae_comp,"
+		 "defog_strength,");
+
+	ASSERT(rcd_key_available(&st, rcd_key_find("image", "brightness")));
+	ASSERT(rcd_key_available(&st, rcd_key_find("image", "defog_strength")));
+	ASSERT_EQ(false, rcd_key_available(&st, rcd_key_find("image", "sinter")));
+	ASSERT_EQ(false, rcd_key_available(&st, rcd_key_find("image", "hue")));
+	ASSERT_EQ(false, rcd_key_available(&st, rcd_key_find("image", "max_again")));
+	ASSERT_EQ(false, rcd_key_available(&st, rcd_key_find("image", "dpc_strength")));
+
+	/* Published and refused live is not the same as absent. */
+	ASSERT(rcd_key_available(&st, rcd_key_find("image", "hflip")));
+	ASSERT(rcd_key_available(&st, rcd_key_find("image", "vflip")));
+
+	/* The list answers for [image] and nothing else. */
+	ASSERT(rcd_key_available(&st, rcd_key_find("stream0", "bitrate")));
+	ASSERT(rcd_key_available(&st, rcd_key_find("sensor", "antiflicker")));
+	ASSERT(rcd_key_available(&st, rcd_key_find("audio", "volume")));
+	PASS();
+}
+
+/* A key name that is a suffix of another must not match it: the list is
+ * comma-terminated on both sides so ",again," cannot find "max_again". */
+TEST availability_matches_whole_key_names(void)
+{
+	rcd_state_t st = {0};
+	snprintf(st.isp_settable, sizeof(st.isp_settable), ",max_again,");
+	ASSERT(rcd_key_available(&st, rcd_key_find("image", "max_again")));
+	ASSERT_EQ(false, rcd_key_available(&st, rcd_key_find("image", "max_dgain")));
+	PASS();
+}
+
 TEST refuses_more_edits_than_a_request_may_carry(void)
 {
 	char json[8192];
@@ -759,6 +813,8 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(channelled_keys_carry_their_own_channel);
 	RUN_TEST(every_writable_key_has_an_owner);
 	RUN_TEST(impact_separates_the_pipeline_from_the_stream);
+	RUN_TEST(nothing_is_unavailable_until_the_camera_says_so);
+	RUN_TEST(availability_matches_whole_key_names);
 	RUN_TEST(schema_carries_the_labels);
 	RUN_TEST(labelled_integers_are_written_as_numbers);
 	RUN_TEST(labelled_integers_still_take_the_number);

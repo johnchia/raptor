@@ -128,6 +128,10 @@ typedef struct {
 	/* JPEG rings for snapshot + MJPEG streaming */
 	rss_ring_t *jpeg_rings[RHD_MAX_JPEG];
 	int jpeg_ring_count;
+	/* Demand held per ring. Kept beside the handle rather than on the main
+	 * loop's stack so that whoever closes a ring can release it first --
+	 * an incarnation change is discovered in a read, not in the loop. */
+	bool jpeg_acquired[RHD_MAX_JPEG];
 
 	/* Audio ring for audio streaming */
 	rss_ring_t *audio_ring;
