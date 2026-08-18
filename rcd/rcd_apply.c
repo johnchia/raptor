@@ -279,6 +279,34 @@ static void run(rcd_state_t *st, const bool *want, bool forget_stale, cJSON *res
 				continue;
 
 			const char *name = rcd_daemon_name((rcd_daemon_t)d);
+
+			/*
+			 * A daemon that is not running has nothing stale in
+			 * it: what was written is what it will read when it
+			 * next starts, if it ever does. Skipped rather than
+			 * failed -- rmr is absent from builds that do not ship
+			 * recording, and an ordinary edit there must not raise
+			 * an alarm about a daemon this image does not carry.
+			 * `state` already clears stale on the same reasoning.
+			 */
+			if (rss_daemon_check(name) <= 0) {
+				if (forget_stale)
+					rcd_stale_clear(st, (rcd_daemon_t)d);
+				if (results) {
+					cJSON *o = cJSON_CreateObject();
+					if (o) {
+						cJSON_AddStringToObject(o, "daemon", name);
+						cJSON_AddStringToObject(o, "status", "skipped");
+						cJSON_AddStringToObject(o, "reason",
+									"not running; it will "
+									"read the file when it "
+									"starts");
+						cJSON_AddItemToArray(results, o);
+					}
+				}
+				continue;
+			}
+
 			const char *fail = is_rvd ? restart_rvd(st, msg, sizeof(msg))
 						  : restart_plain(st, name, msg, sizeof(msg));
 

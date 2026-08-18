@@ -26,6 +26,7 @@
 #include <stdatomic.h>
 
 #include "rhd.h"
+#include "rhd_api.h"
 
 /* Index page — loaded from file on first request, cached */
 static char *index_html;
@@ -305,6 +306,7 @@ static void remove_client(rhd_server_t *srv, int idx)
 		rhd_sendq_destroy(&c->sendq);
 	}
 
+	rhd_api_release(c);
 	epoll_ctl(srv->epoll_fd, EPOLL_CTL_DEL, c->fd, NULL);
 #ifdef RSS_HAS_TLS
 	rss_tls_close(c->tls);
@@ -434,13 +436,18 @@ static void handle_request(rhd_server_t *srv, rhd_client_t *c)
 	RSS_INFO("%s %s from %s:%u", method, path,
 		 client_addr_str(&c->addr, addrstr, sizeof(addrstr)), client_port(&c->addr));
 
-	if (strcmp(method, "GET") != 0) {
-		http_error(c, "405 Method Not Allowed", "GET only");
+	if (!http_check_auth(srv, c->recv_buf)) {
+		http_401(c);
 		return;
 	}
 
-	if (!http_check_auth(srv, c->recv_buf)) {
-		http_401(c);
+	/* The configuration route, which is the only thing here that is not a
+	 * GET. It answers from a worker rather than from this call. */
+	if (rhd_api_handle(srv, c, method, path))
+		return;
+
+	if (strcmp(method, "GET") != 0) {
+		http_error(c, "405 Method Not Allowed", "GET only");
 		return;
 	}
 
@@ -795,8 +802,14 @@ static void server_run(rhd_server_t *srv)
 			}
 		}
 
-		int timeout =
-			(has_mjpeg_clients || has_audio_clients || has_snap_pending) ? 50 : 500;
+		/* Hand back the round trips that finished while we were in
+		 * epoll_wait. */
+		rhd_api_poll(srv);
+
+		int timeout = (has_mjpeg_clients || has_audio_clients || has_snap_pending ||
+			       rhd_api_waiting(srv))
+				      ? 50
+				      : 500;
 		int n = epoll_wait(srv->epoll_fd, events, 16, timeout);
 
 		for (int i = 0; i < n; i++) {
@@ -911,13 +924,14 @@ static void server_run(rhd_server_t *srv)
 			 * pipelined request that cannot be answered or noise, and
 			 * acting on it would re-park with a new deadline.
 			 */
-			if (strstr(c->recv_buf, "\r\n\r\n") && !c->snap_pending) {
+			if (strstr(c->recv_buf, "\r\n\r\n") && !c->snap_pending &&
+			    rhd_request_complete(c->recv_buf, c->recv_len)) {
 				handle_request(srv, c);
 				/* Close non-streaming, non-async connections. A
 				 * parked snapshot has neither a send buffer nor a
 				 * stream yet, and must outlive this pass. */
 				if (!c->is_mjpeg && !c->is_audio && !c->send_buf &&
-				    !c->snap_pending)
+				    !c->snap_pending && !c->api_job)
 					remove_client(srv, ci);
 			}
 		}
@@ -1051,6 +1065,11 @@ int main(int argc, char **argv)
 			srv.sign_ok = true;
 	}
 
+	/* The configuration API. On by default: it is what serves the console,
+	 * and a camera whose settings page does nothing is not a safer camera,
+	 * only a more confusing one. */
+	srv.api_enabled = rss_config_get_bool(ctx.cfg, "http", "api_enabled", true);
+
 	/* Basic auth — enabled when both username and password are set */
 	const char *http_user = rss_config_get_str(ctx.cfg, "http", "username", "");
 	const char *http_pass = rss_config_get_str(ctx.cfg, "http", "password", "");
@@ -1058,6 +1077,13 @@ int main(int argc, char **argv)
 		rss_strlcpy(srv.auth_user, http_user, sizeof(srv.auth_user));
 		rss_strlcpy(srv.auth_pass, http_pass, sizeof(srv.auth_pass));
 		RSS_INFO("HTTP Basic auth enabled");
+	} else if (srv.api_enabled) {
+		/* Worth saying out loud: with no account set, anything that can
+		 * reach this port can change the camera's configuration. The
+		 * snapshot and MJPEG endpoints are already open on the same
+		 * terms, so this is not a new door -- but it is a wider one. */
+		RSS_WARN("configuration api served without authentication -- "
+			 "set [http] username and password");
 	}
 
 #ifdef RSS_HAS_TLS

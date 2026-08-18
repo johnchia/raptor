@@ -240,6 +240,24 @@ static void err_choices(char *err, size_t errsz, const char *key, const char *co
 }
 
 /*
+ * A labelled integer given by name. Refused with the same code and the same
+ * list a V_ENUM would produce, so a client that does not distinguish the two
+ * still gets an error it can act on.
+ */
+static const char *label_to_num(const rcd_key_t *k, const char *given, double *out, char *err,
+				size_t errsz)
+{
+	for (int i = 0; k->choices[i]; i++) {
+		if (strcmp(given, k->choices[i]) == 0) {
+			*out = (double)(k->min + i);
+			return NULL;
+		}
+	}
+	err_choices(err, errsz, k->key, k->choices);
+	return RCD_E_CHOICE;
+}
+
+/*
  * A whole JSON number within [min,max].
  *
  * The order matters: the range is checked while the value is still a double,
@@ -319,7 +337,13 @@ static const char *render(const rcd_key_t *k, const cJSON *v, rcd_edit_t *e, cha
 
 	if (k->type == V_INT) {
 		double d;
-		const char *code = check_int(v, k->key, k->min, k->max, &d, err, errsz);
+		const char *code;
+		/* A labelled integer accepts the label as well as the number:
+		 * the number is what gets written either way. */
+		if (k->choices && cJSON_IsString(v) && v->valuestring)
+			code = label_to_num(k, v->valuestring, &d, err, errsz);
+		else
+			code = check_int(v, k->key, k->min, k->max, &d, err, errsz);
 		if (code)
 			return code;
 		snprintf(e->rendered, sizeof(e->rendered), "%d", (int)d);

@@ -90,6 +90,16 @@ typedef enum {
 } rcd_val_type_t;
 
 /*
+ * A V_INT may still carry `choices`, and then it is a labelled integer: an
+ * anti-flicker mode or an H.264 profile is a name, not a magnitude, and a
+ * client given a bare 0-2 can only draw a slider over it.
+ *
+ * They are not V_ENUM because a V_ENUM writes its spelling, and every one of
+ * these keys is read back with rss_config_get_int. The label is what a client
+ * shows and may send; the number is what is stored.
+ */
+
+/*
  * One writable key.
  *
  * `live_cmd` is the whole tiering. A key that names one is applied to the
@@ -105,7 +115,8 @@ typedef struct rcd_key {
 	const char *key;
 	rcd_val_type_t type;
 	int min, max;		    /* V_INT range; V_CRED length, min 0 */
-	const char *const *choices; /* V_ENUM, NULL-terminated */
+	const char *const *choices; /* V_ENUM values, or V_INT labels for
+				     * min+i; NULL-terminated */
 	const char *live_cmd;	    /* NULL: restart tier */
 	const char *live_arg;	    /* field name the live command expects */
 	int live_chn;		    /* channel the command needs, or -1 */

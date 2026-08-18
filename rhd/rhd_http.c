@@ -123,15 +123,23 @@ void http_send_fd(int fd, const char *status, const char *content_type, const vo
 int http_send_async(rhd_client_t *c, int epoll_fd, const char *content_type, const void *body,
 		    uint32_t body_len)
 {
+	return http_send_async_ex(c, epoll_fd, content_type, body, body_len, true);
+}
+
+int http_send_async_ex(rhd_client_t *c, int epoll_fd, const char *content_type, const void *body,
+		       uint32_t body_len, bool cors)
+{
 	char header[512];
-	int hlen = snprintf(header, sizeof(header),
-			    "HTTP/1.1 200 OK\r\n"
-			    "Content-Type: %s\r\n"
-			    "Content-Length: %u\r\n"
-			    "Connection: close\r\n"
-			    "Access-Control-Allow-Origin: *\r\n"
-			    "\r\n",
-			    content_type, body_len);
+	int hlen =
+		snprintf(header, sizeof(header),
+			 "HTTP/1.1 200 OK\r\n"
+			 "Content-Type: %s\r\n"
+			 "Content-Length: %u\r\n"
+			 "Connection: close\r\n"
+			 "Cache-Control: no-store\r\n"
+			 "%s"
+			 "\r\n",
+			 content_type, body_len, cors ? "Access-Control-Allow-Origin: *\r\n" : "");
 
 	if (hlen < 0)
 		return -1;

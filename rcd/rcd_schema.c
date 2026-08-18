@@ -131,6 +131,21 @@ static const char *const choices_trigger[] = {"luma", "gain", "adc", "photo", NU
 static const char *const choices_algorithm[] = {"move", "base_move", "persondet", "yolo", NULL};
 static const char *const choices_recmode[] = {"continuous", "motion", "both", NULL};
 
+/*
+ * Integer keys whose values are names rather than magnitudes.
+ *
+ * The array labels the value `min + i` and is display only: what reaches the
+ * file is still the number, because rvd and rmr read these with
+ * rss_config_get_int, whose strtol answers a spelled-out value by returning
+ * the default. Writing "baseline" would therefore select High, silently and
+ * only on the next start. A name is accepted on input and mapped here, so a
+ * caller may send either the number or the name and the file is the same
+ * either way.
+ */
+static const char *const labels_antiflicker[] = {"off", "50hz", "60hz", NULL};
+static const char *const labels_profile[] = {"baseline", "main", "high", NULL};
+static const char *const labels_recstream[] = {"main", "sub", NULL};
+
 /* Mirrors rvd's rc_map (rvd_ctrl.c). rvd silently falls back to CBR for a name
  * it does not know, so a typo would otherwise change the rate control without
  * saying so -- refusing here is what makes that visible. */
@@ -162,7 +177,7 @@ static const char *const choices_threshold[] = {
 static const rcd_key_t keys[] = {
 	/* -- Sensor -- */
 	{"sensor", "fps", V_INT, 1, 120, NULL, SAVED},
-	{"sensor", "antiflicker", V_INT, 0, 2, NULL, SAVED},
+	{"sensor", "antiflicker", V_INT, 0, 2, labels_antiflicker, SAVED},
 
 	/*
 	 * -- Video. Resolution is the reason the restart tier exists at all:
@@ -173,7 +188,7 @@ static const rcd_key_t keys[] = {
 	{"stream0", "width", V_INT, 160, 4096, NULL, SAVED},
 	{"stream0", "height", V_INT, 120, 4096, NULL, SAVED},
 	{"stream0", "codec", V_ENUM, 0, 0, choices_vcodec, SAVED},
-	{"stream0", "profile", V_INT, 0, 2, NULL, SAVED},
+	{"stream0", "profile", V_INT, 0, 2, labels_profile, SAVED},
 	{"stream0", "bitrate", V_INT, 32000, 50000000, NULL, LIVE_CH("set-bitrate", 0)},
 	{"stream0", "gop", V_INT, 1, 300, NULL, LIVE_CH("set-gop", 0)},
 	{"stream0", "fps", V_INT, 1, 120, NULL, LIVE_CH("set-fps", 0)},
@@ -183,7 +198,7 @@ static const rcd_key_t keys[] = {
 	{"stream1", "width", V_INT, 160, 4096, NULL, SAVED},
 	{"stream1", "height", V_INT, 120, 4096, NULL, SAVED},
 	{"stream1", "codec", V_ENUM, 0, 0, choices_vcodec, SAVED},
-	{"stream1", "profile", V_INT, 0, 2, NULL, SAVED},
+	{"stream1", "profile", V_INT, 0, 2, labels_profile, SAVED},
 	{"stream1", "bitrate", V_INT, 32000, 50000000, NULL, LIVE_CH("set-bitrate", 1)},
 	{"stream1", "gop", V_INT, 1, 300, NULL, LIVE_CH("set-gop", 1)},
 	{"stream1", "fps", V_INT, 1, 120, NULL, LIVE_CH("set-fps", 1)},
@@ -316,7 +331,7 @@ static const rcd_key_t keys[] = {
 	 *    which also keeps the write path away from the filesystem. -- */
 	{"recording", "enabled", V_BOOL, 0, 0, NULL, SAVED},
 	{"recording", "mode", V_ENUM, 0, 0, choices_recmode, SAVED},
-	{"recording", "stream", V_INT, 0, 1, NULL, SAVED},
+	{"recording", "stream", V_INT, 0, 1, labels_recstream, SAVED},
 	{"recording", "audio", V_BOOL, 0, 0, NULL, SAVED},
 	{"recording", "segment_minutes", V_INT, 1, 1440, NULL, SAVED},
 	{"recording", "max_storage_mb", V_INT, 0, 1000000, NULL, SAVED},
@@ -457,6 +472,13 @@ static void emit_choices(cJSON *o, const char *const *choices)
 		cJSON_AddItemToArray(a, cJSON_CreateString(choices[i]));
 }
 
+static void emit_labels(cJSON *o, const char *const *labels)
+{
+	cJSON *a = cJSON_AddArrayToObject(o, "labels");
+	for (int i = 0; a && labels[i]; i++)
+		cJSON_AddItemToArray(a, cJSON_CreateString(labels[i]));
+}
+
 static void emit_key(cJSON *arr, const rcd_key_t *k)
 {
 	cJSON *o = cJSON_CreateObject();
@@ -470,6 +492,11 @@ static void emit_key(cJSON *arr, const rcd_key_t *k)
 	if (k->type == V_INT) {
 		cJSON_AddNumberToObject(o, "min", k->min);
 		cJSON_AddNumberToObject(o, "max", k->max);
+		/* Named values, when the number means nothing on its own.
+		 * Additive: a client that ignores this still renders the key
+		 * correctly, as a number within the range above. */
+		if (k->choices)
+			emit_labels(o, k->choices);
 	} else if (k->type == V_CRED) {
 		cJSON_AddNumberToObject(o, "max_length", k->max);
 	} else if (k->type == V_ENUM) {

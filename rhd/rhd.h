@@ -31,7 +31,7 @@
 #define RHD_CODEC_OPUS	    111
 
 #define RHD_MAX_CLIENTS	    8
-#define RHD_RECV_BUF	    4096
+#define RHD_RECV_BUF	    8192
 #define RHD_MJPEG_BOUNDARY  "raptorframe"
 #define RHD_SEND_TIMEOUT_MS 3000 /* max time to drain a one-shot response */
 #define RHD_SNAP_TIMEOUT_MS 5000 /* max wait for a JPEG encoder to produce a fresh frame */
@@ -102,6 +102,12 @@ typedef struct {
 	rss_tls_ctx_t *srv_tls; /* server TLS context for lazy handshake */
 #endif
 
+	/*
+	 * In-flight POST /api/v1/rcd, or NULL. Opaque here: the job is shared
+	 * with a worker thread and only rhd_api.c may touch its insides.
+	 */
+	void *api_job;
+
 	/* Send queue (streaming clients only) */
 	rhd_sendq_t sendq;
 	pthread_t send_tid;
@@ -151,6 +157,8 @@ typedef struct {
 	char auth_user[128];
 	char auth_pass[128];
 
+	bool api_enabled; /* serve POST /api/v1/rcd */
+
 #ifdef RSS_HAS_TLS
 	rss_tls_ctx_t *tls;
 #endif
@@ -170,6 +178,10 @@ void http_send_fd(int fd, const char *status, const char *content_type, const vo
 		  int body_len);
 int http_send_async(rhd_client_t *c, int epoll_fd, const char *content_type, const void *body,
 		    uint32_t body_len);
+/* As above, with the cross-origin header made a choice. A snapshot is meant to
+ * be embeddable anywhere; a configuration reply is not. */
+int http_send_async_ex(rhd_client_t *c, int epoll_fd, const char *content_type, const void *body,
+		       uint32_t body_len, bool cors);
 void http_error(rhd_client_t *c, const char *status, const char *msg);
 void http_401(rhd_client_t *c);
 bool http_check_auth(const rhd_server_t *srv, const char *request);

@@ -519,6 +519,133 @@ TEST impact_separates_the_pipeline_from_the_stream(void)
 }
 
 /* One request is a form, not a section tree. */
+/* ------------------------------------------------------------------ */
+/* Labelled integers                                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A profile or an anti-flicker mode is a name, and a client handed a bare
+ * 0-2 can only draw a slider over it. The table carries the names, and the
+ * number is still what is written -- rvd and rmr read these back with
+ * rss_config_get_int, so a spelled-out value would come back as the default.
+ */
+TEST labelled_integers_are_written_as_numbers(void)
+{
+	rcd_edit_t e[RCD_EDITS_MAX];
+	int n;
+
+	ASSERT_SET_OK("{\"section\":\"stream0\",\"key\":\"profile\",\"value\":\"high\"}", e, &n);
+	ASSERT_EQ(1, n);
+	ASSERT_STR_EQ("2", e[0].rendered);
+
+	ASSERT_SET_OK("{\"section\":\"stream0\",\"key\":\"profile\",\"value\":\"baseline\"}", e,
+		      &n);
+	ASSERT_STR_EQ("0", e[0].rendered);
+
+	ASSERT_SET_OK("{\"section\":\"sensor\",\"key\":\"antiflicker\",\"value\":\"60hz\"}", e, &n);
+	ASSERT_STR_EQ("2", e[0].rendered);
+
+	ASSERT_SET_OK("{\"section\":\"recording\",\"key\":\"stream\",\"value\":\"sub\"}", e, &n);
+	ASSERT_STR_EQ("1", e[0].rendered);
+	PASS();
+}
+
+/* The number still works: a client that ignores the labels is not broken by
+ * their arrival, which is what makes adding them a compatible change. */
+TEST labelled_integers_still_take_the_number(void)
+{
+	rcd_edit_t e[RCD_EDITS_MAX];
+	int n;
+
+	ASSERT_SET_OK("{\"section\":\"stream0\",\"key\":\"profile\",\"value\":2}", e, &n);
+	ASSERT_STR_EQ("2", e[0].rendered);
+	ASSERT_SET_OK("{\"section\":\"sensor\",\"key\":\"antiflicker\",\"value\":0}", e, &n);
+	ASSERT_STR_EQ("0", e[0].rendered);
+	PASS();
+}
+
+/* An unknown name is a choice refusal, not a type one, and the range still
+ * bounds the number. */
+TEST labelled_integers_refuse_anything_else(void)
+{
+	ASSERT_SET_REFUSED("{\"section\":\"stream0\",\"key\":\"profile\",\"value\":\"extended\"}");
+	ASSERT_STR_EQ(RCD_E_CHOICE, code);
+	ASSERT_SET_REFUSED("{\"section\":\"sensor\",\"key\":\"antiflicker\",\"value\":\"50\"}");
+	ASSERT_STR_EQ(RCD_E_CHOICE, code);
+	ASSERT_SET_REFUSED("{\"section\":\"stream0\",\"key\":\"profile\",\"value\":3}");
+	ASSERT_STR_EQ(RCD_E_RANGE, code);
+	PASS();
+}
+
+/*
+ * An unlabelled integer must keep refusing a string, or every numeric key
+ * would start accepting quoted values by accident.
+ */
+TEST unlabelled_integers_still_refuse_a_string(void)
+{
+	ASSERT_SET_REFUSED("{\"section\":\"jpeg\",\"key\":\"quality\",\"value\":\"80\"}");
+	ASSERT_STR_EQ(RCD_E_TYPE, code);
+	PASS();
+}
+
+/* Every label array must cover exactly the key's range, or a value in the
+ * middle of it would have no name and a client would render a gap. */
+TEST every_label_array_spans_its_range(void)
+{
+	for (int i = 0;; i++) {
+		const rcd_key_t *k = rcd_key_at(i);
+		if (!k)
+			break;
+		if (k->type != V_INT || !k->choices)
+			continue;
+		int n = 0;
+		while (k->choices[n])
+			n++;
+		ASSERT_EQm(k->key, k->max - k->min + 1, n);
+	}
+	PASS();
+}
+
+/*
+ * The labels reach the wire, and only where there are any. A client renders
+ * this key as named choices and every other integer as a number, without
+ * being told which is which anywhere but here.
+ */
+TEST schema_carries_the_labels(void)
+{
+	cJSON *out = cJSON_CreateObject();
+	rcd_schema_emit(out, NULL);
+	const cJSON *keys = cJSON_GetObjectItemCaseSensitive(out, "keys");
+	ASSERT(cJSON_IsArray(keys));
+
+	int checked = 0;
+	const cJSON *k = NULL;
+	cJSON_ArrayForEach(k, keys)
+	{
+		const cJSON *sec = cJSON_GetObjectItemCaseSensitive(k, "section");
+		const cJSON *key = cJSON_GetObjectItemCaseSensitive(k, "key");
+		const cJSON *lab = cJSON_GetObjectItemCaseSensitive(k, "labels");
+		if (!cJSON_IsString(sec) || !cJSON_IsString(key))
+			continue;
+		if (strcmp(sec->valuestring, "stream0") == 0 &&
+		    strcmp(key->valuestring, "profile") == 0) {
+			ASSERT(cJSON_IsArray(lab));
+			ASSERT_EQ(3, cJSON_GetArraySize(lab));
+			ASSERT_STR_EQ("baseline", cJSON_GetArrayItem(lab, 0)->valuestring);
+			ASSERT_STR_EQ("high", cJSON_GetArrayItem(lab, 2)->valuestring);
+			checked++;
+		}
+		if (strcmp(sec->valuestring, "jpeg") == 0 &&
+		    strcmp(key->valuestring, "quality") == 0) {
+			ASSERT_EQ(NULL, lab);
+			checked++;
+		}
+	}
+	ASSERT_EQ(2, checked);
+	cJSON_Delete(out);
+	PASS();
+}
+
 TEST refuses_more_edits_than_a_request_may_carry(void)
 {
 	char json[8192];
@@ -597,6 +724,12 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(channelled_keys_carry_their_own_channel);
 	RUN_TEST(every_writable_key_has_an_owner);
 	RUN_TEST(impact_separates_the_pipeline_from_the_stream);
+	RUN_TEST(schema_carries_the_labels);
+	RUN_TEST(labelled_integers_are_written_as_numbers);
+	RUN_TEST(labelled_integers_still_take_the_number);
+	RUN_TEST(labelled_integers_refuse_anything_else);
+	RUN_TEST(unlabelled_integers_still_refuse_a_string);
+	RUN_TEST(every_label_array_spans_its_range);
 	RUN_TEST(refuses_more_edits_than_a_request_may_carry);
 
 	RUN_TEST(every_refusal_explains_itself);

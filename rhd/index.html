@@ -1,8 +1,1000 @@
-<html><head><title>Raptor</title></head>
-<body style="background:#1a1a1a;color:#ccc;font-family:sans-serif;margin:20px">
-<h3 style="color:#fff">Raptor</h3>
-<a style="color:#6af" href="/snap.jpg">Snapshot (main)</a> |
-<a style="color:#6af" href="/snap.jpg?stream=1">Snapshot (sub)</a> |
-<a style="color:#6af" href="/mjpeg">MJPEG Stream</a><br><br>
-<img src="/mjpeg" style="max-width:100%;border:1px solid #333">
-</body></html>
+<!DOCTYPE html>
+<!--
+  Raptor camera console.
+
+  rcd serves a flat array of typed keys and nothing else: no grouping, no
+  wording, no layout. All of that is here, in the browser, where it costs the
+  camera no flash and can be reworded without reflashing anything. A key this
+  page has no entry for is not lost -- it falls through to a name derived from
+  the key and a control picked from its type and range -- so the schema can
+  grow without this file being touched first.
+
+  rhd carries the request and does not read it. Every exchange below is one
+  POST /api/v1/rcd whose body is an rcd request and whose reply is rcd's, so
+  nothing on the HTTP path holds a second copy of the key table.
+
+  Self-contained on purpose: no font host, no CDN, no external anything. The
+  camera is often on a network with no route off it.
+-->
+<title>Raptor</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{
+  --ground:#0d1012; --panel:#161a1d; --raise:#1e2428; --sink:#0a0d0e;
+  --line:#2a3135; --line-soft:#20262a;
+  --ink:#dde4e7; --ink-dim:#8d9aa1; --ink-faint:#5f6d74;
+  --accent:#35b7c2; --accent-dim:#1d6b72;
+  --red:#e2574c; --amber:#dfa33c; --steel:#7a8b95; --ok:#5aa87f;
+  --ui:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace;
+  --r:3px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--ui);
+     font-size:14px;line-height:1.5;-webkit-text-size-adjust:100%}
+button,input,select{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+code{font-family:var(--mono)}
+
+.app{display:grid;grid-template-columns:360px minmax(0,1fr);min-height:100vh}
+.rail{background:var(--panel);border-right:1px solid var(--line);display:flex;
+      flex-direction:column;position:sticky;top:0;height:100vh;overflow:hidden}
+main{display:flex;flex-direction:column;min-width:0;min-height:100vh}
+
+.brand{padding:15px 18px 13px;border-bottom:1px solid var(--line);display:flex;
+       align-items:baseline;gap:9px}
+.brand h1{margin:0;font-size:18px;font-weight:600;letter-spacing:.14em;text-transform:uppercase}
+.brand .host{font-family:var(--mono);font-size:11px;color:var(--ink-faint);margin-left:auto;
+             overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.preview{padding:14px 14px 12px;border-bottom:1px solid var(--line)}
+.screen{position:relative;background:#000;border:1px solid var(--line);aspect-ratio:16/9;
+        overflow:hidden;display:grid;place-items:center}
+.screen img{width:100%;height:100%;object-fit:contain;display:block}
+.screen .tag{position:absolute;font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;
+             padding:2px 5px;background:rgba(8,11,12,.72);color:#c3ced3}
+.screen .tag.tl{top:6px;left:6px}
+.screen .tag.tr{top:6px;right:6px;color:var(--accent)}
+.screen .curtain{position:absolute;inset:0;background:rgba(6,8,9,.92);display:none;
+                 place-items:center;font-size:12px;letter-spacing:.16em;text-transform:uppercase;
+                 color:var(--amber);text-align:center;padding:12px}
+.screen.busy .curtain{display:grid}
+.screen .fallback{color:var(--ink-faint);font-size:12px;padding:14px;text-align:center;display:none}
+.screen.noimg img{display:none}
+.screen.noimg .fallback{display:block}
+
+.status{padding:12px 18px;border-bottom:1px solid var(--line);display:grid;
+        grid-template-columns:1fr 1fr;gap:8px 14px}
+.stat .k{font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-faint);
+         display:block}
+.stat .v{font-family:var(--mono);font-size:12.5px;font-variant-numeric:tabular-nums;
+         word-break:break-word}
+.stat .v.good{color:var(--ok)}
+.stat .v.bad{color:var(--amber)}
+
+.wire{flex:1;min-height:0;display:flex;flex-direction:column}
+.wire h2{margin:0;padding:11px 18px 8px;font-size:10.5px;letter-spacing:.15em;
+         text-transform:uppercase;color:var(--ink-faint);display:flex;gap:8px;align-items:baseline}
+.wire h2 .sub{font-family:var(--mono);font-size:10px;letter-spacing:0;text-transform:none;
+              opacity:.75}
+.wirelog{flex:1;min-height:0;overflow-y:auto;padding:0 14px 16px;font-family:var(--mono);
+         font-size:11px;line-height:1.55;display:flex;flex-direction:column-reverse;gap:2px}
+.wirelog div{white-space:pre-wrap;word-break:break-word;color:var(--ink-dim)}
+.wirelog .tx{color:var(--accent)}
+.wirelog .sys{color:var(--ink-faint);font-style:italic}
+.wirelog .err{color:var(--red)}
+
+.topbar{border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:5}
+.tabs{display:flex;overflow-x:auto}
+.tab{background:none;border:0;border-bottom:2px solid transparent;padding:15px 20px 13px;
+     font-size:12.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);
+     cursor:pointer;white-space:nowrap;position:relative}
+.tab:hover{color:var(--ink-dim)}
+.tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+.tab .cnt{font-family:var(--mono);font-size:10px;letter-spacing:0;margin-left:7px;
+          color:var(--ink-faint)}
+.tab .dot{position:absolute;top:11px;right:9px;width:5px;height:5px;border-radius:50%;
+          background:var(--amber);display:none}
+.tab.has-dirty .dot{display:block}
+
+.sheet{flex:1;overflow-y:auto;padding:24px 30px 40px}
+.sheet-in{max-width:940px}
+.banner{border:1px solid var(--red);background:rgba(226,87,76,.08);border-radius:var(--r);
+        padding:14px 16px;margin:0 0 22px;font-size:13px;color:var(--ink)}
+.banner b{display:block;margin-bottom:5px;letter-spacing:.06em;text-transform:uppercase;
+          font-size:11.5px;color:var(--red)}
+.banner code{font-size:12px;color:var(--ink-dim)}
+
+.group{margin:0 0 28px;border:1px solid var(--line-soft);background:var(--panel);
+       border-radius:var(--r)}
+.group>h3{margin:0;padding:12px 18px;border-bottom:1px solid var(--line-soft);font-size:11.5px;
+          letter-spacing:.15em;text-transform:uppercase;display:flex;align-items:center;gap:10px}
+.group>h3 .owner{font-family:var(--mono);font-size:10.5px;letter-spacing:0;text-transform:none;
+                 color:var(--ink-faint);margin-left:auto}
+.group>h3 .note{font-size:11.5px;letter-spacing:0;text-transform:none;color:var(--ink-faint);
+                font-weight:400}
+
+.row{display:grid;grid-template-columns:minmax(0,1fr) 268px 104px;gap:18px;align-items:start;
+     padding:12px 18px;border-bottom:1px solid var(--line-soft)}
+.row:last-child{border-bottom:0}
+.row.dirty{background:rgba(223,163,60,.05);box-shadow:inset 3px 0 0 var(--amber)}
+.row.flash{animation:flash .5s ease}
+@keyframes flash{from{background:rgba(53,183,194,.14)}to{background:transparent}}
+@media (prefers-reduced-motion:reduce){.row.flash{animation:none}}
+.lab .name{display:block;font-size:13.5px}
+.lab .id{display:block;font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);margin-top:1px}
+.lab .help{margin:5px 0 0;font-size:12px;color:var(--ink-dim);max-width:52ch;line-height:1.45}
+.ctl{display:flex;flex-direction:column;gap:5px}
+.mark{display:flex;flex-direction:column;align-items:flex-end;gap:5px;padding-top:2px}
+
+.chip{font-size:10px;letter-spacing:.11em;text-transform:uppercase;padding:2px 6px;
+      border:1px solid;border-radius:2px;white-space:nowrap}
+.chip.live{color:var(--accent);border-color:var(--accent-dim);background:rgba(53,183,194,.07)}
+.chip.service{color:var(--steel);border-color:#39464d}
+.chip.stream{color:var(--amber);border-color:#5a4525}
+.chip.pipeline{color:var(--red);border-color:#5e2b27}
+.row:not(.dirty) .chip.service,.row:not(.dirty) .chip.stream,
+.row:not(.dirty) .chip.pipeline{opacity:.42}
+.readback{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);text-align:right;
+          font-variant-numeric:tabular-nums}
+.readback b{color:var(--accent);font-weight:500}
+.readback.warn{color:var(--amber)}
+
+.sl{display:flex;align-items:center;gap:11px}
+input[type=range]{flex:1;-webkit-appearance:none;appearance:none;height:2px;background:var(--line);
+                  border-radius:2px}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;
+  border-radius:50%;background:var(--ink);border:0;cursor:pointer}
+input[type=range]::-moz-range-thumb{width:13px;height:13px;border-radius:50%;background:var(--ink);
+  border:0;cursor:pointer}
+.num{width:70px;text-align:right;background:var(--sink);border:1px solid var(--line);
+     border-radius:var(--r);padding:4px 7px;font-family:var(--mono);font-size:12px;
+     font-variant-numeric:tabular-nums}
+.num.wide{width:100%}
+.unit{font-family:var(--mono);font-size:11px;color:var(--ink-faint)}
+.numwrap{display:flex;align-items:center;gap:8px}
+select{background:var(--sink);border:1px solid var(--line);border-radius:var(--r);padding:5px 8px;
+       font-family:var(--mono);font-size:12px;width:100%}
+.seg{display:flex;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;
+     background:var(--sink);width:fit-content;max-width:100%;flex-wrap:wrap}
+.seg button{background:none;border:0;border-right:1px solid var(--line);padding:5px 11px;
+            font-family:var(--mono);font-size:11.5px;color:var(--ink-dim);cursor:pointer}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed="true"]{background:var(--raise);color:var(--ink)}
+.sw{display:inline-flex;align-items:center;gap:9px;cursor:pointer;user-select:none}
+.sw input{position:absolute;opacity:0;width:0;height:0}
+.sw .track{width:34px;height:18px;border-radius:9px;background:var(--sink);
+           border:1px solid var(--line);position:relative;transition:background .13s}
+.sw .track::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;
+                  border-radius:50%;background:var(--ink-faint);transition:transform .13s}
+.sw input:checked+.track{background:var(--accent-dim);border-color:var(--accent-dim)}
+.sw input:checked+.track::after{transform:translateX(16px);background:var(--ink)}
+.sw .lbl{font-family:var(--mono);font-size:11.5px;color:var(--ink-dim)}
+.cred{display:flex;gap:8px;align-items:center}
+.cred input{flex:1;background:var(--sink);border:1px solid var(--line);border-radius:var(--r);
+            padding:5px 8px;font-family:var(--mono);font-size:12px;min-width:0}
+.cred .state{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint)}
+
+.matrix{width:100%;border-collapse:collapse}
+.matrix th,.matrix td{padding:10px 14px;border-bottom:1px solid var(--line-soft);text-align:left;
+                      vertical-align:middle}
+.matrix thead th{font-size:11px;letter-spacing:.13em;text-transform:uppercase;
+                 color:var(--ink-faint);font-weight:500}
+.matrix thead th .res{font-family:var(--mono);font-size:10.5px;letter-spacing:0;
+                      text-transform:none;display:block;margin-top:2px}
+.matrix tbody tr:last-child td{border-bottom:0}
+.matrix td.k{width:230px}
+.matrix td.k .id{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint)}
+.matrix td.cell.dirty{background:rgba(223,163,60,.05);box-shadow:inset 3px 0 0 var(--amber)}
+.matrix td.cell.flash{animation:flash .5s ease}
+.cellbox{display:flex;flex-direction:column;gap:5px}
+.cellfoot{display:flex;justify-content:space-between;align-items:center;gap:8px}
+
+.acts{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:14px 18px}
+.btn{background:var(--raise);border:1px solid var(--line);border-radius:var(--r);padding:7px 14px;
+     font-size:12.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-dim);
+     cursor:pointer}
+.btn:hover:not(:disabled){color:var(--ink);border-color:#3a444a}
+.btn.on{color:var(--accent);border-color:var(--accent-dim)}
+.btn:disabled{opacity:.4;cursor:default}
+.btn.primary{background:var(--accent-dim);border-color:var(--accent);color:#eaf7f8}
+.btn.danger{background:#5e2b27;border-color:var(--red);color:#ffe9e7}
+.btn.ghost{background:none}
+
+.applybar{position:sticky;bottom:0;background:var(--raise);border-top:1px solid var(--line);
+          padding:12px 30px;display:flex;align-items:center;gap:16px;z-index:6;
+          box-shadow:0 -8px 24px rgba(0,0,0,.35)}
+.applybar[hidden]{display:none}
+.applybar .lead{display:flex;flex-direction:column;gap:3px;min-width:0}
+.applybar .count{font-size:13px;letter-spacing:.09em;text-transform:uppercase}
+.applybar .cost{font-size:12px;color:var(--ink-dim)}
+.applybar .keys{display:flex;flex-wrap:wrap;gap:5px;max-width:40%}
+.applybar .keys code{font-size:10.5px;color:var(--ink-dim);border:1px solid var(--line-soft);
+                     border-radius:2px;padding:1px 5px}
+.applybar .sp{flex:1}
+
+.foot{margin:30px 0 0;padding-top:18px;border-top:1px solid var(--line-soft);font-size:12px;
+      color:var(--ink-faint);max-width:70ch;line-height:1.6}
+
+@media (max-width:1000px){
+  .app{grid-template-columns:1fr}
+  .rail{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
+  .wire{max-height:180px}
+  .row{grid-template-columns:1fr;gap:9px}
+  .mark{flex-direction:row;align-items:center}
+  .sheet{padding:18px 16px 30px}
+  .applybar{padding:12px 16px;flex-wrap:wrap}
+  .applybar .keys{display:none}
+}
+</style>
+
+<div class="app">
+  <aside class="rail">
+    <div class="brand"><h1>Raptor</h1><span class="host" id="host">…</span></div>
+
+    <div class="preview">
+      <div class="screen" id="screen">
+        <img id="cam" alt="Live preview">
+        <div class="fallback">No preview.<br>The JPEG encoder is off, or no stream is running.</div>
+        <span class="tag tl" id="tagL">preview</span>
+        <span class="tag tr" id="tagR">live</span>
+        <div class="curtain" id="curtain">restarting</div>
+      </div>
+    </div>
+
+    <div class="status" id="status"></div>
+
+    <div class="wire">
+      <h2>Wire <span class="sub">POST /api/v1/rcd</span></h2>
+      <div class="wirelog" id="log"></div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="topbar"><div class="tabs" id="tabs" role="tablist"></div></div>
+    <div class="sheet"><div class="sheet-in" id="sheet">Loading…</div></div>
+    <footer class="applybar" id="applybar" hidden>
+      <div class="lead">
+        <span class="count" id="apCount"></span>
+        <span class="cost" id="apCost"></span>
+      </div>
+      <div class="keys" id="apKeys"></div>
+      <div class="sp"></div>
+      <button class="btn ghost" id="btnRevert">Revert</button>
+      <button class="btn primary" id="btnApply">Apply</button>
+    </footer>
+  </main>
+</div>
+
+<script>
+"use strict";
+
+/* ═══ transport ══════════════════════════════════════════════════════════
+   One route, one shape. rhd forwards the body to rcd's socket and forwards
+   the answer back; it parses neither. */
+const API = "/api/v1/rcd";
+const logEl = document.getElementById("log");
+
+function wlog(cls, text) {
+  const d = document.createElement("div");
+  d.className = cls;
+  d.textContent = text.length > 400 ? text.slice(0, 400) + " …" : text;
+  logEl.prepend(d);
+  while (logEl.children.length > 60) logEl.lastChild.remove();
+}
+
+async function api(req, quiet) {
+  if (!quiet) wlog("tx", "→ " + JSON.stringify(req));
+  let res;
+  try {
+    res = await fetch(API, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(req)
+    });
+  } catch (e) {
+    throw new Error("no answer from the camera (" + e.message + ")");
+  }
+  if (res.status === 404) throw new Error("rhd has no " + API + " route");
+  if (!res.ok) throw new Error("HTTP " + res.status + " from rhd");
+  const body = await res.json();
+  if (!quiet) wlog(body.status === "ok" ? "rx" : "err", "← " + JSON.stringify(body));
+  if (body.status !== "ok") {
+    const e = new Error(body.reason || "refused");
+    e.code = body.code;
+    throw e;
+  }
+  return body;
+}
+
+/* ═══ presentation ═══════════════════════════════════════════════════════
+   Wording and grouping live here and nowhere on the camera. A key missing
+   from this map still renders -- see label() below. */
+const L = {
+ "sensor.fps":["Sensor frame rate","fps","The rate the sensor is driven at. Every stream is capped by it."],
+ "sensor.antiflicker":["Anti-flicker","","Locks exposure to the mains period so lighting does not band."],
+ "image.brightness":["Brightness"],"image.contrast":["Contrast"],
+ "image.saturation":["Colour saturation"],"image.sharpness":["Sharpness"],"image.hue":["Hue"],
+ "image.sinter":["Spatial noise reduction","","Smooths grain within a frame. High values cost fine detail."],
+ "image.temper":["Temporal noise reduction","","Averages across frames. High values smear anything moving."],
+ "image.ae_comp":["Exposure compensation","","Biases the auto-exposure target up or down."],
+ "image.max_again":["Maximum analogue gain","","How far auto-exposure may push sensor gain before giving up on light."],
+ "image.max_dgain":["Maximum digital gain"],
+ "image.dpc_strength":["Defective pixel correction"],
+ "image.drc_strength":["Dynamic range compression","","Lifts shadows in high-contrast scenes."],
+ "image.defog_strength":["Defog"],"image.highlight_depress":["Highlight suppression"],
+ "image.backlight_comp":["Backlight compensation"],
+ "image.hflip":["Mirror horizontally","","Some platforms take this at channel creation, and then it needs an apply."],
+ "image.vflip":["Flip vertically"],
+ "stream0.width":["Width","px"],"stream0.height":["Height","px"],
+ "stream0.codec":["Video codec","","H.265 halves the bitrate for the same picture; some clients cannot decode it."],
+ "stream0.profile":["H.264 profile"],"stream0.bitrate":["Bitrate","bps"],
+ "stream0.gop":["Keyframe interval","frames","Frames between keyframes. Lower joins faster and costs bandwidth."],
+ "stream0.fps":["Frame rate","fps"],"stream0.osd_enabled":["Burn in the overlay"],
+ "stream0.jpeg":["JPEG snapshots from this stream"],"stream1.enabled":["Second stream"],
+ "jpeg.enabled":["JPEG encoder"],"jpeg.quality":["Quality","","1 smallest · 100 best."],
+ "jpeg.fps":["Maximum rate","fps"],
+ "jpeg.idle":["Encode only when asked","","Saves the encoder when nobody is watching; the first snapshot then costs a frame."],
+ "audio.enabled":["Audio capture"],"audio.input":["Microphone"],
+ "audio.sample_rate":["Sample rate","Hz"],"audio.codec":["Audio codec"],
+ "audio.bitrate":["Bitrate","bps"],"audio.volume":["Input volume","%"],
+ "audio.gain":["Input gain","","Analogue stage, before the ADC. Too high clips."],
+ "audio.ao_volume":["Output volume","%"],"audio.ao_gain":["Output gain"],
+ "audio.aec_enabled":["Echo cancellation"],
+ "audio.hpf_enabled":["High-pass filter","","Cuts wind and handling rumble."],
+ "rtsp.enabled":["RTSP server"],"rtsp.port":["Port"],"rtsp.max_clients":["Maximum viewers"],
+ "rtsp.session_timeout":["Session timeout","s"],
+ "rtsp.idr_on_join":["Keyframe on join","","A new viewer sees picture at once; everyone else takes a bitrate spike."],
+ "rtsp.username":["Username"],"rtsp.password":["Password"],
+ "http.enabled":["Snapshot and MJPEG server"],"http.port":["Port"],
+ "http.max_clients":["Maximum viewers"],"http.username":["Username"],"http.password":["Password"],
+ "osd.enabled":["Overlay"],"osd.font_size":["Font size","px"],"osd.font_stroke":["Outline width","px"],
+ "ircut.enabled":["Day/night switching"],
+ "ircut.trigger":["Decide from","","What the camera watches to call nightfall."],
+ "ircut.pulse_ms":["Filter pulse","ms","How long the IR-cut solenoid is driven. Too short and it does not latch."],
+ "ircut.gpio_ircut":["IR-cut GPIO A"],"ircut.gpio_ircut2":["IR-cut GPIO B"],
+ "ircut.gpio_irled":["IR LED GPIO (850 nm)"],"ircut.gpio_irled2":["IR LED GPIO (940 nm)"],
+ "ircut.adc_channel":["ADC channel"],"ircut.adc_night":["ADC night threshold"],
+ "ircut.adc_day":["ADC day threshold"],"ircut.photo_ev_night":["Night EV"],
+ "ircut.photo_ev_deep":["Deep night EV"],"ircut.photo_ev_day":["Day EV"],
+ "ircut.photo_rgain_rec":["Red gain at recovery"],"ircut.photo_bgain_rec":["Blue gain at recovery"],
+ "motion.enabled":["Motion detection"],"motion.algorithm":["Algorithm"],
+ "motion.sensitivity":["Sensitivity","","0 least sensitive · 5 most."],
+ "motion.cooldown_sec":["Cooldown","s","Quiet period after an event before another can fire."],
+ "motion.record":["Record on motion"],"motion.record_post_sec":["Keep recording after","s"],
+ "recording.enabled":["Recording"],"recording.mode":["Mode"],
+ "recording.stream":["Record which stream"],"recording.audio":["Include audio"],
+ "recording.segment_minutes":["Segment length","min"],
+ "recording.max_storage_mb":["Storage cap","MB","Oldest segments are deleted first. 0 for no cap."],
+ "recording.prebuffer_sec":["Pre-roll","s","Seconds kept before the trigger, so an event is not missed."],
+ "timelapse.enabled":["Time-lapse"],"timelapse.interval":["Capture every","s"],
+ "timelapse.playback_fps":["Playback rate","fps"],"timelapse.max_mb":["Storage cap","MB"]
+};
+["width","height","codec","profile","bitrate","gop","fps","osd_enabled","jpeg"]
+  .forEach(k => { if (L["stream0." + k]) L["stream1." + k] = L["stream0." + k]; });
+
+const pretty = s => s.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
+const label = id => (L[id] && L[id][0]) || pretty(id.split(".").slice(1).join("."));
+const unit  = id => (L[id] && L[id][1]) || "";
+const help  = id => (L[id] && L[id][2]) || "";
+
+/* Which sections sit on which page, and in what order. Sections the schema
+ * reports that no tab claims are collected onto a final page, so a new one
+ * cannot go unreachable. */
+const TABS = [
+ {id:"image",   name:"Image",       groups:[{title:"Picture", section:"image"}]},
+ {id:"streams", name:"Streams",     groups:[{title:"Sensor", section:"sensor"},
+                                            {title:"Encoders", matrix:["stream0","stream1"]},
+                                            {title:"Snapshots", section:"jpeg"},
+                                            {title:"Actions", actions:["request-idr"]}]},
+ {id:"audio",   name:"Audio",       groups:[{title:"Audio", section:"audio"}]},
+ {id:"night",   name:"Day & night", groups:[{title:"Switching", section:"ircut"},
+                                            {title:"Manual override", actions:["ircut-mode","ir850","ir940"],
+                                             note:"Persists nothing — the next automatic transition takes it back."}]},
+ {id:"record",  name:"Recording",   groups:[{title:"Motion", section:"motion"},
+                                            {title:"Recording", section:"recording"},
+                                            {title:"Time-lapse", section:"timelapse"}]},
+ {id:"services",name:"Services",    groups:[{title:"RTSP", section:"rtsp"},
+                                            {title:"Snapshots & MJPEG", section:"http"},
+                                            {title:"Overlay", section:"osd"},
+                                            {title:"Overlay actions", actions:["osd-enable","osd-disable"]}]}
+];
+const ACTION_UI = {
+ "request-idr":{label:"Force a keyframe"},
+ "ircut-mode":{label:"Day / night", arg:"mode"},
+ "ir850":{label:"850 nm LEDs", arg:"value", toggle:true},
+ "ir940":{label:"940 nm LEDs", arg:"value", toggle:true},
+ "osd-enable":{label:"Show overlay"},
+ "osd-disable":{label:"Hide overlay"}
+};
+
+/* ═══ live model ═════════════════════════════════════════════════════════ */
+let KEYS = [];            /* the schema, as served */
+let ACTIONS = [];
+const byId = {};
+const V = {};             /* current value per key id */
+const SAVED = {};         /* last value known to be on disk */
+const CREDSET = {};
+const dirty = new Set();
+let active = TABS[0].id;
+let armed = false;
+
+const id_of = k => k.section + "." + k.key;
+
+/* ═══ widget choice — from the schema alone ══════════════════════════════ */
+function widgetFor(k) {
+  if (k.type === "bool") return "switch";
+  if (k.type === "credential") return "cred";
+  if (k.type === "enum") return (k.choices || []).length <= 4 ? "seg" : "select";
+  if (k.labels) return k.labels.length <= 4 ? "seg" : "select";
+  const span = k.max - k.min;
+  if (span === 1) return "switch";
+  if (span <= 4) return "seg";
+  if (span <= 1000) return "slider";
+  return "number";
+}
+const fmt = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+
+/* A labelled integer shows its name and is sent as its name; rcd maps it back
+ * to the number, which is what the file and the daemons want. */
+const labelOf = (k, v) => (k.labels && k.labels[v - k.min] !== undefined)
+  ? k.labels[v - k.min] : String(v);
+const valueOf = (k, name) => k.labels ? k.min + k.labels.indexOf(name) : name;
+
+/* ═══ committing ═════════════════════════════════════════════════════════ */
+async function commit(id, val, el) {
+  const k = byId[id];
+  const prev = V[id];
+  V[id] = val;
+
+  if (k.type === "credential") {
+    try {
+      await api({cmd:"credentials", section:k.section, key:k.key, value:val});
+      CREDSET[id] = true;
+      mark(el, "set");
+    } catch (e) { V[id] = prev; mark(el, e.message, true); }
+    return;
+  }
+
+  if (k.tier !== "live") {
+    if (JSON.stringify(val) === JSON.stringify(SAVED[id])) dirty.delete(id);
+    else dirty.add(id);
+    if (el) el.classList.toggle("dirty", dirty.has(id));
+    refreshBar();
+    return;
+  }
+
+  const wire = k.labels ? labelOf(k, val) : val;
+  try {
+    const r = await api({cmd:"set", edits:[{section:k.section, key:k.key, value:wire}]});
+    const res = (r.results || [])[0] || {};
+    /* The device's answer wins over what was typed: an ISP quantises, and a
+     * live command that was refused falls back to the file and says so. */
+    if (res.value !== undefined && res.value !== null) {
+      V[id] = k.labels && typeof res.value === "string" ? valueOf(k, res.value) : res.value;
+      syncControl(el, k, V[id]);
+    }
+    if (res.applied === "saved") {
+      dirty.add(id);
+      if (el) el.classList.add("dirty");
+      mark(el, res.note || "saved — needs apply", true);
+      refreshBar();
+    } else {
+      mark(el, V[id] !== val ? "device " + labelOf(k, V[id]) : "applied", false, V[id] !== val);
+      if (el) { el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
+    }
+  } catch (e) {
+    V[id] = prev;
+    syncControl(el, k, prev);
+    mark(el, e.message, true);
+  }
+}
+
+function mark(el, text, warn, bold) {
+  if (!el) return;
+  const rb = el.querySelector(".readback");
+  if (!rb) return;
+  rb.classList.toggle("warn", !!warn);
+  if (bold) { rb.innerHTML = ""; const b = document.createElement("b"); b.textContent = text; rb.append(b); }
+  else rb.textContent = text;
+}
+function syncControl(el, k, val) {
+  if (!el) return;
+  const sl = el.querySelector("input[type=range]");
+  if (sl) sl.value = val;
+  const nm = el.querySelector(".num");
+  if (nm) nm.value = val;
+}
+
+/* ═══ controls ═══════════════════════════════════════════════════════════ */
+function buildControl(id, onChange) {
+  const k = byId[id], w = widgetFor(k), wrap = document.createElement("div");
+  wrap.className = "ctl";
+  const u = unit(id);
+
+  if (w === "switch") {
+    const isInt = k.type === "int";
+    const lab = document.createElement("label"); lab.className = "sw";
+    const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = !!V[id];
+    const tr = document.createElement("span"); tr.className = "track";
+    const tx = document.createElement("span"); tx.className = "lbl";
+    tx.textContent = cb.checked ? "on" : "off";
+    cb.addEventListener("change", () => {
+      tx.textContent = cb.checked ? "on" : "off";
+      onChange(isInt ? (cb.checked ? 1 : 0) : cb.checked);
+    });
+    lab.append(cb, tr, tx); wrap.append(lab); return wrap;
+  }
+
+  if (w === "seg" || w === "select") {
+    const opts = k.type === "enum" ? (k.choices || [])
+               : k.labels ? k.labels
+               : Array.from({length: k.max - k.min + 1}, (_, i) => String(k.min + i));
+    const cur = k.type === "enum" ? V[id] : (k.labels ? labelOf(k, V[id]) : String(V[id]));
+    const send = o => onChange(k.type === "enum" ? o : (k.labels ? valueOf(k, o) : Number(o)));
+    if (w === "select") {
+      const s = document.createElement("select");
+      opts.forEach(o => {
+        const op = document.createElement("option"); op.value = op.textContent = o;
+        if (cur === o) op.selected = true; s.append(op);
+      });
+      s.addEventListener("change", () => send(s.value));
+      wrap.append(s); return wrap;
+    }
+    const seg = document.createElement("div"); seg.className = "seg";
+    opts.forEach(o => {
+      const b = document.createElement("button"); b.type = "button"; b.textContent = o;
+      b.setAttribute("aria-pressed", String(cur === o));
+      b.addEventListener("click", () => {
+        seg.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", "false"));
+        b.setAttribute("aria-pressed", "true");
+        send(o);
+      });
+      seg.append(b);
+    });
+    wrap.append(seg); return wrap;
+  }
+
+  if (w === "cred") {
+    const box = document.createElement("div"); box.className = "cred";
+    const inp = document.createElement("input");
+    inp.type = /password/.test(k.key) ? "password" : "text";
+    inp.placeholder = CREDSET[id] ? "unchanged" : "not set";
+    inp.autocomplete = "off";
+    const st = document.createElement("span"); st.className = "state";
+    st.textContent = CREDSET[id] ? "set" : "unset";
+    inp.addEventListener("change", () => { if (inp.value) onChange(inp.value); });
+    box.append(inp, st); wrap.append(box);
+    const n = document.createElement("span"); n.className = "unit";
+    n.textContent = "write-only · never read back";
+    wrap.append(n); return wrap;
+  }
+
+  if (w === "slider") {
+    const row = document.createElement("div"); row.className = "sl";
+    const sl = document.createElement("input"); sl.type = "range";
+    sl.min = k.min; sl.max = k.max; sl.value = V[id];
+    const nm = document.createElement("input"); nm.className = "num"; nm.type = "number";
+    nm.min = k.min; nm.max = k.max; nm.value = V[id];
+    sl.addEventListener("input", () => { nm.value = sl.value; });
+    sl.addEventListener("change", () => onChange(Number(sl.value)));
+    nm.addEventListener("change", () => { sl.value = nm.value; onChange(Number(nm.value)); });
+    row.append(sl, nm);
+    if (u) { const us = document.createElement("span"); us.className = "unit"; us.textContent = u; row.append(us); }
+    wrap.append(row);
+    const rng = document.createElement("span"); rng.className = "unit";
+    rng.textContent = k.min + "–" + k.max; wrap.append(rng);
+    return wrap;
+  }
+
+  const box = document.createElement("div"); box.className = "numwrap";
+  const nm = document.createElement("input"); nm.className = "num wide"; nm.type = "number";
+  nm.min = k.min; nm.max = k.max; nm.value = V[id];
+  const us = document.createElement("span"); us.className = "unit"; us.textContent = u;
+  nm.addEventListener("change", () => onChange(Number(nm.value)));
+  box.append(nm, us); wrap.append(box);
+  const hint = document.createElement("span"); hint.className = "unit";
+  hint.textContent = fmt(k.min) + " – " + fmt(k.max); wrap.append(hint);
+  return wrap;
+}
+
+const COST = {
+  none:"nothing is interrupted",
+  service:"nothing a viewer notices",
+  stream:"connected viewers are dropped",
+  pipeline:"capture stops, everything downstream reconnects"
+};
+function chip(k) {
+  const c = document.createElement("span");
+  if (k.tier === "live") { c.className = "chip live"; c.textContent = "live";
+    c.title = "Applied to " + k.owner + " the moment you change it"; }
+  else { c.className = "chip " + k.impact; c.textContent = k.impact;
+    c.title = "Needs " + k.owner + " restarted — " + COST[k.impact]; }
+  return c;
+}
+
+function buildRow(id) {
+  const k = byId[id];
+  const row = document.createElement("div"); row.className = "row"; row.dataset.id = id;
+  if (dirty.has(id)) row.classList.add("dirty");
+  const lab = document.createElement("div"); lab.className = "lab";
+  const nm = document.createElement("span"); nm.className = "name"; nm.textContent = label(id);
+  const idl = document.createElement("span"); idl.className = "id"; idl.textContent = id;
+  lab.append(nm, idl);
+  const h = help(id);
+  if (h) { const p = document.createElement("p"); p.className = "help"; p.textContent = h; lab.append(p); }
+  const ctl = buildControl(id, v => commit(id, v, row));
+  const mk = document.createElement("div"); mk.className = "mark";
+  mk.append(chip(k));
+  const rb = document.createElement("span"); rb.className = "readback"; mk.append(rb);
+  row.append(lab, ctl, mk);
+  return row;
+}
+
+/* Both encoders take the same keys, so they are one table with a column each
+ * rather than two lists of ten. */
+function buildMatrix(sections) {
+  const t = document.createElement("table"); t.className = "matrix";
+  const hr = document.createElement("tr"); hr.append(document.createElement("th"));
+  sections.forEach(s => {
+    const th = document.createElement("th");
+    th.append(document.createTextNode(s === sections[0] ? "Main" : "Sub"));
+    const res = document.createElement("span"); res.className = "res";
+    res.textContent = (V[s + ".width"] || "?") + "×" + (V[s + ".height"] || "?") + " · " + s;
+    th.append(res); hr.append(th);
+  });
+  const head = document.createElement("thead"); head.append(hr); t.append(head);
+
+  const body = document.createElement("tbody");
+  const keys = [];
+  KEYS.forEach(k => { if (sections.includes(k.section) && !keys.includes(k.key)) keys.push(k.key); });
+  keys.forEach(key => {
+    const tr = document.createElement("tr");
+    const kd = document.createElement("td"); kd.className = "k";
+    const anyId = sections.map(s => s + "." + key).find(i => byId[i]);
+    const nm = document.createElement("div"); nm.textContent = label(anyId);
+    const il = document.createElement("div"); il.className = "id"; il.textContent = "*." + key;
+    kd.append(nm, il); tr.append(kd);
+    sections.forEach(s => {
+      const id = s + "." + key, td = document.createElement("td"); td.className = "cell";
+      if (!byId[id]) { const u = document.createElement("span"); u.className = "unit";
+        u.textContent = "—"; td.append(u); tr.append(td); return; }
+      if (dirty.has(id)) td.classList.add("dirty");
+      const box = document.createElement("div"); box.className = "cellbox";
+      const foot = document.createElement("div"); foot.className = "cellfoot";
+      foot.append(chip(byId[id]));
+      const rb = document.createElement("span"); rb.className = "readback"; foot.append(rb);
+      box.append(buildControl(id, v => commit(id, v, td)), foot);
+      td.append(box); tr.append(td);
+    });
+    body.append(tr);
+  });
+  t.append(body); return t;
+}
+
+function buildActions(names) {
+  const box = document.createElement("div"); box.className = "acts";
+  names.forEach(n => {
+    const meta = ACTIONS.find(a => a.name === n);
+    if (!meta) return;                      /* the daemon does not offer it */
+    const ui = ACTION_UI[n] || {label: pretty(n)};
+    const arg = (meta.args || []).find(a => a.type === "enum");
+    if (arg && arg.choices && !ui.toggle) {
+      const lab = document.createElement("span"); lab.className = "unit"; lab.textContent = ui.label;
+      const seg = document.createElement("div"); seg.className = "seg";
+      arg.choices.forEach(c => {
+        const b = document.createElement("button"); b.type = "button"; b.textContent = c;
+        b.addEventListener("click", () => {
+          seg.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", "false"));
+          b.setAttribute("aria-pressed", "true");
+          fire(n, {[arg.key]: c});
+        });
+        seg.append(b);
+      });
+      box.append(lab, seg);
+    } else if (ui.toggle && arg) {
+      const b = document.createElement("button"); b.className = "btn"; b.textContent = ui.label;
+      let on = false;
+      b.addEventListener("click", () => {
+        on = !on; b.classList.toggle("on", on);
+        fire(n, {[arg.key]: on ? "on" : "off"});
+      });
+      box.append(b);
+    } else {
+      const b = document.createElement("button"); b.className = "btn"; b.textContent = ui.label;
+      b.addEventListener("click", () => fire(n, null));
+      box.append(b);
+    }
+  });
+  return box;
+}
+async function fire(name, args) {
+  try { await api(Object.assign({cmd:"action", name:name}, args || {})); }
+  catch (e) { wlog("err", "! " + name + ": " + e.message); }
+}
+
+/* ═══ render ═════════════════════════════════════════════════════════════ */
+function claimedSections() {
+  const s = [];
+  TABS.forEach(t => t.groups.forEach(g => {
+    if (g.matrix) s.push(...g.matrix); else if (g.section) s.push(g.section);
+  }));
+  return s;
+}
+function tabSections(t) {
+  return t.groups.flatMap(g => g.matrix ? g.matrix : (g.section ? [g.section] : []));
+}
+function ircutVisible(key) {
+  const t = V["ircut.trigger"];
+  if (key.startsWith("adc_")) return t === "adc";
+  if (key.startsWith("photo_")) return t === "photo";
+  return true;
+}
+
+function render() {
+  const sheet = document.getElementById("sheet");
+  sheet.textContent = "";
+  const tab = TABS.find(t => t.id === active);
+
+  tab.groups.forEach(g => {
+    const rows = g.section ? KEYS.filter(k => k.section === g.section) : [];
+    if (g.section && !rows.length) return;      /* section the build left out */
+    const sec = document.createElement("section"); sec.className = "group";
+    const h = document.createElement("h3");
+    h.append(document.createTextNode(g.title));
+    if (g.note) { const n = document.createElement("span"); n.className = "note";
+      n.textContent = g.note; h.append(n); }
+    const own = document.createElement("span"); own.className = "owner";
+    own.textContent = g.matrix ? (byId[g.matrix[0] + ".width"] || {}).owner || ""
+                   : (rows[0] ? rows[0].owner : "");
+    h.append(own); sec.append(h);
+
+    if (g.matrix) sec.append(buildMatrix(g.matrix));
+    else if (g.actions) sec.append(buildActions(g.actions));
+    else rows.forEach(k => {
+      if (k.section === "ircut" && !ircutVisible(k.key)) return;
+      sec.append(buildRow(id_of(k)));
+    });
+    sheet.append(sec);
+  });
+
+  const f = document.createElement("p"); f.className = "foot";
+  f.textContent = "rcd serves " + KEYS.length + " typed keys and " + ACTIONS.length +
+    " actions as one flat array — no grouping, no wording, no layout. Everything above is this "+
+    "page reading that array.";
+  sheet.append(f);
+  paintTabs();
+}
+
+function paintTabs() {
+  document.querySelectorAll(".tab").forEach(el => {
+    const t = TABS.find(x => x.id === el.dataset.id);
+    const secs = tabSections(t);
+    el.classList.toggle("has-dirty", [...dirty].some(d => secs.includes(d.split(".")[0])));
+    el.setAttribute("aria-selected", String(el.dataset.id === active));
+  });
+}
+
+/* ═══ apply ══════════════════════════════════════════════════════════════ */
+const RANK = {service:1, stream:2, pipeline:3};
+const bar = document.getElementById("applybar");
+const btnApply = document.getElementById("btnApply");
+
+function refreshBar() {
+  const n = dirty.size;
+  bar.hidden = n === 0;
+  armed = false; btnApply.className = "btn primary"; btnApply.textContent = "Apply";
+  paintTabs();
+  if (!n) return;
+  const worst = [...dirty].map(id => byId[id].impact)
+                          .reduce((a, b) => RANK[b] > RANK[a] ? b : a, "service");
+  const daemons = [...new Set([...dirty].map(id => byId[id].owner))];
+  document.getElementById("apCount").textContent = n + (n === 1 ? " change pending" : " changes pending");
+  document.getElementById("apCost").textContent =
+    "Restarts " + daemons.join(", ") + " — " + COST[worst] + ".";
+  const kb = document.getElementById("apKeys"); kb.textContent = "";
+  [...dirty].slice(0, 5).forEach(id => {
+    const c = document.createElement("code"); c.textContent = id; kb.append(c);
+  });
+  if (n > 5) { const c = document.createElement("code"); c.textContent = "+" + (n - 5) + " more"; kb.append(c); }
+  if (worst === "pipeline") btnApply.className = "btn danger";
+}
+
+btnApply.addEventListener("click", async () => {
+  const worst = [...dirty].map(id => byId[id].impact)
+                          .reduce((a, b) => RANK[b] > RANK[a] ? b : a, "service");
+  if (worst !== "service" && !armed) {
+    armed = true;
+    btnApply.textContent = worst === "pipeline" ? "Confirm — stops capture" : "Confirm — drops viewers";
+    return;
+  }
+  await doApply(worst);
+});
+
+document.getElementById("btnRevert").addEventListener("click", async () => {
+  /* Ask rcd what is on disk rather than trusting this page's memory of it. */
+  dirty.clear();
+  await loadValues();
+  refreshBar(); render();
+  wlog("sys", "reverted to the saved configuration");
+});
+
+async function doApply(worst) {
+  const edits = [...dirty].map(id => {
+    const k = byId[id];
+    return {section: k.section, key: k.key, value: k.labels ? labelOf(k, V[id]) : V[id]};
+  });
+  btnApply.disabled = true; document.getElementById("btnRevert").disabled = true;
+  const screen = document.getElementById("screen");
+  const cam = document.getElementById("cam");
+  try {
+    if (edits.length) await api({cmd:"set", edits: edits});
+    if (worst === "pipeline") { screen.classList.add("busy"); cam.removeAttribute("src"); }
+    await api({cmd:"apply"});
+    dirty.forEach(id => SAVED[id] = V[id]); dirty.clear();
+    await loadValues();
+  } catch (e) {
+    wlog("err", "! apply: " + e.message);
+    banner("The apply did not finish", e.message);
+  } finally {
+    btnApply.disabled = false; document.getElementById("btnRevert").disabled = false;
+    screen.classList.remove("busy");
+    startPreview();
+    refreshBar(); render();
+    loadState();
+  }
+}
+
+/* ═══ preview ════════════════════════════════════════════════════════════ */
+function startPreview() {
+  const cam = document.getElementById("cam");
+  const screen = document.getElementById("screen");
+  screen.classList.remove("noimg");
+  /* Cache-buster: a restarted pipeline serves a new stream on the same URL. */
+  cam.src = "/mjpeg?stream=" + previewStream() + "&t=" + Date.now();
+  cam.onerror = () => screen.classList.add("noimg");
+  document.getElementById("tagL").textContent =
+    "mjpeg · stream " + previewStream() + " · " +
+    (V["stream" + previewStream() + ".width"] || "?") + "×" +
+    (V["stream" + previewStream() + ".height"] || "?");
+}
+/* The sub-stream when there is one: the preview should not cost the main
+ * stream's bitrate on every open page. */
+function previewStream() {
+  return (V["stream1.enabled"] && V["stream1.jpeg"] !== false) ? 1 : 0;
+}
+
+/* ═══ status ═════════════════════════════════════════════════════════════ */
+function statLine(box, k, v, cls) {
+  const d = document.createElement("div"); d.className = "stat";
+  const ke = document.createElement("span"); ke.className = "k"; ke.textContent = k;
+  const ve = document.createElement("span"); ve.className = "v " + (cls || ""); ve.textContent = v;
+  d.append(ke, ve); box.append(d);
+}
+function hhmm(secs) {
+  secs = Math.max(0, Math.floor(secs));
+  const d = Math.floor(secs / 86400), h = Math.floor(secs % 86400 / 3600),
+        m = Math.floor(secs % 3600 / 60);
+  return d ? d + "d " + h + "h" : h ? h + "h " + m + "m" : m + "m";
+}
+
+/*
+ * `state` is flat: whichever daemons answered contribute their own object,
+ * and a daemon that is down simply is not there. Nothing below assumes a
+ * section exists.
+ */
+async function loadState() {
+  let s;
+  try { s = await api({cmd:"state"}, true); } catch (e) { return; }
+  const box = document.getElementById("status"); box.textContent = "";
+  const up = s.up || {};
+  const running = Object.keys(up).filter(d => up[d]);
+
+  statLine(box, "Pipeline", up.rvd ? "running" : "down", up.rvd ? "good" : "bad");
+  statLine(box, "Daemons", running.length + " up");
+  if (s.uptime !== undefined) statLine(box, "Uptime", hhmm(s.uptime));
+  ["stream0", "stream1"].forEach((k, i) => {
+    const st = s[k];
+    if (st) statLine(box, i === 0 ? "Main" : "Sub",
+                     (st.resolution || "?") + (st.fps ? " · " + st.fps + " fps" : ""));
+  });
+  if (s.rtsp && s.rtsp.clients !== undefined) statLine(box, "RTSP clients", String(s.rtsp.clients));
+  if (s.http && s.http.clients !== undefined) statLine(box, "HTTP clients", String(s.http.clients));
+
+  const tagR = document.getElementById("tagR");
+  tagR.textContent = (s.ir && s.ir.mode) ? String(s.ir.mode) : "live";
+}
+
+/* ═══ boot ═══════════════════════════════════════════════════════════════ */
+function banner(title, detail) {
+  const sheet = document.getElementById("sheet");
+  sheet.textContent = "";
+  const b = document.createElement("div"); b.className = "banner";
+  const t = document.createElement("b"); t.textContent = title;
+  const p = document.createElement("div"); p.textContent = detail;
+  b.append(t, p);
+  sheet.append(b);
+}
+
+async function loadValues() {
+  const sections = [...new Set(KEYS.map(k => k.section))];
+  /* One request per section, not one carrying every key: rcd asks the owning
+   * daemon once per section, and a single hundred-key request would make it
+   * open the daemon socket a hundred times. */
+  for (const sec of sections) {
+    let r;
+    try { r = await api({cmd:"get", section: sec}, true); } catch (e) { continue; }
+    (r.values || []).forEach(v => {
+      const id = v.section + "." + v.key;
+      if (!byId[id]) return;
+      if (byId[id].type === "credential") { CREDSET[id] = v.set === true; return; }
+      if (v.set === false || v.value === undefined || v.value === null) return;
+      V[id] = v.value;
+      SAVED[id] = v.value;
+    });
+  }
+}
+
+async function loadPending() {
+  try {
+    const p = await api({cmd:"pending"}, true);
+    (p.stale || []).forEach(d => (d.keys || []).forEach(k => {
+      const id = k.section + "." + k.key;
+      if (byId[id]) dirty.add(id);
+    }));
+  } catch (e) { /* drift is a nicety; the page works without it */ }
+}
+
+async function boot() {
+  let hello;
+  try {
+    hello = await api({cmd:"hello"});
+  } catch (e) {
+    banner("Cannot reach the configuration daemon", e.message +
+      ". rcd answers on /var/run/rss/rcd.sock and rhd forwards this page's requests to it.");
+    return;
+  }
+  document.getElementById("host").textContent =
+    [hello.platform, hello.build].filter(Boolean).join(" · ") || "raptor";
+
+  const s = await api({cmd:"schema"});
+  KEYS = s.keys || [];
+  ACTIONS = s.actions || [];
+  KEYS.forEach(k => byId[id_of(k)] = k);
+
+  /* Any section no tab claims still gets a page, so a key added to rcd cannot
+   * become unreachable by forgetting to touch this file. */
+  const claimed = claimedSections();
+  const orphans = [...new Set(KEYS.map(k => k.section))].filter(x => !claimed.includes(x));
+  if (orphans.length) {
+    TABS.push({id:"more", name:"More",
+               groups: orphans.map(o => ({title: pretty(o), section: o}))});
+  }
+
+  const tabsEl = document.getElementById("tabs");
+  TABS.forEach(t => {
+    const secs = tabSections(t);
+    const n = KEYS.filter(k => secs.includes(k.section)).length;
+    const b = document.createElement("button");
+    b.className = "tab"; b.dataset.id = t.id; b.setAttribute("role", "tab");
+    b.append(document.createTextNode(t.name));
+    const c = document.createElement("span"); c.className = "cnt"; c.textContent = n || "";
+    const dot = document.createElement("span"); dot.className = "dot";
+    b.append(c, dot);
+    b.addEventListener("click", () => {
+      active = t.id; render(); document.querySelector(".sheet").scrollTop = 0;
+    });
+    tabsEl.append(b);
+  });
+
+  await loadValues();
+  await loadPending();
+  render();
+  refreshBar();
+  startPreview();
+  loadState();
+  setInterval(loadState, 5000);
+}
+
+boot();
+</script>
