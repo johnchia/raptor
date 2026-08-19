@@ -595,19 +595,29 @@ function resetSection(sections) {
               " for reset — Apply puts them back");
 }
 
-function undoButton(ids) {
+/* Two buttons, not one taking either kind of argument: a key id and a section
+   name are both strings, and telling them apart by how many were passed is a
+   guess that was wrong for every group holding exactly one section. */
+function undoButton(label, title, onClick) {
   const b = document.createElement("button");
   b.className = "undo"; b.type = "button";
-  const one = ids.length === 1;
-  b.textContent = one && RESET.has(ids[0]) ? "keep the reset" : one ? "reset" : "reset section";
-  b.title = one ? "Take this key out of the configuration and let " +
-                  (byId[ids[0]].owner || "the camera") + " use its own default"
-                : "Put every key in this section back to its default";
-  b.addEventListener("click", () => {
-    if (one) { toggleReset(ids[0]); refreshBar(); render(); }
-    else resetSection(ids);
-  });
+  b.textContent = label;
+  b.title = title;
+  b.addEventListener("click", onClick);
   return b;
+}
+
+function keyUndoButton(id) {
+  return undoButton(
+    RESET.has(id) ? "keep the reset" : "reset",
+    "Take this key out of the configuration and let " +
+      ((byId[id] && byId[id].owner) || "the camera") + " use its own default",
+    () => { toggleReset(id); refreshBar(); render(); });
+}
+
+function sectionUndoButton(sections) {
+  return undoButton("reset section", "Put every key in this section back to its default",
+                    () => resetSection(sections));
 }
 
 /* ═══ committing ═════════════════════════════════════════════════════════
@@ -869,7 +879,7 @@ function buildRow(id) {
   else if (UNSET.has(id)) rb.textContent = "not set";
   else if (DEFAULTED.has(id)) rb.textContent = "default";
   mk.append(rb);
-  if (canReset(id)) mk.append(undoButton([id]));
+  if (canReset(id)) mk.append(keyUndoButton(id));
   row.append(lab, ctl, mk);
   return row;
 }
@@ -911,7 +921,7 @@ function buildMatrix(sections) {
       if (RESET.has(id)) rb.textContent = "default";
       else if (DEFAULTED.has(id)) rb.textContent = "default";
       foot.append(rb);
-      if (canReset(id)) foot.append(undoButton([id]));
+      if (canReset(id)) foot.append(keyUndoButton(id));
       box.append(buildControl(id, v => commit(id, v, td)), foot);
       td.append(box); tr.append(td);
     });
@@ -995,7 +1005,7 @@ function render() {
     const secs = g.matrix ? g.matrix : (g.section ? [g.section] : []);
     if (secs.length && KEYS.some(k => secs.includes(k.section) && canReset(id_of(k)) &&
                                       !DEFAULTED.has(id_of(k))))
-      h.append(undoButton(secs));
+      h.append(sectionUndoButton(secs));
     const own = document.createElement("span"); own.className = "owner";
     own.textContent = g.matrix ? (byId[g.matrix[0] + ".width"] || {}).owner || ""
                    : (rows[0] ? rows[0].owner : "");

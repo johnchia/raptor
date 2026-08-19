@@ -63,10 +63,22 @@ tests: $(TEST_SRCS) $(LIB_SRCS) $(CTRL_SRCS) $(IPC_SRCS) $(RCD_SRCS) $(SDP_SRC) 
 test_slow_rtsp: test_slow_rtsp.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-test: tests
+test: tests console
 	./tests
+
+# The console is JavaScript in one HTML file and nothing else here can run it.
+# A thin DOM shim draws every tab, which is the check worth having: a TypeError
+# anywhere in render() empties the whole page rather than spoiling one row.
+# Skipped rather than failed where node is not installed -- CI has it, a
+# bring-up bench may not.
+console:
+	@if command -v node > /dev/null 2>&1; then \
+		node console_smoke.js; \
+	else \
+		echo "console_smoke: node not found, skipped"; \
+	fi
 
 clean:
 	rm -f tests test_slow_rtsp sdp_parse.c
 
-.PHONY: test clean
+.PHONY: test console clean
