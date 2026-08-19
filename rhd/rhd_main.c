@@ -539,15 +539,23 @@ static void handle_request(rhd_server_t *srv, rhd_client_t *c)
 	RSS_INFO("%s %s from %s:%u", method, path,
 		 client_addr_str(&c->addr, addrstr, sizeof(addrstr)), client_port(&c->addr));
 
+	/*
+	 * The configuration route, which is the only thing here that is not a
+	 * GET. It answers from a worker rather than from this call.
+	 *
+	 * Routed before the media gate below because it authenticates itself,
+	 * against the system account rather than [http] username/password. Left
+	 * after the gate, a camera with a media credential set would need both
+	 * at once -- and one Basic header carries one credential, so the route
+	 * would be reachable by nobody.
+	 */
+	if (rhd_api_handle(srv, c, method, path))
+		return;
+
 	if (!http_check_auth(srv, c->recv_buf)) {
 		http_401(c);
 		return;
 	}
-
-	/* The configuration route, which is the only thing here that is not a
-	 * GET. It answers from a worker rather than from this call. */
-	if (rhd_api_handle(srv, c, method, path))
-		return;
 
 	if (strcmp(method, "GET") != 0) {
 		http_error(c, "405 Method Not Allowed", "GET only");

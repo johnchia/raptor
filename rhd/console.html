@@ -661,7 +661,9 @@ async function commit(id, val, el) {
 
   if (k.type === "credential") {
     try {
-      await api({cmd:"credentials", section:k.section, key:k.key, value:val});
+      /* rcd writes [rtsp] and [http] from one value, so the camera has one
+         account; the field it takes is the bare key, not a section. */
+      await api({cmd:"credentials", [k.key]: val});
       CREDSET[id] = true;
       mark(el, "set");
     } catch (e) { V[id] = prev; mark(el, e.message, true); }
