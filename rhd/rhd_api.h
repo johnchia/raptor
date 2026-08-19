@@ -1,7 +1,7 @@
 /*
  * rhd_api.h -- POST /api/v1/rcd
  *
- * The console in index.html is a browser, and a browser cannot open a unix
+ * The console in console.html is a browser, and a browser cannot open a unix
  * socket. This is the whole bridge: the request body is handed to rcd
  * unread and rcd's reply is handed back unread.
  *

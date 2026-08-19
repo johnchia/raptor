@@ -287,7 +287,8 @@ echo "=== RHD ==="
 $CC $CFLAGS $TLS_CFLAGS -c "$RAPTOR_DIR/rhd/rhd_main.c" -o "$OUT/rhd_main.o"
 $CC $CFLAGS $TLS_CFLAGS -c "$RAPTOR_DIR/rhd/rhd_http.c" -o "$OUT/rhd_http.o"
 $CC $CFLAGS -c "$RAPTOR_DIR/rhd/rhd_audio.c" -o "$OUT/rhd_audio.o"
-$CC -o "$OUT/rhd" "$OUT/rhd_main.o" "$OUT/rhd_http.o" "$OUT/rhd_audio.o" $LIBS $LIBS_TLS $LDFLAGS
+$CC $CFLAGS -c "$RAPTOR_DIR/rhd/rhd_api.c" -o "$OUT/rhd_api.o"
+$CC -o "$OUT/rhd" "$OUT/rhd_main.o" "$OUT/rhd_http.o" "$OUT/rhd_audio.o" "$OUT/rhd_api.o" $LIBS $LIBS_TLS $LDFLAGS -lcrypt
 echo "  -> rhd"
 
 echo "=== RSD ==="

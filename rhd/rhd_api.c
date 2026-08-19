@@ -4,6 +4,7 @@
  * See rhd_api.h for why this file knows nothing about keys.
  */
 
+#include <crypt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -138,6 +139,136 @@ static void api_refuse(rhd_client_t *c, const char *status, const char *code, co
 	http_send(c, status, "application/json", body, n);
 }
 
+/* -- who may configure the camera -- */
+
+/*
+ * This route authenticates against the system account, and never against
+ * [http] username/password.
+ *
+ * Those are the media credential. They are handed to an NVR, to Home
+ * Assistant, to whoever is allowed to watch, and rhd sends them back in
+ * cleartext on every snapshot -- so they are the credential that leaks. This
+ * route rewrites the network stanza and restarts the pipeline, which is not
+ * something a viewing password may reach. /etc/shadow holds the only secret
+ * on the camera that is not also handed out to watch video.
+ *
+ * A realm of its own, so a browser holding the media credential does not
+ * offer it here and then cache the rejection against it.
+ */
+#define RHD_API_REALM "Raptor Config"
+
+/*
+ * The account's password hash as /etc/shadow spells it.
+ *
+ * Every way of not finding one is the same answer: unknown user, unreadable
+ * file, locked account. A locked or password-less account ("*", "!", "!!", or
+ * an empty field) must never authenticate -- clearing the root password is a
+ * thing people do while debugging, and it has to lock the camera rather than
+ * open it to everyone.
+ */
+static bool shadow_hash(const char *user, char *out, size_t outsz)
+{
+	if (!user || !user[0] || strchr(user, ':'))
+		return false;
+
+	FILE *f = fopen("/etc/shadow", "r");
+	if (!f)
+		return false;
+
+	char line[512];
+	size_t ulen = strlen(user);
+	bool found = false;
+
+	while (!found && fgets(line, sizeof(line), f)) {
+		if (strncmp(line, user, ulen) != 0 || line[ulen] != ':')
+			continue;
+
+		char *hash = line + ulen + 1;
+		char *end = strchr(hash, ':');
+
+		if (end)
+			*end = '\0';
+		hash[strcspn(hash, "\r\n")] = '\0';
+
+		/*
+		 * A usable hash is "$id$salt$digest". Nothing else is accepted,
+		 * which also rules out a bare DES hash -- no account here has
+		 * one, and refusing an unrecognised field is the safe way to be
+		 * wrong.
+		 */
+		if (hash[0] == '$' && strlen(hash) < outsz) {
+			rss_strlcpy(out, hash, outsz);
+			found = true;
+		}
+		break;
+	}
+
+	fclose(f);
+	return found;
+}
+
+/*
+ * crypt() answers in static storage, which is safe here only because this runs
+ * on the main loop thread and nothing else in rhd calls it. The comparison is
+ * constant-time so a wrong password does not leak how much of it was right.
+ */
+static bool system_account_ok(const char *user, const char *pass)
+{
+	char hash[128];
+
+	if (!shadow_hash(user, hash, sizeof(hash)))
+		return false;
+
+	const char *got = crypt(pass, hash);
+
+	return got && rss_secure_compare(got, hash);
+}
+
+static bool api_authenticated(const char *request)
+{
+	size_t vlen = 0;
+	const char *v = header_value(request, "Authorization", &vlen);
+
+	if (!v || vlen <= 6 || strncasecmp(v, "Basic ", 6) != 0)
+		return false;
+	v += 6;
+	vlen -= 6;
+
+	char decoded[256];
+	int dlen = rss_base64_decode(v, vlen, decoded, sizeof(decoded) - 1);
+
+	if (dlen <= 0)
+		return false;
+	decoded[dlen] = '\0';
+
+	char *colon = strchr(decoded, ':');
+
+	if (!colon)
+		return false;
+	*colon = '\0';
+
+	return system_account_ok(decoded, colon + 1);
+}
+
+static void api_401(rhd_client_t *c)
+{
+	static const char body[] = "{\"api\":1,\"status\":\"error\",\"code\":\"auth\","
+				   "\"reason\":\"the configuration api needs the system "
+				   "account\"}\n";
+	char header[256];
+	int hlen = snprintf(header, sizeof(header),
+			    "HTTP/1.1 401 Unauthorized\r\n"
+			    "WWW-Authenticate: Basic realm=\"" RHD_API_REALM "\"\r\n"
+			    "Content-Type: application/json\r\n"
+			    "Content-Length: %d\r\n"
+			    "Connection: close\r\n"
+			    "\r\n",
+			    (int)strlen(body));
+
+	rhd_write(c, header, (size_t)hlen);
+	rhd_write(c, body, strlen(body));
+}
+
 bool rhd_api_handle(rhd_server_t *srv, rhd_client_t *c, const char *method, const char *path)
 {
 	if (strcmp(path, RHD_API_PATH) != 0)
@@ -149,6 +280,16 @@ bool rhd_api_handle(rhd_server_t *srv, rhd_client_t *c, const char *method, cons
 	}
 	if (!srv->api_enabled) {
 		api_refuse(c, "403 Forbidden", "unknown", "the api is disabled");
+		return true;
+	}
+
+	/*
+	 * After the enabled check, so a camera with the api switched off says
+	 * so rather than asking for credentials it will refuse anyway.
+	 */
+	if (!api_authenticated(c->recv_buf)) {
+		RSS_WARN("api: refused a request with no system account");
+		api_401(c);
 		return true;
 	}
 

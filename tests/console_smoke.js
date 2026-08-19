@@ -11,7 +11,7 @@
  * The shim is deliberately thin. It is not a DOM; it is enough of one to let
  * the page build its tree and to notice when building it throws.
  *
- *   node tests/console_smoke.js [path/to/index.html]
+ *   node tests/console_smoke.js [path/to/console.html]
  */
 "use strict";
 
@@ -19,7 +19,7 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 
-const page = process.argv[2] || path.join(__dirname, "..", "rhd", "index.html");
+const page = process.argv[2] || path.join(__dirname, "..", "rhd", "console.html");
 const html = fs.readFileSync(page, "utf8");
 
 const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]).join("\n");
@@ -212,7 +212,7 @@ const probe_epilogue = `
 
 const ctx = vm.createContext(sandbox);
 try {
-	vm.runInContext(script + probe_epilogue, ctx, {filename: "index.html"});
+	vm.runInContext(script + probe_epilogue, ctx, {filename: "console.html"});
 } catch (e) {
 	fail("the page threw while loading: " + e.stack);
 }

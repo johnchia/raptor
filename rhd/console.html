@@ -1,0 +1,1600 @@
+<!DOCTYPE html>
+<!--
+  Raptor camera console.
+
+  rcd serves a flat array of typed keys and nothing else: no grouping, no
+  wording, no layout. All of that is here, in the browser, where it costs the
+  camera no flash and can be reworded without reflashing anything. A key this
+  page has no entry for is not lost -- it falls through to a name derived from
+  the key and a control picked from its type and range -- so the schema can
+  grow without this file being touched first.
+
+  rhd carries the request and does not read it. Every exchange below is one
+  POST /api/v1/rcd whose body is an rcd request and whose reply is rcd's, so
+  nothing on the HTTP path holds a second copy of the key table.
+
+  Self-contained on purpose: no font host, no CDN, no external anything. The
+  camera is often on a network with no route off it.
+-->
+<meta charset="utf-8">
+<title>Raptor</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{
+  --ground:#0d1012; --panel:#161a1d; --raise:#1e2428; --sink:#0a0d0e;
+  --line:#2a3135; --line-soft:#20262a;
+  --ink:#dde4e7; --ink-dim:#8d9aa1; --ink-faint:#5f6d74;
+  --accent:#35b7c2; --accent-dim:#1d6b72;
+  --red:#e2574c; --amber:#dfa33c; --steel:#7a8b95; --ok:#5aa87f;
+  --ui:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace;
+  --r:3px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--ui);
+     font-size:14px;line-height:1.5;-webkit-text-size-adjust:100%}
+button,input,select{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+code{font-family:var(--mono)}
+
+.app{display:grid;grid-template-columns:360px minmax(0,1fr);min-height:100vh}
+.rail{background:var(--panel);border-right:1px solid var(--line);display:flex;
+      flex-direction:column;position:sticky;top:0;height:100vh;overflow:hidden}
+main{display:flex;flex-direction:column;min-width:0;min-height:100vh}
+
+.brand{padding:15px 18px 13px;border-bottom:1px solid var(--line);display:flex;
+       align-items:baseline;gap:9px}
+.brand h1{margin:0;font-size:18px;font-weight:600;letter-spacing:.14em;text-transform:uppercase}
+.brand .host{font-family:var(--mono);font-size:11px;color:var(--ink-faint);margin-left:auto;
+             overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.preview{padding:14px 14px 12px;border-bottom:1px solid var(--line)}
+.screen{position:relative;background:#000;border:1px solid var(--line);aspect-ratio:16/9;
+        overflow:hidden;display:grid;place-items:center}
+.screen img{width:100%;height:100%;object-fit:contain;display:block}
+.screen .tag{position:absolute;font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;
+             padding:2px 5px;background:rgba(8,11,12,.72);color:#c3ced3}
+.screen .tag.tl{top:6px;left:6px}
+.screen .curtain{position:absolute;inset:0;background:rgba(6,8,9,.92);display:none;
+                 place-items:center;font-size:12px;letter-spacing:.16em;text-transform:uppercase;
+                 color:var(--amber);text-align:center;padding:12px}
+.screen.busy .curtain{display:grid}
+.screen .fallback{color:var(--ink-faint);font-size:12px;padding:14px;text-align:center;display:none}
+.screen.noimg img{display:none}
+.screen.noimg .fallback{display:block}
+
+.status{padding:12px 18px;display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;
+        align-content:start;flex:1;min-height:0;overflow-y:auto}
+.stat .k{font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-faint);
+         display:block}
+.stat .v{font-family:var(--mono);font-size:12.5px;font-variant-numeric:tabular-nums;
+         word-break:break-word}
+.stat .v.good{color:var(--ok)}
+.stat .v.bad{color:var(--amber)}
+
+/* Collapsed by default: it is a diagnostic, and a page that opens showing its
+   own network traffic looks like something has gone wrong. */
+.wire{flex:0 0 auto;min-height:0;display:flex;flex-direction:column;border-top:1px solid var(--line)}
+.wire.open{flex:1}
+.wiretoggle{width:100%;background:none;border:0;text-align:left;cursor:pointer;
+            padding:11px 18px;font-size:10.5px;letter-spacing:.15em;text-transform:uppercase;
+            color:var(--ink-faint);display:flex;gap:8px;align-items:baseline}
+.wiretoggle:hover{color:var(--ink-dim)}
+.wiretoggle .sub{font-family:var(--mono);font-size:10px;letter-spacing:0;text-transform:none;
+                 opacity:.75}
+.wiretoggle .chev{display:inline-block;transition:transform .12s;font-size:9px}
+@media (prefers-reduced-motion:reduce){.wiretoggle .chev{transition:none}}
+.wire.open .wiretoggle .chev{transform:rotate(90deg)}
+.wirelog[hidden]{display:none}
+.wirelog{flex:1;min-height:0;overflow-y:auto;padding:0 14px 16px;font-family:var(--mono);
+         font-size:11px;line-height:1.55;display:flex;flex-direction:column-reverse;gap:2px}
+.wirelog div{white-space:pre-wrap;word-break:break-word;color:var(--ink-dim)}
+.wirelog .tx{color:var(--accent)}
+.wirelog .sys{color:var(--ink-faint);font-style:italic}
+.wirelog .err{color:var(--red)}
+
+.topbar{border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:5}
+.tabs{display:flex;overflow-x:auto}
+.tab{background:none;border:0;border-bottom:2px solid transparent;padding:15px 20px 13px;
+     font-size:12.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);
+     cursor:pointer;white-space:nowrap;position:relative}
+.tab:hover{color:var(--ink-dim)}
+.tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+.tab .cnt{font-family:var(--mono);font-size:10px;letter-spacing:0;margin-left:7px;
+          color:var(--ink-faint)}
+.tab .dot{position:absolute;top:11px;right:9px;width:5px;height:5px;border-radius:50%;
+          background:var(--amber);display:none}
+.tab.has-dirty .dot{display:block}
+
+.sheet{flex:1;overflow-y:auto;padding:24px 30px 40px}
+.sheet-in{max-width:940px}
+.banner{border:1px solid var(--red);background:rgba(226,87,76,.08);border-radius:var(--r);
+        padding:14px 16px;margin:0 0 22px;font-size:13px;color:var(--ink)}
+.banner b{display:block;margin-bottom:5px;letter-spacing:.06em;text-transform:uppercase;
+          font-size:11.5px;color:var(--red)}
+.banner code{font-size:12px;color:var(--ink-dim)}
+
+.group{margin:0 0 28px;border:1px solid var(--line-soft);background:var(--panel);
+       border-radius:var(--r)}
+.group>h3{margin:0;padding:12px 18px;border-bottom:1px solid var(--line-soft);font-size:11.5px;
+          letter-spacing:.15em;text-transform:uppercase;display:flex;align-items:center;gap:10px}
+.group>h3 .owner{font-family:var(--mono);font-size:10.5px;letter-spacing:0;text-transform:none;
+                 color:var(--ink-faint);margin-left:auto}
+.group>h3 .note{font-size:11.5px;letter-spacing:0;text-transform:none;color:var(--ink-faint);
+                font-weight:400}
+
+.row{display:grid;grid-template-columns:minmax(0,1fr) 268px 104px;gap:18px;align-items:start;
+     padding:12px 18px;border-bottom:1px solid var(--line-soft)}
+.row:last-child{border-bottom:0}
+.row.dirty{background:rgba(223,163,60,.05);box-shadow:inset 3px 0 0 var(--amber)}
+.row.flash{animation:flash .5s ease}
+@keyframes flash{from{background:rgba(53,183,194,.14)}to{background:transparent}}
+@media (prefers-reduced-motion:reduce){.row.flash{animation:none}}
+.lab .name{display:block;font-size:13.5px}
+.lab .id{display:block;font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);margin-top:1px}
+.lab .help{margin:5px 0 0;font-size:12px;color:var(--ink-dim);max-width:52ch;line-height:1.45}
+.ctl{display:flex;flex-direction:column;gap:5px}
+.mark{display:flex;flex-direction:column;align-items:flex-end;gap:5px;padding-top:2px}
+
+.chip{font-size:10px;letter-spacing:.11em;text-transform:uppercase;padding:2px 6px;
+      border:1px solid;border-radius:2px;white-space:nowrap}
+.txt{width:100%;max-width:20rem;background:var(--sink);border:1px solid var(--line);
+     border-radius:var(--r);padding:5px 8px;font-family:var(--mono);font-size:12px;
+     color:var(--ink);min-width:0}
+.chip.live{color:var(--accent);border-color:var(--accent-dim);background:rgba(53,183,194,.07)}
+.chip.service{color:var(--steel);border-color:#39464d}
+.chip.stream{color:var(--amber);border-color:#5a4525}
+.chip.pipeline{color:var(--red);border-color:#5e2b27}
+.chip.reboot{color:var(--amber);border-color:#5a4525;background:rgba(214,164,69,.07)}
+.row:not(.dirty) .chip.service,.row:not(.dirty) .chip.stream,
+.row:not(.dirty) .chip.pipeline{opacity:.42}
+.readback{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);text-align:right;
+          font-variant-numeric:tabular-nums}
+
+/* Reset. Quiet until wanted -- it sits beside every configured key, and a row
+   of buttons competing with the controls would read as the point of the page.
+   The section-level one is the same control at the group's scale. */
+.undo{background:none;border:0;padding:0;font-family:var(--mono);font-size:10.5px;
+      color:var(--ink-faint);cursor:pointer;text-decoration:underline dotted;opacity:.55}
+.undo:hover,.undo:focus-visible{opacity:1;color:var(--accent)}
+.row.resetting{background:rgba(53,183,194,.05);box-shadow:inset 3px 0 0 var(--accent-dim)}
+.row.resetting .ctl{opacity:.4;pointer-events:none}
+.row.resetting .undo{opacity:1;color:var(--accent)}
+.group>h3 .undo{letter-spacing:0;text-transform:none;margin-left:14px}
+.readback b{color:var(--accent);font-weight:500}
+.readback.warn{color:var(--amber)}
+
+.sl{display:flex;align-items:center;gap:11px}
+input[type=range]{flex:1;-webkit-appearance:none;appearance:none;height:2px;background:var(--line);
+                  border-radius:2px}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;
+  border-radius:50%;background:var(--ink);border:0;cursor:pointer}
+input[type=range]::-moz-range-thumb{width:13px;height:13px;border-radius:50%;background:var(--ink);
+  border:0;cursor:pointer}
+.num{width:70px;text-align:right;background:var(--sink);border:1px solid var(--line);
+     border-radius:var(--r);padding:4px 7px;font-family:var(--mono);font-size:12px;
+     font-variant-numeric:tabular-nums}
+.num.wide{width:100%}
+.unit{font-family:var(--mono);font-size:11px;color:var(--ink-faint)}
+.numwrap{display:flex;align-items:center;gap:8px}
+select{background:var(--sink);border:1px solid var(--line);border-radius:var(--r);padding:5px 8px;
+       font-family:var(--mono);font-size:12px;width:100%}
+.seg{display:flex;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;
+     background:var(--sink);width:fit-content;max-width:100%;flex-wrap:wrap}
+.seg button{background:none;border:0;border-right:1px solid var(--line);padding:5px 11px;
+            font-family:var(--mono);font-size:11.5px;color:var(--ink-dim);cursor:pointer}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed="true"]{background:var(--raise);color:var(--ink)}
+.sw{display:inline-flex;align-items:center;gap:9px;cursor:pointer;user-select:none}
+.sw input{position:absolute;opacity:0;width:0;height:0}
+.sw .track{width:34px;height:18px;border-radius:9px;background:var(--sink);
+           border:1px solid var(--line);position:relative;transition:background .13s}
+.sw .track::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;
+                  border-radius:50%;background:var(--ink-faint);transition:transform .13s}
+.sw input:checked+.track{background:var(--accent-dim);border-color:var(--accent-dim)}
+.sw input:checked+.track::after{transform:translateX(16px);background:var(--ink)}
+.sw .lbl{font-family:var(--mono);font-size:11.5px;color:var(--ink-dim)}
+.cred{display:flex;gap:8px;align-items:center}
+.cred input{flex:1;background:var(--sink);border:1px solid var(--line);border-radius:var(--r);
+            padding:5px 8px;font-family:var(--mono);font-size:12px;min-width:0}
+.cred .state{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint)}
+
+.matrix{width:100%;border-collapse:collapse}
+.matrix th,.matrix td{padding:10px 14px;border-bottom:1px solid var(--line-soft);text-align:left;
+                      vertical-align:middle}
+.matrix thead th{font-size:11px;letter-spacing:.13em;text-transform:uppercase;
+                 color:var(--ink-faint);font-weight:500}
+.matrix thead th .res{font-family:var(--mono);font-size:10.5px;letter-spacing:0;
+                      text-transform:none;display:block;margin-top:2px}
+.matrix tbody tr:last-child td{border-bottom:0}
+.matrix td.k{width:230px}
+.matrix td.k .id{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint)}
+.matrix td.cell.dirty{background:rgba(223,163,60,.05);box-shadow:inset 3px 0 0 var(--amber)}
+.matrix td.cell.resetting{background:rgba(53,183,194,.05);box-shadow:inset 3px 0 0 var(--accent-dim)}
+.matrix td.cell.resetting .cellbox>*:first-child{opacity:.4;pointer-events:none}
+.matrix td.cell.flash{animation:flash .5s ease}
+.cellbox{display:flex;flex-direction:column;gap:5px}
+.cellfoot{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+
+.acts{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:14px 18px}
+.btn{background:var(--raise);border:1px solid var(--line);border-radius:var(--r);padding:7px 14px;
+     font-size:12.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-dim);
+     cursor:pointer}
+.btn:hover:not(:disabled){color:var(--ink);border-color:#3a444a}
+.btn.on{color:var(--accent);border-color:var(--accent-dim)}
+.btn:disabled{opacity:.4;cursor:default}
+.btn.primary{background:var(--accent-dim);border-color:var(--accent);color:#eaf7f8}
+.btn.danger{background:#5e2b27;border-color:var(--red);color:#ffe9e7}
+.btn.ghost{background:none}
+
+.applybar{position:sticky;bottom:0;background:var(--raise);border-top:1px solid var(--line);
+          padding:12px 30px;display:flex;align-items:center;gap:16px;z-index:6;
+          box-shadow:0 -8px 24px rgba(0,0,0,.35)}
+.applybar[hidden]{display:none}
+.applybar .lead{display:flex;flex-direction:column;gap:3px;min-width:0}
+.applybar .count{font-size:13px;letter-spacing:.09em;text-transform:uppercase}
+.applybar .cost{font-size:12px;color:var(--ink-dim)}
+.applybar .keys{display:flex;flex-wrap:wrap;gap:5px;max-width:40%}
+.applybar .keys code{font-size:10.5px;color:var(--ink-dim);border:1px solid var(--line-soft);
+                     border-radius:2px;padding:1px 5px}
+.applybar .sp{flex:1}
+/* The same bar, in the one state where ignoring it undoes what you just did. */
+.applybar.guard{border-top:1px solid var(--amber);background:var(--raise)}
+.applybar.guard .count{color:var(--amber)}
+.applybar .clock{font-family:var(--mono);font-size:15px;font-variant-numeric:tabular-nums;
+                 color:var(--amber);min-width:4.5ch;text-align:right}
+
+.foot{margin:30px 0 0;padding-top:18px;border-top:1px solid var(--line-soft);font-size:12px;
+      color:var(--ink-faint);max-width:70ch;line-height:1.6}
+
+@media (max-width:1000px){
+  .app{grid-template-columns:1fr}
+  .rail{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
+  .wire{max-height:180px}
+  .row{grid-template-columns:1fr;gap:9px}
+  .mark{flex-direction:row;align-items:center}
+  .sheet{padding:18px 16px 30px}
+  .applybar{padding:12px 16px;flex-wrap:wrap}
+  .applybar .keys{display:none}
+}
+</style>
+
+<div class="app">
+  <aside class="rail">
+    <div class="brand"><h1>Raptor</h1><span class="host" id="host">…</span></div>
+
+    <div class="preview">
+      <div class="screen" id="screen">
+        <img id="cam" alt="Live preview">
+        <div class="fallback">No preview.<br>The JPEG encoder is off, or no stream is running.</div>
+        <span class="tag tl" id="tagL">preview</span>
+        <div class="curtain" id="curtain">restarting</div>
+      </div>
+    </div>
+
+    <div class="status" id="status"></div>
+
+    <div class="wire" id="wire">
+      <button class="wiretoggle" id="wiretoggle" aria-expanded="false" aria-controls="log">
+        <span class="chev" aria-hidden="true">&#9656;</span>
+        Wire <span class="sub">POST /api/v1/rcd</span>
+      </button>
+      <div class="wirelog" id="log" hidden></div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="topbar"><div class="tabs" id="tabs" role="tablist"></div></div>
+    <div class="sheet"><div class="sheet-in" id="sheet">Loading…</div></div>
+    <!-- Above the apply bar, because it is the one thing on this page with a
+         deadline: a change nobody confirms is put back by the camera. -->
+    <footer class="applybar guard" id="guardbar" hidden>
+      <div class="lead">
+        <span class="count" id="gdTitle"></span>
+        <span class="cost" id="gdWhat"></span>
+      </div>
+      <div class="keys" id="gdKeys"></div>
+      <div class="sp"></div>
+      <span class="clock" id="gdClock"></span>
+      <button class="btn ghost" id="btnGuardUndo" hidden>Undo now</button>
+      <button class="btn primary" id="btnGuardKeep" hidden>Keep it</button>
+    </footer>
+    <footer class="applybar" id="applybar" hidden>
+      <div class="lead">
+        <span class="count" id="apCount"></span>
+        <span class="cost" id="apCost"></span>
+      </div>
+      <div class="keys" id="apKeys"></div>
+      <div class="sp"></div>
+      <button class="btn ghost" id="btnRevert">Revert</button>
+      <button class="btn primary" id="btnApply">Apply</button>
+    </footer>
+  </main>
+</div>
+
+<script>
+"use strict";
+
+/* ═══ transport ══════════════════════════════════════════════════════════
+   One route, one shape. rhd forwards the body to rcd's socket and forwards
+   the answer back; it parses neither. */
+const API = "/api/v1/rcd";
+const logEl = document.getElementById("log");
+
+function wlog(cls, text) {
+  const d = document.createElement("div");
+  d.className = cls;
+  d.textContent = text.length > 400 ? text.slice(0, 400) + " …" : text;
+  logEl.prepend(d);
+  while (logEl.children.length > 60) logEl.lastChild.remove();
+}
+
+async function api(req, quiet) {
+  if (!quiet) wlog("tx", "→ " + JSON.stringify(req));
+  let res;
+  try {
+    res = await fetch(API, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(req)
+    });
+  } catch (e) {
+    throw new Error("no answer from the camera (" + e.message + ")");
+  }
+  if (res.status === 404) throw new Error("rhd has no " + API + " route");
+  /* The browser asks for these itself and only reaches here when someone
+     dismisses it, so say which login it wants -- not the one the video uses. */
+  if (res.status === 401)
+    throw new Error("the configuration api needs the camera's system login");
+  if (!res.ok) throw new Error("HTTP " + res.status + " from rhd");
+  const body = await res.json();
+  if (!quiet) wlog(body.status === "ok" ? "rx" : "err", "← " + JSON.stringify(body));
+  if (body.status !== "ok") {
+    const e = new Error(body.reason || "refused");
+    e.code = body.code;
+    throw e;
+  }
+  return body;
+}
+
+/* ═══ presentation ═══════════════════════════════════════════════════════
+   Wording and grouping live here and nowhere on the camera. A key missing
+   from this map still renders -- see label() below. */
+const L = {
+ "system.timezone":["Timezone","","Sets the clock's zone and its daylight-saving rule. Nothing running re-reads it, so the camera has to restart before timestamps move."],
+ "network.dhcp":["Get an address automatically","","Ask the network for an address at boot. Off means the four settings below are used instead."],
+ "network.address":["IP address","","The address this camera answers on. Applied together with the three below, and put back unless you confirm."],
+ "network.netmask":["Subnet mask","","Which part of the address is the network. 255.255.255.0 for an ordinary home or office network."],
+ "network.gateway":["Gateway","","The router traffic leaves through. Leave empty on a network with no route out."],
+ "network.dns":["Name server","","Who resolves names for the camera. With an automatic address this is replaced by whatever the network hands out."],
+ "system.hostname":["Camera name","","What this camera calls itself on the network — mdnsd answers to <name>.local and the DHCP lease carries it. Changing it takes effect at once, so confirm within the window or the camera puts the old name back."],
+ "system.ntp_server":["Time server","","The host to sync the clock from. Applied at once — ntpd is restarted with it."],
+ "sensor.fps":["Sensor frame rate","fps","The rate the sensor is driven at. Every stream is capped by it."],
+ "sensor.antiflicker":["Anti-flicker","","Locks exposure to the mains period so lighting does not band."],
+ "image.brightness":["Brightness"],"image.contrast":["Contrast"],
+ "image.saturation":["Colour saturation"],"image.sharpness":["Sharpness"],"image.hue":["Hue"],
+ "image.sinter":["Spatial noise reduction","","Smooths grain within a frame. High values cost fine detail."],
+ "image.temper":["Temporal noise reduction","","Averages across frames. High values smear anything moving."],
+ "image.ae_comp":["Exposure compensation","","Biases the auto-exposure target up or down."],
+ "image.max_again":["Maximum analogue gain","","How far auto-exposure may push sensor gain before giving up on light."],
+ "image.max_dgain":["Maximum digital gain"],
+ "image.dpc_strength":["Defective pixel correction"],
+ "image.drc_strength":["Dynamic range compression","","Lifts shadows in high-contrast scenes."],
+ "image.defog_strength":["Defog"],"image.highlight_depress":["Highlight suppression"],
+ "image.backlight_comp":["Backlight compensation"],
+ "image.hflip":["Mirror horizontally","","Some platforms take this at channel creation, and then it needs an apply."],
+ "image.vflip":["Flip vertically"],
+ "stream0.width":["Width","px"],"stream0.height":["Height","px"],
+ "stream0.codec":["Video codec","","H.265 halves the bitrate for the same picture; some clients cannot decode it."],
+ "stream0.profile":["H.264 profile"],"stream0.bitrate":["Bitrate","bps"],
+ "stream0.gop":["Keyframe interval","frames","Frames between keyframes. Lower joins faster and costs bandwidth."],
+ "stream0.fps":["Frame rate","fps"],"stream0.osd_enabled":["Burn in the overlay"],
+ "stream0.jpeg":["JPEG snapshots from this stream"],"stream1.enabled":["Second stream"],
+ "jpeg.enabled":["JPEG encoder"],"jpeg.quality":["Quality","","1 smallest · 100 best."],
+ "jpeg.fps":["Maximum rate","fps"],
+ "jpeg.idle":["Encode only when asked","","Saves the encoder when nobody is watching; the first snapshot then costs a frame."],
+ "audio.enabled":["Audio capture"],"audio.input":["Microphone"],
+ "audio.sample_rate":["Sample rate","Hz"],"audio.codec":["Audio codec"],
+ "audio.bitrate":["Bitrate","bps"],"audio.volume":["Input volume","%"],
+ "audio.gain":["Input gain","","Analogue stage, before the ADC. Too high clips."],
+ "audio.ao_volume":["Output volume","%"],"audio.ao_gain":["Output gain"],
+ "audio.aec_enabled":["Echo cancellation"],
+ "audio.hpf_enabled":["High-pass filter","","Cuts wind and handling rumble."],
+ "rtsp.enabled":["RTSP server"],"rtsp.port":["Port"],"rtsp.max_clients":["Maximum viewers"],
+ "rtsp.session_timeout":["Session timeout","s"],
+ "rtsp.idr_on_join":["Keyframe on join","","A new viewer sees picture at once; everyone else takes a bitrate spike."],
+ "rtsp.username":["Username"],"rtsp.password":["Password"],
+ "http.enabled":["Snapshot and MJPEG server"],"http.port":["Port"],
+ "http.max_clients":["Maximum viewers"],"http.username":["Username"],"http.password":["Password"],
+ "osd.enabled":["Overlay"],"osd.font_size":["Font size","px"],"osd.font_stroke":["Outline width","px"],
+ "ircut.enabled":["Day/night switching"],
+ "ircut.trigger":["Decide from","","What the camera watches to call nightfall."],
+ "ircut.pulse_ms":["Filter pulse","ms","How long the IR-cut solenoid is driven. Too short and it does not latch."],
+ "ircut.gpio_ircut":["IR-cut GPIO A"],"ircut.gpio_ircut2":["IR-cut GPIO B"],
+ "ircut.gpio_irled":["IR LED GPIO (850 nm)"],"ircut.gpio_irled2":["IR LED GPIO (940 nm)"],
+ "ircut.adc_channel":["ADC channel"],"ircut.adc_night":["ADC night threshold"],
+ "ircut.adc_day":["ADC day threshold"],"ircut.photo_ev_night":["Night EV"],
+ "ircut.photo_ev_deep":["Deep night EV"],"ircut.photo_ev_day":["Day EV"],
+ "ircut.photo_rgain_rec":["Red gain at recovery"],"ircut.photo_bgain_rec":["Blue gain at recovery"],
+ "motion.enabled":["Motion detection"],"motion.algorithm":["Algorithm"],
+ "motion.sensitivity":["Sensitivity","","0 least sensitive · 5 most."],
+ "motion.cooldown_sec":["Cooldown","s","Quiet period after an event before another can fire."],
+ "motion.record":["Record on motion"],"motion.record_post_sec":["Keep recording after","s"],
+ "recording.enabled":["Recording"],"recording.mode":["Mode"],
+ "recording.stream":["Record which stream"],"recording.audio":["Include audio"],
+ "recording.segment_minutes":["Segment length","min"],
+ "recording.max_storage_mb":["Storage cap","MB","Oldest segments are deleted first. 0 for no cap."],
+ "recording.prebuffer_sec":["Pre-roll","s","Seconds kept before the trigger, so an event is not missed."],
+ "timelapse.enabled":["Time-lapse"],"timelapse.interval":["Capture every","s"],
+ "timelapse.playback_fps":["Playback rate","fps"],"timelapse.max_mb":["Storage cap","MB"]
+};
+["width","height","codec","profile","bitrate","gop","fps","osd_enabled","jpeg"]
+  .forEach(k => { if (L["stream0." + k]) L["stream1." + k] = L["stream0." + k]; });
+
+const pretty = s => s.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
+const label = id => (L[id] && L[id][0]) || pretty(id.split(".").slice(1).join("."));
+const unit  = id => (L[id] && L[id][1]) || "";
+const help  = id => (L[id] && L[id][2]) || "";
+
+/* Which sections sit on which page, and in what order. Sections the schema
+ * reports that no tab claims are collected onto a final page, so a new one
+ * cannot go unreachable. */
+const TABS = [
+ {id:"image",   name:"Image",       groups:[{title:"Picture", section:"image"}]},
+ {id:"streams", name:"Streams",     groups:[{title:"Sensor", section:"sensor"},
+                                            {title:"Encoders", matrix:["stream0","stream1"]},
+                                            {title:"Snapshots", section:"jpeg"},
+                                            {title:"Actions", actions:["request-idr"]}]},
+ {id:"audio",   name:"Audio",       groups:[{title:"Audio", section:"audio"}]},
+ {id:"night",   name:"Day & night", groups:[{title:"Switching", section:"ircut"},
+                                            {title:"Manual override", actions:["ircut-mode","ir850","ir940"],
+                                             note:"Persists nothing — the next automatic transition takes it back."}]},
+ {id:"record",  name:"Recording",   groups:[{title:"Motion", section:"motion"},
+                                            {title:"Recording", section:"recording"},
+                                            {title:"Time-lapse", section:"timelapse"}]},
+ {id:"system",  name:"System",       groups:[{title:"Time", section:"system"},
+                                            {title:"Network", section:"network",
+                                             note:"Applied together, and put back after 90 seconds unless you confirm — so a wrong address costs a wait, not a trip to the camera."}]},
+ {id:"services",name:"Services",    groups:[{title:"RTSP", section:"rtsp"},
+                                            {title:"Snapshots & MJPEG", section:"http"},
+                                            {title:"Overlay", section:"osd"},
+                                            {title:"Overlay actions", actions:["osd-enable","osd-disable"]}]}
+];
+const ACTION_UI = {
+ "request-idr":{label:"Force a keyframe"},
+ "ircut-mode":{label:"Day / night", arg:"mode"},
+ "ir850":{label:"850 nm LEDs", arg:"value", toggle:true},
+ "ir940":{label:"940 nm LEDs", arg:"value", toggle:true},
+ "osd-enable":{label:"Show overlay"},
+ "osd-disable":{label:"Hide overlay"}
+};
+
+/* ═══ live model ═════════════════════════════════════════════════════════ */
+let KEYS = [];            /* the schema, as served */
+let ACTIONS = [];
+const byId = {};
+const V = {};             /* current value per key id */
+const SAVED = {};         /* last value known to be on disk */
+const CREDSET = {};
+const UNSET = new Set();   /* no value from the daemon and none in the file */
+/*
+ * Keys running on somebody's default rather than on a choice.
+ *
+ * Not the same as UNSET: a daemon reports the default it resolved in exactly
+ * the shape of a configured value, and it is right to -- that is the value in
+ * force. rcd says which is which with `configured`, and this is the only thing
+ * that can answer whether there is anything to put back.
+ */
+const DEFAULTED = new Set();
+/* Staged for reset. Held here rather than sent, because a reset is restart
+ * tier whatever the key is, and the page has one Apply for all of those. */
+const RESET = new Set();
+const dirty = new Set();
+let active = TABS[0].id;
+let armed = false;
+
+const id_of = k => k.section + "." + k.key;
+
+/*
+ * What restarting a key's owner costs.
+ *
+ * A live key is published with impact "none", which is true of setting it and
+ * false of every other thing that can happen to it: when the platform refuses
+ * the live command -- SigmaStar takes orientation at channel creation, so
+ * hflip always does -- the edit falls back to the file and the only way to
+ * enact it is to restart rvd. Reading "none" then told the operator that
+ * applying it costs nothing, in the confirmation step that exists precisely to
+ * tell them otherwise. The owner's real cost is in the schema already, carried
+ * by its restart-tier keys, so it is derived rather than assumed.
+ */
+/*
+ * What this camera has at all, as opposed to what the table describes.
+ *
+ * Two different absences, and they need different sources. A key rcd marks
+ * `available:false` is one the SoC has no control for -- more than half of
+ * [image] on an i6c -- and it is answered from rvd's own vtable. A daemon
+ * missing from the build is the other: `hello` reports what is installed, and
+ * a section whose owner is not there can be configured but never enacted, so
+ * a whole tab of it is worse than useless.
+ *
+ * Neither is inferred from a failed live command. Orientation is published on
+ * SigmaStar and refused while the channel is up; hiding it would delete three
+ * working controls.
+ */
+const MISSING_DAEMON = new Set();
+const usable = k => k.available !== false && !MISSING_DAEMON.has(k.owner);
+
+const OWNER_IMPACT = {};
+function learnImpacts() {
+  KEYS.forEach(k => {
+    if (k.tier !== "live" && k.impact && k.impact !== "none") OWNER_IMPACT[k.owner] = k.impact;
+  });
+}
+const costOf = k => (k.impact && k.impact !== "none") ? k.impact
+                  : (OWNER_IMPACT[k.owner] || "service");
+
+/* ═══ widget choice — from the schema alone ══════════════════════════════
+   With one exception the control follows from the type and the range. The
+   exception is that a range says nothing about whether the numbers in it are
+   quantities or names: a GPIO is picked from a wiring diagram and never
+   nudged, so a slider over it is an invitation to sweep every pin on the SoC
+   looking for the one that moves the filter. Identity keys get a plain field.
+   This is presentation, so it belongs here rather than in rcd's table. */
+const IDENTIFIER = /^(gpio_|adc_channel$)/;
+function isIdentifier(k) { return IDENTIFIER.test(k.key); }
+
+function widgetFor(k) {
+  if (k.type === "bool") return "switch";
+  if (k.type === "credential") return "cred";
+  if (k.type === "host" || k.type === "ipv4") return "text";
+  if (k.type === "enum") return (k.choices || []).length <= 4 ? "seg" : "select";
+  if (k.labels) return k.labels.length <= 4 ? "seg" : "select";
+  const span = k.max - k.min;
+  if (span === 1) return "switch";
+  if (isIdentifier(k)) return "number";
+  if (span <= 4) return "seg";
+  if (span <= 1000) return "slider";
+  return "number";
+}
+const fmt = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+
+/* A labelled integer shows its name and is sent as its name; rcd maps it back
+ * to the number, which is what the file and the daemons want. */
+const labelOf = (k, v) => (k.labels && k.labels[v - k.min] !== undefined)
+  ? k.labels[v - k.min] : String(v);
+const valueOf = (k, name) => k.labels ? k.min + k.labels.indexOf(name) : name;
+
+/* ═══ reset ══════════════════════════════════════════════════════════════
+   Putting a key back means removing it, not writing a default over it: the
+   default is the argument at the read site inside the daemon that owns the
+   key, and nothing here has a copy of it. So this page cannot show what the
+   value will become -- only that it will be the daemon's. It says that rather
+   than guessing, and the field fills in for real after the restart.
+
+   Staged like every other restart-tier change and sent by Apply, because that
+   is what a reset is however live the key is when it carries a value. */
+const canReset = id => byId[id] && byId[id].resettable !== false &&
+                       byId[id].type !== "credential" &&
+                       (!DEFAULTED.has(id) || RESET.has(id));
+
+function toggleReset(id, on) {
+  if (on === undefined) on = !RESET.has(id);
+  if (on) { RESET.add(id); dirty.add(id); }
+  else {
+    RESET.delete(id);
+    if (JSON.stringify(V[id]) === JSON.stringify(SAVED[id])) dirty.delete(id);
+  }
+}
+
+/* A whole section at once. Only the keys that have something to put back --
+   most of a section is already at its default, and staging those would ask
+   for a restart to change nothing. */
+function resetSection(sections) {
+  const ids = KEYS.filter(k => sections.includes(k.section)).map(id_of)
+                  .filter(id => canReset(id) && !DEFAULTED.has(id));
+  if (!ids.length) { wlog("sys", "nothing to put back in " + sections.join(", ")); return; }
+  ids.forEach(id => toggleReset(id, true));
+  refreshBar(); render();
+  wlog("sys", "staged " + ids.length + " key" + (ids.length === 1 ? "" : "s") +
+              " for reset — Apply puts them back");
+}
+
+/* Two buttons, not one taking either kind of argument: a key id and a section
+   name are both strings, and telling them apart by how many were passed is a
+   guess that was wrong for every group holding exactly one section. */
+function undoButton(label, title, onClick) {
+  const b = document.createElement("button");
+  b.className = "undo"; b.type = "button";
+  b.textContent = label;
+  b.title = title;
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function keyUndoButton(id) {
+  return undoButton(
+    RESET.has(id) ? "keep the reset" : "reset",
+    "Take this key out of the configuration and let " +
+      ((byId[id] && byId[id].owner) || "the camera") + " use its own default",
+    () => { toggleReset(id); refreshBar(); render(); });
+}
+
+function sectionUndoButton(sections) {
+  return undoButton("reset section", "Put every key in this section back to its default",
+                    () => resetSection(sections));
+}
+
+/* ═══ committing ═════════════════════════════════════════════════════════
+   One request per key at a time, and the newest value always wins.
+
+   A number spinner held down fires a change per click, each one a round trip
+   to the daemon. Sent as they come, the replies race: an older one lands after
+   a newer click and writes the device's answer back over the value the
+   operator has just chosen, which reads as a control that sticks and drops
+   inputs. So a key with a request in flight parks the latest value instead of
+   sending it, and the reply is only written back into the control when nothing
+   is parked behind it -- otherwise the parked value is about to be sent and
+   would be overwritten by a reading it predates. */
+const inflight = new Set();
+const parked = {};
+
+async function commit(id, val, el) {
+  const k = byId[id];
+  const prev = V[id];
+  V[id] = val;
+  /* Typing into a field the operator has just asked to put back means they
+     changed their mind about the reset, not that they want both. */
+  RESET.delete(id);
+
+  if (k.tier === "live" && k.type !== "credential") {
+    if (inflight.has(id)) { parked[id] = {val: val, el: el}; return; }
+    inflight.add(id);
+    try {
+      await commitLive(id, val, el, prev);
+    } finally {
+      inflight.delete(id);
+      const q = parked[id];
+      if (q) { delete parked[id]; commit(id, q.val, q.el); }
+    }
+    return;
+  }
+
+  if (k.type === "credential") {
+    try {
+      await api({cmd:"credentials", section:k.section, key:k.key, value:val});
+      CREDSET[id] = true;
+      mark(el, "set");
+    } catch (e) { V[id] = prev; mark(el, e.message, true); }
+    return;
+  }
+
+  if (JSON.stringify(val) === JSON.stringify(SAVED[id])) dirty.delete(id);
+  else dirty.add(id);
+  if (el) el.classList.toggle("dirty", dirty.has(id));
+  refreshBar();
+}
+
+/* `prev` is passed in: V[id] has already been moved to the new value so the
+ * control reflects the click at once, and the error path needs what it was
+ * before that. */
+async function commitLive(id, val, el, prev) {
+  const k = byId[id];
+  const wire = k.labels ? labelOf(k, val) : val;
+  try {
+    const r = await api({cmd:"set", edits:[{section:k.section, key:k.key, value:wire}]});
+    const res = (r.results || [])[0] || {};
+    /* The device's answer wins over what was typed: an ISP quantises, and a
+     * live command that was refused falls back to the file and says so. */
+    if (res.value !== undefined && res.value !== null) {
+      V[id] = k.labels && typeof res.value === "string" ? valueOf(k, res.value) : res.value;
+      if (!parked[id]) syncControl(el, k, V[id]);
+    }
+    if (res.applied === "saved") {
+      dirty.add(id);
+      if (el) {
+        el.classList.add("dirty");
+        /* The badge said "live" a moment ago and is now wrong. */
+        const c = el.querySelector(".chip");
+        if (c) { c.className = "chip " + costOf(k); c.textContent = costOf(k);
+                 c.title = "Needs " + k.owner + " restarted — " + COST[costOf(k)]; }
+      }
+      mark(el, res.note || "saved — needs apply", true);
+      refreshBar();
+    } else {
+      /* rcd's own words when it has any: a stored value that nothing has
+         read yet says so, and "applied" would be a smaller truth. */
+      mark(el, res.note ? res.note
+                        : (V[id] !== val ? "device " + labelOf(k, V[id]) : "applied"),
+           false, V[id] !== val);
+      if (el) { el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
+    }
+  } catch (e) {
+    V[id] = prev;
+    if (!parked[id]) syncControl(el, k, prev);
+    mark(el, e.message, true);
+  }
+}
+
+function mark(el, text, warn, bold) {
+  if (!el) return;
+  const rb = el.querySelector(".readback");
+  if (!rb) return;
+  rb.classList.toggle("warn", !!warn);
+  if (bold) { rb.innerHTML = ""; const b = document.createElement("b"); b.textContent = text; rb.append(b); }
+  else rb.textContent = text;
+}
+function syncControl(el, k, val) {
+  if (!el) return;
+  const sl = el.querySelector("input[type=range]");
+  if (sl) sl.value = val;
+  const nm = el.querySelector(".num");
+  if (nm) nm.value = val;
+  const tx = el.querySelector(".txt");
+  if (tx && document.activeElement !== tx) tx.value = val === undefined || val === null ? "" : val;
+}
+
+/* ═══ controls ═══════════════════════════════════════════════════════════ */
+function buildControl(id, onChange) {
+  const k = byId[id], w = widgetFor(k), wrap = document.createElement("div");
+  wrap.className = "ctl";
+  const u = unit(id);
+
+  if (w === "switch") {
+    const isInt = k.type === "int";
+    const lab = document.createElement("label"); lab.className = "sw";
+    const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = !!V[id];
+    const tr = document.createElement("span"); tr.className = "track";
+    const tx = document.createElement("span"); tx.className = "lbl";
+    tx.textContent = cb.checked ? "on" : "off";
+    cb.addEventListener("change", () => {
+      tx.textContent = cb.checked ? "on" : "off";
+      onChange(isInt ? (cb.checked ? 1 : 0) : cb.checked);
+    });
+    lab.append(cb, tr, tx); wrap.append(lab); return wrap;
+  }
+
+  if (w === "seg" || w === "select") {
+    const opts = k.type === "enum" ? (k.choices || [])
+               : k.labels ? k.labels
+               : Array.from({length: k.max - k.min + 1}, (_, i) => String(k.min + i));
+    const cur = k.type === "enum" ? V[id] : (k.labels ? labelOf(k, V[id]) : String(V[id]));
+    const send = o => onChange(k.type === "enum" ? o : (k.labels ? valueOf(k, o) : Number(o)));
+    if (w === "select") {
+      const s = document.createElement("select");
+      opts.forEach(o => {
+        const op = document.createElement("option"); op.value = op.textContent = o;
+        if (cur === o) op.selected = true; s.append(op);
+      });
+      s.addEventListener("change", () => send(s.value));
+      wrap.append(s); return wrap;
+    }
+    const seg = document.createElement("div"); seg.className = "seg";
+    opts.forEach(o => {
+      const b = document.createElement("button"); b.type = "button"; b.textContent = o;
+      b.setAttribute("aria-pressed", String(cur === o));
+      b.addEventListener("click", () => {
+        seg.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", "false"));
+        b.setAttribute("aria-pressed", "true");
+        send(o);
+      });
+      seg.append(b);
+    });
+    wrap.append(seg); return wrap;
+  }
+
+  if (w === "cred") {
+    const box = document.createElement("div"); box.className = "cred";
+    const inp = document.createElement("input");
+    inp.type = /password/.test(k.key) ? "password" : "text";
+    inp.placeholder = CREDSET[id] ? "unchanged" : "not set";
+    inp.autocomplete = "off";
+    const st = document.createElement("span"); st.className = "state";
+    st.textContent = CREDSET[id] ? "set" : "unset";
+    inp.addEventListener("change", () => { if (inp.value) onChange(inp.value); });
+    box.append(inp, st); wrap.append(box);
+    const n = document.createElement("span"); n.className = "unit";
+    n.textContent = "write-only · never read back";
+    wrap.append(n); return wrap;
+  }
+
+  if (w === "text") {
+    const inp = document.createElement("input");
+    inp.type = "text"; inp.className = "txt";
+    inp.value = V[id] === undefined || V[id] === null ? "" : V[id];
+    inp.maxLength = k.max_length || 63;
+    inp.spellcheck = false; inp.autocapitalize = "off"; inp.autocomplete = "off";
+    inp.addEventListener("change", () => onChange(inp.value.trim()));
+    wrap.append(inp); return wrap;
+  }
+
+  if (w === "slider") {
+    const row = document.createElement("div"); row.className = "sl";
+    const sl = document.createElement("input"); sl.type = "range";
+    sl.min = k.min; sl.max = k.max; sl.value = V[id];
+    const nm = document.createElement("input"); nm.className = "num"; nm.type = "number";
+    nm.min = k.min; nm.max = k.max; nm.value = V[id];
+    sl.addEventListener("input", () => { nm.value = sl.value; });
+    sl.addEventListener("change", () => onChange(Number(sl.value)));
+    nm.addEventListener("change", () => { sl.value = nm.value; onChange(Number(nm.value)); });
+    row.append(sl, nm);
+    if (u) { const us = document.createElement("span"); us.className = "unit"; us.textContent = u; row.append(us); }
+    wrap.append(row);
+    const rng = document.createElement("span"); rng.className = "unit";
+    rng.textContent = k.min + "–" + k.max; wrap.append(rng);
+    return wrap;
+  }
+
+  const box = document.createElement("div"); box.className = "numwrap";
+  const nm = document.createElement("input"); nm.className = "num wide"; nm.type = "number";
+  nm.min = k.min; nm.max = k.max; nm.value = V[id];
+  const us = document.createElement("span"); us.className = "unit"; us.textContent = u;
+  nm.addEventListener("change", () => onChange(Number(nm.value)));
+  box.append(nm, us); wrap.append(box);
+  const hint = document.createElement("span"); hint.className = "unit";
+  hint.textContent = fmt(k.min) + " – " + fmt(k.max); wrap.append(hint);
+  return wrap;
+}
+
+const COST = {
+  none:"nothing is interrupted",
+  service:"nothing a viewer notices",
+  stream:"connected viewers are dropped",
+  pipeline:"capture stops, everything downstream reconnects",
+  network:"every connection to the camera drops, including this page",
+  reboot:"the camera has to restart before anything reads it"
+};
+/* Two different questions, and a key can answer them differently. The tier
+   says whether anything is owed to Apply; the impact says what it costs to be
+   in force. The timezone is the one that separates them: it is stored the
+   moment it is set, so Apply has nothing to do, and nothing running reads it
+   until the camera comes back. */
+function chip(k) {
+  const c = document.createElement("span");
+  if (k.tier === "live" && k.impact && k.impact !== "none") {
+    c.className = "chip " + k.impact; c.textContent = k.impact;
+    c.title = "Stored at once — " + COST[k.impact];
+  } else if (k.tier === "live") {
+    c.className = "chip live"; c.textContent = "live";
+    c.title = "Applied to " + k.owner + " the moment you change it";
+  } else {
+    c.className = "chip " + k.impact; c.textContent = k.impact;
+    c.title = "Needs " + k.owner + " restarted — " + COST[k.impact];
+  }
+  if (k.guard_sec) c.title += ". Reverts in " + k.guard_sec + " s unless you confirm";
+  return c;
+}
+
+function buildRow(id) {
+  const k = byId[id];
+  const row = document.createElement("div"); row.className = "row"; row.dataset.id = id;
+  if (dirty.has(id)) row.classList.add("dirty");
+  if (RESET.has(id)) row.classList.add("resetting");
+  const lab = document.createElement("div"); lab.className = "lab";
+  const nm = document.createElement("span"); nm.className = "name"; nm.textContent = label(id);
+  const idl = document.createElement("span"); idl.className = "id"; idl.textContent = id;
+  lab.append(nm, idl);
+  const h = help(id);
+  if (h) { const p = document.createElement("p"); p.className = "help"; p.textContent = h; lab.append(p); }
+  const ctl = buildControl(id, v => commit(id, v, row));
+  const mk = document.createElement("div"); mk.className = "mark";
+  mk.append(chip(k));
+  const rb = document.createElement("span"); rb.className = "readback";
+  if (RESET.has(id)) rb.textContent = "default after apply";
+  else if (UNSET.has(id)) rb.textContent = "not set";
+  else if (DEFAULTED.has(id)) rb.textContent = "default";
+  mk.append(rb);
+  if (canReset(id)) mk.append(keyUndoButton(id));
+  row.append(lab, ctl, mk);
+  return row;
+}
+
+/* Both encoders take the same keys, so they are one table with a column each
+ * rather than two lists of ten. */
+function buildMatrix(sections) {
+  const t = document.createElement("table"); t.className = "matrix";
+  const hr = document.createElement("tr"); hr.append(document.createElement("th"));
+  sections.forEach(s => {
+    const th = document.createElement("th");
+    th.append(document.createTextNode(s === sections[0] ? "Main" : "Sub"));
+    const res = document.createElement("span"); res.className = "res";
+    res.textContent = (V[s + ".width"] || "?") + "×" + (V[s + ".height"] || "?") + " · " + s;
+    th.append(res); hr.append(th);
+  });
+  const head = document.createElement("thead"); head.append(hr); t.append(head);
+
+  const body = document.createElement("tbody");
+  const keys = [];
+  KEYS.forEach(k => { if (sections.includes(k.section) && !keys.includes(k.key)) keys.push(k.key); });
+  keys.forEach(key => {
+    const tr = document.createElement("tr");
+    const kd = document.createElement("td"); kd.className = "k";
+    const anyId = sections.map(s => s + "." + key).find(i => byId[i]);
+    const nm = document.createElement("div"); nm.textContent = label(anyId);
+    const il = document.createElement("div"); il.className = "id"; il.textContent = "*." + key;
+    kd.append(nm, il); tr.append(kd);
+    sections.forEach(s => {
+      const id = s + "." + key, td = document.createElement("td"); td.className = "cell";
+      if (!byId[id]) { const u = document.createElement("span"); u.className = "unit";
+        u.textContent = "—"; td.append(u); tr.append(td); return; }
+      if (dirty.has(id)) td.classList.add("dirty");
+      if (RESET.has(id)) td.classList.add("resetting");
+      const box = document.createElement("div"); box.className = "cellbox";
+      const foot = document.createElement("div"); foot.className = "cellfoot";
+      foot.append(chip(byId[id]));
+      const rb = document.createElement("span"); rb.className = "readback";
+      if (RESET.has(id)) rb.textContent = "default";
+      else if (DEFAULTED.has(id)) rb.textContent = "default";
+      foot.append(rb);
+      if (canReset(id)) foot.append(keyUndoButton(id));
+      box.append(buildControl(id, v => commit(id, v, td)), foot);
+      td.append(box); tr.append(td);
+    });
+    body.append(tr);
+  });
+  t.append(body); return t;
+}
+
+function buildActions(names) {
+  const box = document.createElement("div"); box.className = "acts";
+  names.forEach(n => {
+    const meta = ACTIONS.find(a => a.name === n);
+    if (!meta) return;                      /* the daemon does not offer it */
+    const ui = ACTION_UI[n] || {label: pretty(n)};
+    const arg = (meta.args || []).find(a => a.type === "enum");
+    if (arg && arg.choices && !ui.toggle) {
+      const lab = document.createElement("span"); lab.className = "unit"; lab.textContent = ui.label;
+      const seg = document.createElement("div"); seg.className = "seg";
+      arg.choices.forEach(c => {
+        const b = document.createElement("button"); b.type = "button"; b.textContent = c;
+        b.addEventListener("click", () => {
+          seg.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", "false"));
+          b.setAttribute("aria-pressed", "true");
+          fire(n, {[arg.key]: c});
+        });
+        seg.append(b);
+      });
+      box.append(lab, seg);
+    } else if (ui.toggle && arg) {
+      const b = document.createElement("button"); b.className = "btn"; b.textContent = ui.label;
+      let on = false;
+      b.addEventListener("click", () => {
+        on = !on; b.classList.toggle("on", on);
+        fire(n, {[arg.key]: on ? "on" : "off"});
+      });
+      box.append(b);
+    } else {
+      const b = document.createElement("button"); b.className = "btn"; b.textContent = ui.label;
+      b.addEventListener("click", () => fire(n, null));
+      box.append(b);
+    }
+  });
+  return box;
+}
+async function fire(name, args) {
+  try { await api(Object.assign({cmd:"action", name:name}, args || {})); }
+  catch (e) { wlog("err", "! " + name + ": " + e.message); }
+}
+
+/* ═══ render ═════════════════════════════════════════════════════════════ */
+function claimedSections() {
+  const s = [];
+  TABS.forEach(t => t.groups.forEach(g => {
+    if (g.matrix) s.push(...g.matrix); else if (g.section) s.push(g.section);
+  }));
+  return s;
+}
+function tabSections(t) {
+  return t.groups.flatMap(g => g.matrix ? g.matrix : (g.section ? [g.section] : []));
+}
+function ircutVisible(key) {
+  const t = V["ircut.trigger"];
+  if (key.startsWith("adc_")) return t === "adc";
+  if (key.startsWith("photo_")) return t === "photo";
+  return true;
+}
+
+function render() {
+  const sheet = document.getElementById("sheet");
+  sheet.textContent = "";
+  const tab = TABS.find(t => t.id === active);
+
+  tab.groups.forEach(g => {
+    const rows = g.section ? KEYS.filter(k => k.section === g.section) : [];
+    if (g.section && !rows.length) return;      /* section the build left out */
+    const sec = document.createElement("section"); sec.className = "group";
+    const h = document.createElement("h3");
+    h.append(document.createTextNode(g.title));
+    if (g.note) { const n = document.createElement("span"); n.className = "note";
+      n.textContent = g.note; h.append(n); }
+    const secs = g.matrix ? g.matrix : (g.section ? [g.section] : []);
+    if (secs.length && KEYS.some(k => secs.includes(k.section) && canReset(id_of(k)) &&
+                                      !DEFAULTED.has(id_of(k))))
+      h.append(sectionUndoButton(secs));
+    const own = document.createElement("span"); own.className = "owner";
+    own.textContent = g.matrix ? (byId[g.matrix[0] + ".width"] || {}).owner || ""
+                   : (rows[0] ? rows[0].owner : "");
+    h.append(own); sec.append(h);
+
+    if (g.matrix) sec.append(buildMatrix(g.matrix));
+    else if (g.actions) sec.append(buildActions(g.actions));
+    else rows.forEach(k => {
+      if (k.section === "ircut" && !ircutVisible(k.key)) return;
+      sec.append(buildRow(id_of(k)));
+    });
+    sheet.append(sec);
+  });
+
+  const f = document.createElement("p"); f.className = "foot";
+  f.textContent = "rcd serves " + KEYS.length + " typed keys and " + ACTIONS.length +
+    " actions as one flat array — no grouping, no wording, no layout. Everything above is this "+
+    "page reading that array.";
+  sheet.append(f);
+  paintTabs();
+}
+
+function paintTabs() {
+  document.querySelectorAll(".tab").forEach(el => {
+    const t = TABS.find(x => x.id === el.dataset.id);
+    const secs = tabSections(t);
+    el.classList.toggle("has-dirty", [...dirty].some(d => secs.includes(d.split(".")[0])));
+    el.setAttribute("aria-selected", String(el.dataset.id === active));
+  });
+}
+
+/* ═══ apply ══════════════════════════════════════════════════════════════ */
+const RANK = {service:1, stream:2, pipeline:3, network:4};
+const bar = document.getElementById("applybar");
+const btnApply = document.getElementById("btnApply");
+
+function refreshBar() {
+  const n = dirty.size;
+  bar.hidden = n === 0;
+  armed = false; btnApply.className = "btn primary"; btnApply.textContent = "Apply";
+  paintTabs();
+  if (!n) return;
+  const worst = worstCost();
+  const owners = [...new Set([...dirty].map(id => byId[id].owner))];
+  const daemons = owners.filter(o => o !== "system");
+  document.getElementById("apCount").textContent = n + (n === 1 ? " change pending" : " changes pending");
+  /* "system" is not a daemon and cannot be restarted; what happens to those
+     keys is that the camera enacts them, which is a different sentence. */
+  const what = [daemons.length ? "Restarts " + daemons.join(", ") : null,
+                owners.includes("system") ? "changes the camera itself" : null]
+               .filter(Boolean).join(", ");
+  document.getElementById("apCost").textContent =
+    what.charAt(0).toUpperCase() + what.slice(1) + " — " + COST[worst] + ".";
+  const kb = document.getElementById("apKeys"); kb.textContent = "";
+  [...dirty].slice(0, 5).forEach(id => {
+    const c = document.createElement("code"); c.textContent = id; kb.append(c);
+  });
+  if (n > 5) { const c = document.createElement("code"); c.textContent = "+" + (n - 5) + " more"; kb.append(c); }
+  if (worst === "pipeline" || worst === "network") btnApply.className = "btn danger";
+}
+
+function worstCost() {
+  return [...dirty].map(id => costOf(byId[id]))
+                   .reduce((a, b) => RANK[b] > RANK[a] ? b : a, "service");
+}
+
+btnApply.addEventListener("click", async () => {
+  const worst = worstCost();
+  if (worst !== "service" && !armed) {
+    armed = true;
+    btnApply.textContent = worst === "network" ? "Confirm — changes the address"
+                         : worst === "pipeline" ? "Confirm — stops capture"
+                         : "Confirm — drops viewers";
+    return;
+  }
+  await doApply(worst);
+});
+
+document.getElementById("btnRevert").addEventListener("click", async () => {
+  /* Ask rcd what is on disk rather than trusting this page's memory of it. */
+  dirty.clear();
+  RESET.clear();
+  await loadValues();
+  refreshBar(); render();
+  wlog("sys", "reverted to the saved configuration");
+});
+
+async function doApply(worst) {
+  const edits = [...dirty].map(id => {
+    const k = byId[id];
+    /* null is the whole request: take this key out and let its owner's own
+       default answer for it again. */
+    if (RESET.has(id)) return {section: k.section, key: k.key, value: null};
+    return {section: k.section, key: k.key, value: k.labels ? labelOf(k, V[id]) : V[id]};
+  });
+  btnApply.disabled = true; document.getElementById("btnRevert").disabled = true;
+  const screen = document.getElementById("screen");
+  const cam = document.getElementById("cam");
+  try {
+    /*
+     * The reply says, per edit, whether anything is now owed to the apply.
+     * An edit that found the setting the way it was asking for it is not --
+     * a reset of a key already at its default is the ordinary case of that,
+     * and treating it as a change would send this page looking for a camera
+     * that never went anywhere.
+     */
+    let moved = new Set(dirty);
+    if (edits.length) {
+      const r = await api({cmd:"set", edits: edits});
+      moved = new Set((r.results || []).filter(x => x.applied === "saved")
+                                       .map(x => x.section + "." + x.key));
+    }
+    if (worst === "pipeline") { screen.classList.add("busy"); cam.removeAttribute("src"); }
+
+    /*
+     * A guarded key changes the way back to the camera, so the reply to this
+     * apply is not waited for: on an address change the socket is gone before
+     * rcd can write it. The apply is sent, and then this page goes looking.
+     */
+    const guarded = [...moved].filter(id => byId[id] && byId[id].guard_sec);
+    if (guarded.length) {
+      const target = reconnectTarget(guarded);
+      dirty.forEach(id => SAVED[id] = V[id]); dirty.clear(); RESET.clear();
+      api({cmd:"apply"}).then(noteGuard).catch(() => {});
+      await reconnect(target);
+      return;
+    }
+
+    await api({cmd:"apply"});
+    dirty.forEach(id => SAVED[id] = V[id]); dirty.clear(); RESET.clear();
+    /* What the reset keys now read as comes from the daemons that own them,
+       and only after the restart above -- there was never a value here to
+       write into the fields. */
+    await loadValues();
+  } catch (e) {
+    wlog("err", "! apply: " + e.message);
+    banner("The apply did not finish", e.message);
+  } finally {
+    btnApply.disabled = false; document.getElementById("btnRevert").disabled = false;
+    screen.classList.remove("busy");
+    /*
+     * Twice, and the second one is the one that matters. An <img> showing a
+     * multipart stream that ends does not fire `error` -- it keeps the last
+     * frame it painted and says nothing -- so a restart leaves the picture
+     * looking live and stale, which is worse than a blank. The first attach
+     * happens now; the second is after the ring has had time to refill, since
+     * rcd reports the apply done when rvd is up rather than when it is
+     * producing.
+     */
+    startPreview();
+    setTimeout(() => startPreview(), 2500);
+    refreshBar(); render();
+    loadState();
+  }
+}
+
+/* ═══ confirm-or-revert ══════════════════════════════════════════════════
+   A guarded key is applied, never typed into effect: it sits in the apply bar
+   with everything else, and pressing Apply is what puts it in force. What
+   happens next is the interesting part -- an address change ends this page's
+   connection to the camera before the reply to that apply can be written, so
+   there is nothing to await and nothing to read.
+
+   So the page does what a person would: it goes looking. It keeps asking the
+   camera whether it is there, at the address it knows and then at the address
+   it just asked for, and only when the camera answers does it offer to keep
+   the change. Confirming a setting you cannot see the effect of is how a
+   camera ends up unreachable and confirmed. */
+const gbar = document.getElementById("guardbar");
+const gdTitle = document.getElementById("gdTitle");
+const gdWhat = document.getElementById("gdWhat");
+const gdClock = document.getElementById("gdClock");
+const btnKeep = document.getElementById("btnGuardKeep");
+const btnUndo = document.getElementById("btnGuardUndo");
+let guardLeft = 0, guardTick = null;
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function guardKeys(keys) {
+  const kb = document.getElementById("gdKeys"); kb.textContent = "";
+  (keys || []).forEach(k => {
+    const c = document.createElement("code"); c.textContent = k.section + "." + k.key; kb.append(c);
+  });
+}
+
+/* Connected, and the camera is waiting to be told. */
+function showGuard(g) {
+  guardLeft = g.revert_in_sec || 0;
+  gdTitle.textContent = "Still there? Confirm before this runs out";
+  gdWhat.textContent = "The camera goes back to what it had before unless you keep this.";
+  guardKeys(g.keys);
+  btnKeep.hidden = false; btnUndo.hidden = false;
+  gbar.hidden = false;
+  gdClock.textContent = guardLeft + " s";
+  if (guardTick) return;
+  guardTick = setInterval(() => {
+    if (guardLeft > 0) guardLeft--;
+    gdClock.textContent = guardLeft + " s";
+    /* Zero here is this page's own arithmetic, not the camera's word for it.
+       Ask, and let the answer -- guard gone -- close the bar. */
+    if (guardLeft <= 0) loadPending();
+  }, 1000);
+}
+
+/* Not connected yet. No Keep button: there is nothing to confirm from a page
+   that cannot reach the camera, and a button that posts into the dark would
+   report a failure that means nothing. */
+function showReconnect(target) {
+  gdTitle.textContent = "Reconnecting…";
+  gdWhat.textContent = target
+    ? "Applied. Looking for the camera at " + target.replace(/^https?:\/\//, "") + "."
+    : "Applied. Waiting for the camera to answer again.";
+  guardKeys(null);
+  btnKeep.hidden = true; btnUndo.hidden = true;
+  gbar.hidden = false;
+  gdClock.textContent = "";
+}
+
+async function hideGuard() {
+  if (gbar.hidden) return;
+  gbar.hidden = true;
+  if (guardTick) { clearInterval(guardTick); guardTick = null; }
+  /* Whatever ended it, the camera may now hold different values than this
+     page last drew -- a revert is a change nobody made here. */
+  await loadValues();
+  render();
+}
+
+/* Called with any reply that reports the guard: `set`, `apply`, `pending`,
+   `state`, `confirm`, `cancel`. Never with one that does not, since absence
+   would then read as "disarmed" from a command that was never asked. */
+function noteGuard(r) {
+  const g = r && r.guard;
+  if (g && g.armed) showGuard(g); else hideGuard();
+}
+
+btnKeep.addEventListener("click", async () => {
+  try { noteGuard(await api({cmd:"confirm"})); wlog("sys", "settings confirmed"); }
+  catch (e) { wlog("err", "! confirm: " + e.message); }
+});
+
+btnUndo.addEventListener("click", async () => {
+  try { noteGuard(await api({cmd:"cancel"})); wlog("sys", "settings put back"); }
+  catch (e) { wlog("err", "! cancel: " + e.message); }
+});
+
+/*
+ * Where the camera will be once this is applied, when the page can work it
+ * out. Only the two keys that move it are here; everything else guarded keeps
+ * the address, and then the answer is "the address you are already using".
+ */
+function reconnectTarget(ids) {
+  const port = location.port ? ":" + location.port : "";
+  const url = host => location.protocol + "//" + host + port;
+
+  /* An address the camera is about to ask a DHCP server for is not one this
+     page can predict, so it does not pretend to. Nor is one it is about to
+     stop having: a reset takes the address out, and where the camera comes
+     back is then the lease's business. */
+  const toDhcp = (ids.includes("network.dhcp") && V["network.dhcp"] === true) ||
+                 ids.some(i => i.startsWith("network.") && RESET.has(i));
+  if (!toDhcp && ids.includes("network.address") && V["network.address"]) return url(V["network.address"]);
+
+  if (ids.includes("system.hostname") && V["system.hostname"] && !RESET.has("system.hostname")) {
+    const n = V["system.hostname"];
+    /* mdnsd answers for <name>.local; a name that is already qualified is
+       one somebody's DNS is expected to know, and is used as given. */
+    return url(n.includes(".") ? n : n + ".local");
+  }
+  return null;
+}
+
+/* One question, a short fuse, and no logging: this is asked over and over
+   while the camera is not there, and every failure is expected. */
+async function probe(ms) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    const res = await fetch(API, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({cmd: "pending"}),
+      signal: ctl.signal
+    });
+    return res.ok ? await res.json() : null;
+  } catch (e) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/*
+ * Go looking for the camera, and move this page to it when it is not coming
+ * back to where we are. The redirect is a real navigation because the API is
+ * same-origin: a page at the old address cannot ask the new one anything.
+ *
+ * Failing that, keep asking past the window -- when the timer runs out the
+ * camera puts the old address back, which is this page's address, so waiting
+ * is itself the recovery.
+ */
+async function reconnect(target) {
+  showReconnect(target);
+  wlog("sys", "applied — waiting for the camera" + (target ? " at " + target : ""));
+
+  const moves = target && target !== location.origin;
+  const until = Date.now() + 150000;
+  let misses = 0;
+
+  while (Date.now() < until) {
+    await sleep(2000);
+    const p = await probe(4000);
+    if (p) {
+      noteGuard(p);
+      if (!p.guard) wlog("sys", "the camera is back and nothing is waiting to be confirmed");
+      return;
+    }
+    /* Three misses is six seconds of silence -- long enough that the
+       interface has gone down and not come back here, short enough that
+       nobody is left staring at a dead page. */
+    if (moves && ++misses === 3) {
+      wlog("sys", "moving to " + target);
+      location.href = target;
+      return;
+    }
+  }
+
+  gdTitle.textContent = "The camera has not come back";
+  gdWhat.textContent = target
+    ? "Try " + target + ". If it never answers, the camera puts the old settings back on its own."
+    : "The camera puts the old settings back on its own; this page will find it again when it does.";
+}
+
+/* ═══ preview ════════════════════════════════════════════════════════════
+   The stream this shows is the one an apply tears down, so a failure here is
+   the ordinary case and not an error state. rhd answers /mjpeg with a 404
+   until rvd has recreated the JPEG ring, which is a second or two after rcd
+   reports the apply finished -- giving up on the first refusal is what left a
+   dead preview that only a page reload fixed. */
+const PREVIEW_RETRY_MS = 1200;
+const PREVIEW_GIVE_UP_MS = 25000;
+let previewTimer = null, previewSince = 0;
+
+function startPreview(retrying) {
+  const cam = document.getElementById("cam");
+  const screen = document.getElementById("screen");
+  clearTimeout(previewTimer);
+  if (!retrying) previewSince = Date.now();
+  screen.classList.remove("noimg");
+
+  cam.onerror = () => {
+    cam.removeAttribute("src");
+    if (Date.now() - previewSince > PREVIEW_GIVE_UP_MS) {
+      screen.classList.add("noimg");
+      return;
+    }
+    previewTimer = setTimeout(() => startPreview(true), PREVIEW_RETRY_MS);
+  };
+  /* Cache-buster: a restarted pipeline serves a new stream on the same URL. */
+  cam.src = "/mjpeg?stream=" + previewStream() + "&t=" + Date.now();
+
+  document.getElementById("tagL").textContent =
+    "mjpeg · stream " + previewStream() + " · " +
+    (V["stream" + previewStream() + ".width"] || "?") + "×" +
+    (V["stream" + previewStream() + ".height"] || "?");
+}
+/* The sub-stream when there is one: the preview should not cost the main
+ * stream's bitrate on every open page. */
+function previewStream() {
+  return (V["stream1.enabled"] && V["stream1.jpeg"] !== false) ? 1 : 0;
+}
+
+/* ═══ status ═════════════════════════════════════════════════════════════ */
+function statLine(box, k, v, cls, title) {
+  const d = document.createElement("div"); d.className = "stat";
+  const ke = document.createElement("span"); ke.className = "k"; ke.textContent = k;
+  const ve = document.createElement("span"); ve.className = "v " + (cls || ""); ve.textContent = v;
+  if (title) d.title = title;
+  d.append(ke, ve); box.append(d);
+}
+function hhmm(secs) {
+  secs = Math.max(0, Math.floor(secs));
+  const d = Math.floor(secs / 86400), h = Math.floor(secs % 86400 / 3600),
+        m = Math.floor(secs % 3600 / 60);
+  return d ? d + "d " + h + "h" : h ? h + "h " + m + "m" : m + "m";
+}
+
+/*
+ * `state` is flat: whichever daemons answered contribute their own object,
+ * and a daemon that is down simply is not there. Nothing below assumes a
+ * section exists.
+ */
+async function loadState() {
+  let s;
+  try { s = await api({cmd:"state"}, true); } catch (e) { return; }
+  noteGuard(s);
+  const box = document.getElementById("status"); box.textContent = "";
+  const up = s.up || {};
+  const running = Object.keys(up).filter(d => up[d]);
+
+  statLine(box, "Pipeline", up.rvd ? "running" : "down", up.rvd ? "good" : "bad");
+  statLine(box, "Daemons", running.length + " up");
+  if (s.uptime !== undefined) statLine(box, "Uptime", hhmm(s.uptime));
+  ["stream0", "stream1"].forEach((k, i) => {
+    const st = s[k];
+    if (st) statLine(box, i === 0 ? "Main" : "Sub",
+                     (st.resolution || "?") + (st.fps ? " · " + st.fps + " fps" : ""));
+  });
+  if (s.rtsp && s.rtsp.clients !== undefined) statLine(box, "RTSP clients", String(s.rtsp.clients));
+  if (s.http && s.http.clients !== undefined) statLine(box, "HTTP clients", String(s.http.clients));
+
+  /*
+   * Day/night sits here rather than over the picture. It is a reading, and
+   * the two readings that decide it belong beside it: on a gain trigger the
+   * switch happens when total gain crosses a threshold, so an operator
+   * wondering why the camera has not gone to night wants to see the gain.
+   */
+  const ir = s.ir || {};
+  if (ir.state || ir.mode) {
+    const auto = ir.mode === "auto" || ir.mode === undefined;
+    statLine(box, "Day / night",
+             String(ir.state || ir.mode) + (auto ? "" : " (forced " + ir.mode + ")"),
+             ir.state === "night" ? "bad" : "good");
+  }
+  if (ir.exposure_us)
+    statLine(box, "Exposure", shutter(ir.exposure_us), "", ir.exposure_us + " \u00b5s");
+  if (ir.total_gain)
+    statLine(box, "Gain", gain(ir.total_gain), "", "raw " + ir.total_gain + " (1024 = 1\u00d7)");
+}
+
+/*
+ * Exposure as a shutter fraction, which is how it is read everywhere else,
+ * with the microseconds kept in the tooltip because that is what the daemon
+ * reports and what a bug report should quote.
+ */
+function shutter(us) {
+  if (!us) return "—";
+  if (us >= 1000000) return (us / 1000000).toFixed(1) + " s";
+  return "1/" + Math.round(1000000 / us) + " s";
+}
+
+/* Total gain arrives at 1024 per unit -- analogue and ISP gain multiplied,
+ * with one factor of the unit divided back out. */
+function gain(g) {
+  const x = g / 1024;
+  return (x < 10 ? x.toFixed(2) : x.toFixed(1)) + "\u00d7";
+}
+
+/* The log keeps filling while folded away, so opening it shows what already
+ * happened rather than starting a fresh empty pane. */
+(function () {
+  const wire = document.getElementById("wire");
+  const btn = document.getElementById("wiretoggle");
+  const log = document.getElementById("log");
+  btn.addEventListener("click", () => {
+    const open = !wire.classList.contains("open");
+    wire.classList.toggle("open", open);
+    btn.setAttribute("aria-expanded", String(open));
+    log.hidden = !open;
+  });
+})();
+
+/* ═══ boot ═══════════════════════════════════════════════════════════════ */
+function banner(title, detail) {
+  const sheet = document.getElementById("sheet");
+  sheet.textContent = "";
+  const b = document.createElement("div"); b.className = "banner";
+  const t = document.createElement("b"); t.textContent = title;
+  const p = document.createElement("div"); p.textContent = detail;
+  b.append(t, p);
+  sheet.append(b);
+}
+
+async function loadValues() {
+  const sections = [...new Set(KEYS.map(k => k.section))];
+  /* One request per section, not one carrying every key: rcd asks the owning
+   * daemon once per section, and a single hundred-key request would make it
+   * open the daemon socket a hundred times. */
+  for (const sec of sections) {
+    let r;
+    try { r = await api({cmd:"get", section: sec}, true); } catch (e) { continue; }
+    (r.values || []).forEach(v => {
+      const id = v.section + "." + v.key;
+      if (!byId[id]) return;
+      if (byId[id].type === "credential") { CREDSET[id] = v.set === true; return; }
+      if (v.set === false || v.value === undefined || v.value === null) {
+        DEFAULTED.add(id);
+        /* Nobody has ever set it and no daemon answered for it, so its value
+         * is whatever the daemon's own default turns out to be. Drawing a
+         * switch here would claim "off" about something that may well be on,
+         * which is exactly what [rtsp] did before rcd would answer for it. */
+        UNSET.add(id);
+        return;
+      }
+      UNSET.delete(id);
+      if (v.configured === false) DEFAULTED.add(id); else DEFAULTED.delete(id);
+      V[id] = v.value;
+      SAVED[id] = v.value;
+    });
+  }
+}
+
+async function loadPending() {
+  try {
+    const p = await api({cmd:"pending"}, true);
+    (p.stale || []).forEach(d => (d.keys || []).forEach(k => {
+      const id = k.section + "." + k.key;
+      if (byId[id]) dirty.add(id);
+    }));
+    /* A page loaded mid-window is the expected case, not the odd one: the
+       reason this window exists is that the last one stopped answering. */
+    noteGuard(p);
+  } catch (e) { /* drift is a nicety; the page works without it */ }
+}
+
+async function boot() {
+  let hello;
+  try {
+    hello = await api({cmd:"hello"});
+  } catch (e) {
+    banner("Cannot reach the configuration daemon", e.message +
+      ". rcd answers on /var/run/rss/rcd.sock and rhd forwards this page's requests to it.");
+    return;
+  }
+  /* The bare hash read as a mystery number. It is the raptor commit these
+   * daemons were built from, which is the first thing a bug report needs. */
+  const host = document.getElementById("host");
+  host.textContent = [hello.platform, hello.build ? "build " + hello.build : null]
+    .filter(Boolean).join(" · ") || "raptor";
+  host.title = "rcd " + (hello.daemon || "") + " · config " + (hello.config || "") +
+               (hello.build ? " · built from raptor " + hello.build : "");
+
+  Object.entries(hello.daemons || {}).forEach(([name, d]) => {
+    if (d && d.installed === false) MISSING_DAEMON.add(name);
+  });
+
+  const s = await api({cmd:"schema"});
+  ACTIONS = s.actions || [];
+  const all = s.keys || [];
+  KEYS = all.filter(usable);
+  const dropped = all.length - KEYS.length;
+  if (dropped) wlog("sys", dropped + " keys hidden: not on this SoC or daemon not installed");
+  KEYS.forEach(k => byId[id_of(k)] = k);
+  learnImpacts();
+
+  /* Any section no tab claims still gets a page, so a key added to rcd cannot
+   * become unreachable by forgetting to touch this file. */
+  const claimed = claimedSections();
+  const orphans = [...new Set(KEYS.map(k => k.section))].filter(x => !claimed.includes(x));
+  if (orphans.length) {
+    TABS.push({id:"more", name:"More",
+               groups: orphans.map(o => ({title: pretty(o), section: o}))});
+  }
+
+  const tabsEl = document.getElementById("tabs");
+  const shown = [];
+  TABS.forEach(t => {
+    const secs = tabSections(t);
+    const n = KEYS.filter(k => secs.includes(k.section)).length;
+    /* Nothing left and no actions to offer: the build does not have this. */
+    const acts = t.groups.some(g => (g.actions || []).some(a => ACTIONS.find(x => x.name === a)));
+    if (!n && !acts) return;
+    shown.push(t.id);
+    const b = document.createElement("button");
+    b.className = "tab"; b.dataset.id = t.id; b.setAttribute("role", "tab");
+    b.append(document.createTextNode(t.name));
+    const c = document.createElement("span"); c.className = "cnt"; c.textContent = n || "";
+    const dot = document.createElement("span"); dot.className = "dot";
+    b.append(c, dot);
+    b.addEventListener("click", () => {
+      active = t.id; render(); document.querySelector(".sheet").scrollTop = 0;
+    });
+    tabsEl.append(b);
+  });
+
+  if (shown.length && !shown.includes(active)) active = shown[0];
+
+  await loadValues();
+  await loadPending();
+  render();
+  refreshBar();
+  startPreview();
+  loadState();
+  setInterval(loadState, 5000);
+}
+
+boot();
+</script>
