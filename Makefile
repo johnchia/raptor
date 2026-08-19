@@ -388,11 +388,18 @@ rad: $(LIB_HAL_AUDIO_FILE) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 		LIBS="$(LIB_HAL_AUDIO) $(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS_HAL) $(LDFLAGS_AAC_ENC) $(LDFLAGS_OPUS)" Q="$(Q)"
 
+# -lcrypt because rhd_api.c authenticates the configuration route against
+# /etc/shadow and calls crypt(3). glibc keeps that in libcrypt and musl keeps it
+# in libc, so a musl target links without it and a glibc one fails at the link
+# with an undefined reference to `crypt' -- which is a build that passes on one
+# board and not the other, from the same source. Naming it unconditionally is
+# safe on both: a musl sysroot ships libcrypt.a as an empty archive precisely so
+# that -lcrypt keeps working.
 rhd: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_TLS_OBJ) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rhd"
 	$(Q)$(MAKE) -C rhd CC="$(CC)" CFLAGS="$(CFLAGS) $(RSS_TLS_CFLAGS)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_TLS_OBJ) $(RSS_BUILD_LIBS)" \
-		LDFLAGS="$(LDFLAGS) $(LDFLAGS_TLS)" Q="$(Q)"
+		LDFLAGS="$(LDFLAGS) $(LDFLAGS_TLS) -lcrypt" Q="$(Q)"
 
 # -lm must follow -lschrift: libschrift's rasteriser calls floor, ceil and
 # nextafter, and nothing else in rod pulls in libm.
