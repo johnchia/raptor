@@ -214,7 +214,7 @@ select{background:var(--sink);border:1px solid var(--line);border-radius:var(--r
 .matrix td.cell.resetting .cellbox>*:first-child{opacity:.4;pointer-events:none}
 .matrix td.cell.flash{animation:flash .5s ease}
 .cellbox{display:flex;flex-direction:column;gap:5px}
-.cellfoot{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.cellfoot{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
 
 .acts{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:14px 18px}
 .btn{background:var(--raise);border:1px solid var(--line);border-radius:var(--r);padding:7px 14px;
@@ -909,7 +909,9 @@ function buildMatrix(sections) {
       foot.append(chip(byId[id]));
       const rb = document.createElement("span"); rb.className = "readback";
       if (RESET.has(id)) rb.textContent = "default";
+      else if (DEFAULTED.has(id)) rb.textContent = "default";
       foot.append(rb);
+      if (canReset(id)) foot.append(undoButton([id]));
       box.append(buildControl(id, v => commit(id, v, td)), foot);
       td.append(box); tr.append(td);
     });
@@ -1093,7 +1095,19 @@ async function doApply(worst) {
   const screen = document.getElementById("screen");
   const cam = document.getElementById("cam");
   try {
-    if (edits.length) await api({cmd:"set", edits: edits});
+    /*
+     * The reply says, per edit, whether anything is now owed to the apply.
+     * An edit that found the setting the way it was asking for it is not --
+     * a reset of a key already at its default is the ordinary case of that,
+     * and treating it as a change would send this page looking for a camera
+     * that never went anywhere.
+     */
+    let moved = new Set(dirty);
+    if (edits.length) {
+      const r = await api({cmd:"set", edits: edits});
+      moved = new Set((r.results || []).filter(x => x.applied === "saved")
+                                       .map(x => x.section + "." + x.key));
+    }
     if (worst === "pipeline") { screen.classList.add("busy"); cam.removeAttribute("src"); }
 
     /*
@@ -1101,7 +1115,7 @@ async function doApply(worst) {
      * apply is not waited for: on an address change the socket is gone before
      * rcd can write it. The apply is sent, and then this page goes looking.
      */
-    const guarded = [...dirty].filter(id => byId[id].guard_sec);
+    const guarded = [...moved].filter(id => byId[id] && byId[id].guard_sec);
     if (guarded.length) {
       const target = reconnectTarget(guarded);
       dirty.forEach(id => SAVED[id] = V[id]); dirty.clear(); RESET.clear();
