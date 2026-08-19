@@ -406,10 +406,14 @@ static int dhcp_get(char *out, size_t outsz)
 
 static int dhcp_set(const char *value)
 {
-	/* The method word is always one or the other; there is no stanza with
-	 * no method, so this is the one key here that cannot be emptied. */
+	/*
+	 * The stanza has to name a method, so there is no writing nothing
+	 * here. What an interface nobody has configured does is DHCP -- it is
+	 * what the packaged stanza says and what a camera out of the box has
+	 * to do to be reachable at all -- so that is what emptying this means.
+	 */
 	if (!value[0])
-		return -1;
+		return method_set("dhcp");
 	return method_set(strcmp(value, "true") == 0 ? "dhcp" : "static");
 }
 
@@ -478,8 +482,8 @@ static int dns_set(const char *v)
 
 /* One enact behind all five: they write one file, and it is brought into
  * force once however many of them a request carried. */
-const rcd_provider_t rcd_provider_net_dhcp = {dhcp_get, dhcp_set, net_enact};
-const rcd_provider_t rcd_provider_net_address = {addr_get, addr_set, net_enact};
-const rcd_provider_t rcd_provider_net_netmask = {mask_get, mask_set, net_enact};
-const rcd_provider_t rcd_provider_net_gateway = {gw_get, gw_set, net_enact};
-const rcd_provider_t rcd_provider_net_dns = {dns_get, dns_set, net_enact};
+const rcd_provider_t rcd_provider_net_dhcp = {dhcp_get, dhcp_set, net_enact, true};
+const rcd_provider_t rcd_provider_net_address = {addr_get, addr_set, net_enact, true};
+const rcd_provider_t rcd_provider_net_netmask = {mask_get, mask_set, net_enact, true};
+const rcd_provider_t rcd_provider_net_gateway = {gw_get, gw_set, net_enact, true};
+const rcd_provider_t rcd_provider_net_dns = {dns_get, dns_set, net_enact, true};

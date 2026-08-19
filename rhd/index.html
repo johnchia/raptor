@@ -150,6 +150,17 @@ main{display:flex;flex-direction:column;min-width:0;min-height:100vh}
 .row:not(.dirty) .chip.pipeline{opacity:.42}
 .readback{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);text-align:right;
           font-variant-numeric:tabular-nums}
+
+/* Reset. Quiet until wanted -- it sits beside every configured key, and a row
+   of buttons competing with the controls would read as the point of the page.
+   The section-level one is the same control at the group's scale. */
+.undo{background:none;border:0;padding:0;font-family:var(--mono);font-size:10.5px;
+      color:var(--ink-faint);cursor:pointer;text-decoration:underline dotted;opacity:.55}
+.undo:hover,.undo:focus-visible{opacity:1;color:var(--accent)}
+.row.resetting{background:rgba(53,183,194,.05);box-shadow:inset 3px 0 0 var(--accent-dim)}
+.row.resetting .ctl{opacity:.4;pointer-events:none}
+.row.resetting .undo{opacity:1;color:var(--accent)}
+.group>h3 .undo{letter-spacing:0;text-transform:none;margin-left:14px}
 .readback b{color:var(--accent);font-weight:500}
 .readback.warn{color:var(--amber)}
 
@@ -199,6 +210,8 @@ select{background:var(--sink);border:1px solid var(--line);border-radius:var(--r
 .matrix td.k{width:230px}
 .matrix td.k .id{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint)}
 .matrix td.cell.dirty{background:rgba(223,163,60,.05);box-shadow:inset 3px 0 0 var(--amber)}
+.matrix td.cell.resetting{background:rgba(53,183,194,.05);box-shadow:inset 3px 0 0 var(--accent-dim)}
+.matrix td.cell.resetting .cellbox>*:first-child{opacity:.4;pointer-events:none}
 .matrix td.cell.flash{animation:flash .5s ease}
 .cellbox{display:flex;flex-direction:column;gap:5px}
 .cellfoot{display:flex;justify-content:space-between;align-items:center;gap:8px}
@@ -460,6 +473,18 @@ const V = {};             /* current value per key id */
 const SAVED = {};         /* last value known to be on disk */
 const CREDSET = {};
 const UNSET = new Set();   /* no value from the daemon and none in the file */
+/*
+ * Keys running on somebody's default rather than on a choice.
+ *
+ * Not the same as UNSET: a daemon reports the default it resolved in exactly
+ * the shape of a configured value, and it is right to -- that is the value in
+ * force. rcd says which is which with `configured`, and this is the only thing
+ * that can answer whether there is anything to put back.
+ */
+const DEFAULTED = new Set();
+/* Staged for reset. Held here rather than sent, because a reset is restart
+ * tier whatever the key is, and the page has one Apply for all of those. */
+const RESET = new Set();
 const dirty = new Set();
 let active = TABS[0].id;
 let armed = false;
@@ -535,6 +560,56 @@ const labelOf = (k, v) => (k.labels && k.labels[v - k.min] !== undefined)
   ? k.labels[v - k.min] : String(v);
 const valueOf = (k, name) => k.labels ? k.min + k.labels.indexOf(name) : name;
 
+/* ═══ reset ══════════════════════════════════════════════════════════════
+   Putting a key back means removing it, not writing a default over it: the
+   default is the argument at the read site inside the daemon that owns the
+   key, and nothing here has a copy of it. So this page cannot show what the
+   value will become -- only that it will be the daemon's. It says that rather
+   than guessing, and the field fills in for real after the restart.
+
+   Staged like every other restart-tier change and sent by Apply, because that
+   is what a reset is however live the key is when it carries a value. */
+const canReset = id => byId[id] && byId[id].resettable !== false &&
+                       byId[id].type !== "credential" &&
+                       (!DEFAULTED.has(id) || RESET.has(id));
+
+function toggleReset(id, on) {
+  if (on === undefined) on = !RESET.has(id);
+  if (on) { RESET.add(id); dirty.add(id); }
+  else {
+    RESET.delete(id);
+    if (JSON.stringify(V[id]) === JSON.stringify(SAVED[id])) dirty.delete(id);
+  }
+}
+
+/* A whole section at once. Only the keys that have something to put back --
+   most of a section is already at its default, and staging those would ask
+   for a restart to change nothing. */
+function resetSection(sections) {
+  const ids = KEYS.filter(k => sections.includes(k.section)).map(id_of)
+                  .filter(id => canReset(id) && !DEFAULTED.has(id));
+  if (!ids.length) { wlog("sys", "nothing to put back in " + sections.join(", ")); return; }
+  ids.forEach(id => toggleReset(id, true));
+  refreshBar(); render();
+  wlog("sys", "staged " + ids.length + " key" + (ids.length === 1 ? "" : "s") +
+              " for reset — Apply puts them back");
+}
+
+function undoButton(ids) {
+  const b = document.createElement("button");
+  b.className = "undo"; b.type = "button";
+  const one = ids.length === 1;
+  b.textContent = one && RESET.has(ids[0]) ? "keep the reset" : one ? "reset" : "reset section";
+  b.title = one ? "Take this key out of the configuration and let " +
+                  (byId[ids[0]].owner || "the camera") + " use its own default"
+                : "Put every key in this section back to its default";
+  b.addEventListener("click", () => {
+    if (one) { toggleReset(ids[0]); refreshBar(); render(); }
+    else resetSection(ids);
+  });
+  return b;
+}
+
 /* ═══ committing ═════════════════════════════════════════════════════════
    One request per key at a time, and the newest value always wins.
 
@@ -553,6 +628,9 @@ async function commit(id, val, el) {
   const k = byId[id];
   const prev = V[id];
   V[id] = val;
+  /* Typing into a field the operator has just asked to put back means they
+     changed their mind about the reset, not that they want both. */
+  RESET.delete(id);
 
   if (k.tier === "live" && k.type !== "credential") {
     if (inflight.has(id)) { parked[id] = {val: val, el: el}; return; }
@@ -776,6 +854,7 @@ function buildRow(id) {
   const k = byId[id];
   const row = document.createElement("div"); row.className = "row"; row.dataset.id = id;
   if (dirty.has(id)) row.classList.add("dirty");
+  if (RESET.has(id)) row.classList.add("resetting");
   const lab = document.createElement("div"); lab.className = "lab";
   const nm = document.createElement("span"); nm.className = "name"; nm.textContent = label(id);
   const idl = document.createElement("span"); idl.className = "id"; idl.textContent = id;
@@ -786,8 +865,11 @@ function buildRow(id) {
   const mk = document.createElement("div"); mk.className = "mark";
   mk.append(chip(k));
   const rb = document.createElement("span"); rb.className = "readback";
-  if (UNSET.has(id)) rb.textContent = "not set";
+  if (RESET.has(id)) rb.textContent = "default after apply";
+  else if (UNSET.has(id)) rb.textContent = "not set";
+  else if (DEFAULTED.has(id)) rb.textContent = "default";
   mk.append(rb);
+  if (canReset(id)) mk.append(undoButton([id]));
   row.append(lab, ctl, mk);
   return row;
 }
@@ -821,10 +903,13 @@ function buildMatrix(sections) {
       if (!byId[id]) { const u = document.createElement("span"); u.className = "unit";
         u.textContent = "—"; td.append(u); tr.append(td); return; }
       if (dirty.has(id)) td.classList.add("dirty");
+      if (RESET.has(id)) td.classList.add("resetting");
       const box = document.createElement("div"); box.className = "cellbox";
       const foot = document.createElement("div"); foot.className = "cellfoot";
       foot.append(chip(byId[id]));
-      const rb = document.createElement("span"); rb.className = "readback"; foot.append(rb);
+      const rb = document.createElement("span"); rb.className = "readback";
+      if (RESET.has(id)) rb.textContent = "default";
+      foot.append(rb);
       box.append(buildControl(id, v => commit(id, v, td)), foot);
       td.append(box); tr.append(td);
     });
@@ -905,6 +990,10 @@ function render() {
     h.append(document.createTextNode(g.title));
     if (g.note) { const n = document.createElement("span"); n.className = "note";
       n.textContent = g.note; h.append(n); }
+    const secs = g.matrix ? g.matrix : (g.section ? [g.section] : []);
+    if (secs.length && KEYS.some(k => secs.includes(k.section) && canReset(id_of(k)) &&
+                                      !DEFAULTED.has(id_of(k))))
+      h.append(undoButton(secs));
     const own = document.createElement("span"); own.className = "owner";
     own.textContent = g.matrix ? (byId[g.matrix[0] + ".width"] || {}).owner || ""
                    : (rows[0] ? rows[0].owner : "");
@@ -986,6 +1075,7 @@ btnApply.addEventListener("click", async () => {
 document.getElementById("btnRevert").addEventListener("click", async () => {
   /* Ask rcd what is on disk rather than trusting this page's memory of it. */
   dirty.clear();
+  RESET.clear();
   await loadValues();
   refreshBar(); render();
   wlog("sys", "reverted to the saved configuration");
@@ -994,6 +1084,9 @@ document.getElementById("btnRevert").addEventListener("click", async () => {
 async function doApply(worst) {
   const edits = [...dirty].map(id => {
     const k = byId[id];
+    /* null is the whole request: take this key out and let its owner's own
+       default answer for it again. */
+    if (RESET.has(id)) return {section: k.section, key: k.key, value: null};
     return {section: k.section, key: k.key, value: k.labels ? labelOf(k, V[id]) : V[id]};
   });
   btnApply.disabled = true; document.getElementById("btnRevert").disabled = true;
@@ -1011,14 +1104,17 @@ async function doApply(worst) {
     const guarded = [...dirty].filter(id => byId[id].guard_sec);
     if (guarded.length) {
       const target = reconnectTarget(guarded);
-      dirty.forEach(id => SAVED[id] = V[id]); dirty.clear();
+      dirty.forEach(id => SAVED[id] = V[id]); dirty.clear(); RESET.clear();
       api({cmd:"apply"}).then(noteGuard).catch(() => {});
       await reconnect(target);
       return;
     }
 
     await api({cmd:"apply"});
-    dirty.forEach(id => SAVED[id] = V[id]); dirty.clear();
+    dirty.forEach(id => SAVED[id] = V[id]); dirty.clear(); RESET.clear();
+    /* What the reset keys now read as comes from the daemons that own them,
+       and only after the restart above -- there was never a value here to
+       write into the fields. */
     await loadValues();
   } catch (e) {
     wlog("err", "! apply: " + e.message);
@@ -1142,11 +1238,14 @@ function reconnectTarget(ids) {
   const url = host => location.protocol + "//" + host + port;
 
   /* An address the camera is about to ask a DHCP server for is not one this
-     page can predict, so it does not pretend to. */
-  const toDhcp = ids.includes("network.dhcp") && V["network.dhcp"] === true;
+     page can predict, so it does not pretend to. Nor is one it is about to
+     stop having: a reset takes the address out, and where the camera comes
+     back is then the lease's business. */
+  const toDhcp = (ids.includes("network.dhcp") && V["network.dhcp"] === true) ||
+                 ids.some(i => i.startsWith("network.") && RESET.has(i));
   if (!toDhcp && ids.includes("network.address") && V["network.address"]) return url(V["network.address"]);
 
-  if (ids.includes("system.hostname") && V["system.hostname"]) {
+  if (ids.includes("system.hostname") && V["system.hostname"] && !RESET.has("system.hostname")) {
     const n = V["system.hostname"];
     /* mdnsd answers for <name>.local; a name that is already qualified is
        one somebody's DNS is expected to know, and is used as given. */
@@ -1369,6 +1468,7 @@ async function loadValues() {
       if (!byId[id]) return;
       if (byId[id].type === "credential") { CREDSET[id] = v.set === true; return; }
       if (v.set === false || v.value === undefined || v.value === null) {
+        DEFAULTED.add(id);
         /* Nobody has ever set it and no daemon answered for it, so its value
          * is whatever the daemon's own default turns out to be. Drawing a
          * switch here would claim "off" about something that may well be on,
@@ -1377,6 +1477,7 @@ async function loadValues() {
         return;
       }
       UNSET.delete(id);
+      if (v.configured === false) DEFAULTED.add(id); else DEFAULTED.delete(id);
       V[id] = v.value;
       SAVED[id] = v.value;
     });

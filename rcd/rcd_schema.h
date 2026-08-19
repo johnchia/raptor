@@ -169,6 +169,19 @@ typedef struct rcd_provider {
 	 * share one of these, and `apply` runs each distinct one once.
 	 */
 	int (*enact)(void);
+
+	/*
+	 * Whether this store has a state that counts as no configuration at
+	 * all -- which is what a reset asks it for. True where `set("")`
+	 * means something the camera can run on: an address nobody chose, an
+	 * interface nobody configured. False where the store must always
+	 * hold a value somebody picked, and there is nothing to go back to.
+	 *
+	 * A key kept in raptor.conf never needs this: removing its line is
+	 * always available, and what the key then means is the default at
+	 * whichever read site asks for it.
+	 */
+	bool resettable;
 } rcd_provider_t;
 
 typedef struct rcd_key {
@@ -215,6 +228,9 @@ typedef struct rcd_key {
  */
 bool rcd_key_live(const rcd_key_t *k);
 rcd_impact_t rcd_key_impact(const rcd_key_t *k);
+
+/* Whether this key can be put back to its default. See rcd_provider_t. */
+bool rcd_key_resettable(const rcd_key_t *k);
 
 /* Argument grammars for the actions below. */
 typedef enum {

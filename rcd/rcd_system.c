@@ -820,7 +820,7 @@ static int tz_set(const char *name)
 	return 0;
 }
 
-const rcd_provider_t rcd_provider_timezone = {tz_get, tz_set, NULL};
+const rcd_provider_t rcd_provider_timezone = {tz_get, tz_set, NULL, false};
 
 /* ------------------------------------------------------------------ */
 /* NTP server                                                          */
@@ -883,7 +883,7 @@ static int ntp_set(const char *host)
 	return 0;
 }
 
-const rcd_provider_t rcd_provider_ntp_server = {ntp_get, ntp_set, NULL};
+const rcd_provider_t rcd_provider_ntp_server = {ntp_get, ntp_set, NULL, false};
 
 /* ------------------------------------------------------------------ */
 /* Hostname                                                            */
@@ -1033,4 +1033,4 @@ static int hostname_enact(void)
 	return 0;
 }
 
-const rcd_provider_t rcd_provider_hostname = {hostname_get, hostname_set, hostname_enact};
+const rcd_provider_t rcd_provider_hostname = {hostname_get, hostname_set, hostname_enact, false};

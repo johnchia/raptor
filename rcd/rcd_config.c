@@ -392,8 +392,25 @@ static const char *render(const rcd_key_t *k, const cJSON *v, rcd_edit_t *e, cha
 	e->k = k;
 	e->is_num = false;
 	e->num = 0;
+	e->reset = false;
+	e->rendered[0] = '\0';
 
-	if (!v || cJSON_IsNull(v)) {
+	/*
+	 * An explicit null is a reset: put this key back to its default. A
+	 * missing value is still a request that forgot one -- the two are
+	 * distinguishable here and mean opposite things, so they are not
+	 * folded together.
+	 */
+	if (cJSON_IsNull(v)) {
+		if (!rcd_key_resettable(k)) {
+			snprintf(err, errsz, "'%s' has no default to go back to", k->key);
+			return RCD_E_RANGE;
+		}
+		e->reset = true;
+		return NULL;
+	}
+
+	if (!v) {
 		snprintf(err, errsz, "'%s' needs a value", k->key);
 		return RCD_E_TYPE;
 	}
@@ -725,6 +742,20 @@ static void emit_value(cJSON *arr, const rcd_key_t *k, rss_config_t *file, const
 	}
 	cJSON_AddItemToObject(o, "value", val);
 	cJSON_AddStringToObject(o, "source", source);
+
+	/*
+	 * Whether anybody chose this, as opposed to it being what the daemon
+	 * runs on when nobody has. The value above cannot answer that: a
+	 * daemon reports its resolved default in the same shape as a
+	 * configured one, and it is right to -- that is the value in force.
+	 * Only the file knows which of the two it is, and a client offering
+	 * to put the key back has to ask.
+	 */
+	bool configured =
+		k->provider ? true : file && rss_config_get_str(file, k->section, k->key, NULL);
+	if (!configured)
+		cJSON_AddBoolToObject(o, "configured", false);
+
 	cJSON_AddItemToArray(arr, o);
 }
 
@@ -842,7 +873,7 @@ static bool live_request(const rcd_edit_t *e, char *out, size_t outsz)
  * dirtied on the config handed to it, so starting from a clean read means
  * exactly these edits reach the file -- not anything a daemon has changed in
  * its own memory and not yet saved. */
-static int write_file(rcd_state_t *st, rcd_edit_t *edits, const bool *to_file, int n)
+static int write_file(rcd_state_t *st, rcd_edit_t *edits, const bool *to_file, bool *changed, int n)
 {
 	int wanted = 0;
 	for (int i = 0; i < n; i++)
@@ -860,7 +891,24 @@ static int write_file(rcd_state_t *st, rcd_edit_t *edits, const bool *to_file, i
 	for (int i = 0; i < n; i++) {
 		if (!to_file[i])
 			continue;
+
+		/*
+		 * A reset takes the line out. One asked for on a key that has
+		 * no line changes nothing, and saying so here is what keeps it
+		 * from being recorded as drift: a section put back to its
+		 * defaults is mostly keys that were already at them, and
+		 * charging a restart for those would make the button useless.
+		 */
+		if (edits[i].reset) {
+			changed[i] = rss_config_unset(cfg, edits[i].k->section, edits[i].k->key);
+			if (changed[i])
+				RSS_INFO("reset: [%s] %s back to its default", edits[i].k->section,
+					 edits[i].k->key);
+			continue;
+		}
+
 		rss_config_set_str(cfg, edits[i].k->section, edits[i].k->key, edits[i].rendered);
+		changed[i] = true;
 
 		/* The log records what changed, not what it changed to -- for
 		 * a password those are different things, and this file is
@@ -993,7 +1041,7 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 	cJSON *results = cJSON_AddArrayToObject(resp, "results");
 
 	bool to_file[RCD_EDITS_MAX] = {false};
-	bool provided[RCD_EDITS_MAX] = {false};
+	bool changed[RCD_EDITS_MAX] = {false};
 	bool staged[RCD_EDITS_MAX] = {false};
 	const char *note[RCD_EDITS_MAX] = {NULL};
 	char notebuf[RCD_EDITS_MAX][192];
@@ -1023,13 +1071,29 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 			if (k->guard_sec > 0)
 				rcd_guard_hold(st);
 
-			if (k->provider->set(edits[i].rendered) != 0) {
+			char before[RCD_VAL_MAX] = "";
+			bool had = k->provider->get(before, sizeof(before)) == 0;
+
+			if (k->provider->set(edits[i].reset ? "" : edits[i].rendered) != 0) {
 				cJSON_Delete(resp);
 				cJSON *e = rcd_err(RCD_E_IO, "the setting could not be stored");
 				rcd_err_where(e, k->section, k->key);
 				return e;
 			}
-			provided[i] = true;
+			/*
+			 * A store already holding what was asked of it owes
+			 * nothing, and a reset asks that of most of a section.
+			 * Read back rather than compared to the request: only
+			 * the store knows what emptying it came to.
+			 */
+			char after[RCD_VAL_MAX] = "";
+			bool has = k->provider->get(after, sizeof(after)) == 0;
+			changed[i] = had != has || (had && strcmp(before, after) != 0);
+			if (!changed[i]) {
+				note[i] = edits[i].reset ? "already at its default"
+							 : "already set to that";
+				continue;
+			}
 
 			/*
 			 * A provider that can enact has not enacted: the store
@@ -1050,7 +1114,14 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 			continue;
 		}
 
-		if (!k->live_cmd || stage_only) {
+		/*
+		 * A reset has no value to hand a live command, and rcd has no
+		 * default to put in its place -- the daemon's own is the point
+		 * of the exercise, and it reaches it by reading the file at
+		 * its next start. So every reset is restart-tier, whatever the
+		 * key's tier is when it carries a value.
+		 */
+		if (!k->live_cmd || stage_only || edits[i].reset) {
 			to_file[i] = true;
 			continue;
 		}
@@ -1082,7 +1153,7 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		note[i] = notebuf[i];
 	}
 
-	if (write_file(st, edits, to_file, n) != 0) {
+	if (write_file(st, edits, to_file, changed, n) != 0) {
 		cJSON_Delete(resp);
 		return rcd_err(RCD_E_IO, "the config file could not be written");
 	}
@@ -1093,7 +1164,7 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 			saved++; /* already recorded above, with no daemon */
 			continue;
 		}
-		if (!to_file[i])
+		if (!to_file[i] || !changed[i])
 			continue;
 		rcd_stale_add(st, edits[i].k->section, edits[i].k->key,
 			      rcd_section_owner(edits[i].k->section));
@@ -1112,22 +1183,25 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		/* Echoed in the type the schema declares, not as the string the
 		 * file happens to hold: a client that sent a number and reads
 		 * back "140" has to know which of its fields to un-quote. A
-		 * credential is echoed as nothing at all. */
-		if (edits[i].k->type != V_CRED) {
+		 * credential is echoed as nothing at all, and a reset has
+		 * nothing to echo -- what the key now reads as is whatever the
+		 * daemon that owns it brings, and rcd is not the one to say. */
+		if (edits[i].reset) {
+			cJSON_AddBoolToObject(o, "reset", true);
+		} else if (edits[i].k->type != V_CRED) {
 			cJSON *v = typed_value(edits[i].k, edits[i].rendered);
 			if (v)
 				cJSON_AddItemToObject(o, "value", v);
 		}
 		/*
 		 * "saved" means rcd still owes this to a daemon restart, which
-		 * is what `apply` is for. A provider is never that: its store
-		 * is the value. Whether the running system has read it yet is
-		 * what the key's impact says, and the note beside it.
+		 * is what `apply` is for. Anything else is in force already:
+		 * a live command that reached its daemon, a provider whose
+		 * store is the value, or an edit that found the setting the
+		 * way it was asking for it.
 		 */
-		cJSON_AddStringToObject(o, "applied",
-					(provided[i] && !staged[i]) || (!provided[i] && !to_file[i])
-						? "live"
-						: "saved");
+		bool owed = staged[i] || (to_file[i] && changed[i]);
+		cJSON_AddStringToObject(o, "applied", owed ? "saved" : "live");
 		if (note[i] && note[i][0])
 			cJSON_AddStringToObject(o, "note", note[i]);
 		cJSON_AddItemToArray(results, o);

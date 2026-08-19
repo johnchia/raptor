@@ -1216,7 +1216,14 @@ TEST a_revert_can_unset_a_value_that_was_never_there(void)
 	ASSERT_EQ(-1, rcd_provider_hostname.set(""));
 	ASSERT_EQ(-1, rcd_provider_timezone.set(""));
 	ASSERT_EQ(-1, rcd_provider_ntp_server.set(""));
-	ASSERT_EQ(-1, rcd_provider_net_dhcp.set(""));
+
+	/* The interface method is the exception among these: the stanza has
+	 * to name one, and the one an unconfigured camera runs on is dhcp. */
+	ASSERT_EQ(0, rcd_provider_net_dhcp.set("false"));
+	ASSERT_EQ(0, rcd_provider_net_dhcp.set(""));
+	char method[16] = "";
+	ASSERT_EQ(0, rcd_provider_net_dhcp.get(method, sizeof(method)));
+	ASSERT_STR_EQ("true", method);
 	PASS();
 }
 
@@ -1521,6 +1528,263 @@ TEST every_refusal_explains_itself(void)
 	PASS();
 }
 
+/* ------------------------------------------------------------------ */
+/* Reset: putting a key back to its default                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A null value is a reset, and it is the only thing that is. rcd holds no
+ * defaults to write -- every one of them is the argument at its own read site
+ * inside the owning daemon -- so what a reset does is take the key out and let
+ * that read site answer again.
+ */
+TEST a_null_value_asks_for_the_default(void)
+{
+	rcd_edit_t edits[RCD_EDITS_MAX];
+	int n = 0;
+
+	ASSERT_EQ(0, validate_set("{\"section\":\"stream0\",\"key\":\"gop\",\"value\":null}", edits,
+				  &n));
+	ASSERT_EQ(1, n);
+	ASSERT_EQ(true, edits[0].reset);
+	ASSERTm("a reset rendered a value to write", edits[0].rendered[0] == '\0');
+
+	/* An ordinary edit is not a reset, and says so. */
+	ASSERT_EQ(0, validate_set("{\"section\":\"stream0\",\"key\":\"gop\",\"value\":50}", edits,
+				  &n));
+	ASSERT_EQ(false, edits[0].reset);
+
+	/* A request that simply forgot the value still means what it always
+	 * did. The two are distinguishable on the wire and mean opposite
+	 * things, so they are not folded together. */
+	ASSERT_EQ(-1, validate_set("{\"section\":\"stream0\",\"key\":\"gop\"}", edits, &n));
+	ASSERT_STR_EQ(RCD_E_TYPE, code);
+	PASS();
+}
+
+/* A store that must always hold something has nothing to go back to, and the
+ * refusal says which key rather than failing the whole form silently. */
+TEST a_key_with_no_default_refuses_the_reset(void)
+{
+	rcd_edit_t edits[RCD_EDITS_MAX];
+	int n = 0;
+
+	ASSERT_EQ(-1, validate_set("{\"section\":\"system\",\"key\":\"hostname\",\"value\":null}",
+				   edits, &n));
+	ASSERT(strstr(reason, "hostname") != NULL);
+	ASSERT_EQ(-1, validate_set("{\"section\":\"system\",\"key\":\"timezone\",\"value\":null}",
+				   edits, &n));
+	ASSERT_EQ(-1, validate_set("{\"section\":\"system\",\"key\":\"ntp_server\",\"value\":null}",
+				   edits, &n));
+
+	/* The address keys do have one: not being configured is a
+	 * configuration, and it is the one the camera ships with. */
+	ASSERT_EQ(0, validate_set("{\"section\":\"network\",\"key\":\"address\",\"value\":null}",
+				  edits, &n));
+	ASSERT_EQ(true, edits[0].reset);
+	PASS();
+}
+
+/* A batch is still all-or-nothing: one key that cannot be reset refuses the
+ * whole form rather than resetting the rest of it. */
+TEST one_key_with_no_default_refuses_the_whole_batch(void)
+{
+	rcd_edit_t edits[RCD_EDITS_MAX];
+	int n = 0;
+
+	ASSERT_EQ(-1, validate_set("{\"edits\":["
+				   "{\"section\":\"network\",\"key\":\"address\",\"value\":null},"
+				   "{\"section\":\"system\",\"key\":\"hostname\",\"value\":null}]}",
+				   edits, &n));
+	PASS();
+}
+
+/* The schema says so, and says it only where the answer is no: a client that
+ * has never heard of reset draws every key exactly as it did before. */
+TEST the_schema_names_the_keys_that_cannot_be_reset(void)
+{
+	cJSON *out = cJSON_CreateObject();
+	rcd_schema_emit(out, "system");
+	const cJSON *keys = cJSON_GetObjectItemCaseSensitive(out, "keys");
+	ASSERT(cJSON_IsArray(keys));
+
+	int seen = 0;
+	const cJSON *k = NULL;
+	cJSON_ArrayForEach(k, keys)
+	{
+		const cJSON *r = cJSON_GetObjectItemCaseSensitive(k, "resettable");
+		ASSERT(cJSON_IsFalse(r));
+		seen++;
+	}
+	ASSERT_EQ(3, seen);
+	cJSON_Delete(out);
+
+	out = cJSON_CreateObject();
+	rcd_schema_emit(out, "network");
+	keys = cJSON_GetObjectItemCaseSensitive(out, "keys");
+	ASSERT(cJSON_IsArray(keys));
+	ASSERT_EQ(5, cJSON_GetArraySize(keys));
+	cJSON_ArrayForEach(k, keys)
+		ASSERTm("an address key was advertised as unresettable",
+			cJSON_GetObjectItemCaseSensitive(k, "resettable") == NULL);
+	cJSON_Delete(out);
+
+	/* And a key kept in raptor.conf is always resettable: removing its
+	 * line is available whatever the key is. */
+	out = cJSON_CreateObject();
+	rcd_schema_emit(out, "stream0");
+	keys = cJSON_GetObjectItemCaseSensitive(out, "keys");
+	cJSON_ArrayForEach(k, keys)
+		ASSERT(cJSON_GetObjectItemCaseSensitive(k, "resettable") == NULL);
+	cJSON_Delete(out);
+	PASS();
+}
+
+/*
+ * End to end over a real config file: the line goes, the owner is recorded
+ * behind, and a second reset of the same key costs nothing. That last part is
+ * what makes a whole-section reset usable -- most of a section is already at
+ * its default, and charging a restart for each of those would make the button
+ * something nobody dares press.
+ */
+TEST a_reset_removes_the_line_and_only_charges_for_what_moved(void)
+{
+	rcd_state_t st;
+	char path[320];
+
+	if (!sysconf_dir_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	snprintf(path, sizeof(path), "%s/raptor.conf", RCD_SYSCONF_DIR);
+	FILE *f = fopen(path, "w");
+	ASSERT(f);
+	fputs("[stream0]\n"
+	      "gop = 50    # keyframe interval\n"
+	      "width = 1920\n",
+	      f);
+	fclose(f);
+
+	memset(&st, 0, sizeof(st));
+	st.config_path = path;
+
+	cJSON *req = cJSON_Parse("{\"section\":\"stream0\",\"key\":\"gop\",\"value\":null}");
+	ASSERT(req);
+	cJSON *resp = rcd_cmd_set(&st, req);
+	cJSON_Delete(req);
+	ASSERT(resp);
+
+	const cJSON *res = cJSON_GetObjectItemCaseSensitive(resp, "results");
+	const cJSON *one = cJSON_GetArrayItem(res, 0);
+	ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(one, "reset")));
+	ASSERTm("a reset echoed a value rcd does not have",
+		cJSON_GetObjectItemCaseSensitive(one, "value") == NULL);
+	ASSERT_STR_EQ("saved", cJSON_GetObjectItemCaseSensitive(one, "applied")->valuestring);
+	cJSON_Delete(resp);
+
+	/* The key is gone; its neighbour and the comment on it are not. */
+	char text[512] = "";
+	f = fopen(path, "r");
+	ASSERT(f);
+	fread(text, 1, sizeof(text) - 1, f);
+	fclose(f);
+	ASSERTm("the reset key kept its line", strstr(text, "gop = 50") == NULL);
+	ASSERT(strstr(text, "width = 1920") != NULL);
+
+	ASSERT_EQ(1, st.stale_count);
+
+	/* Again, on a key that is now already at its default. */
+	st.stale_count = 0;
+	req = cJSON_Parse("{\"section\":\"stream0\",\"key\":\"gop\",\"value\":null}");
+	resp = rcd_cmd_set(&st, req);
+	cJSON_Delete(req);
+	ASSERT(resp);
+	res = cJSON_GetObjectItemCaseSensitive(resp, "results");
+	one = cJSON_GetArrayItem(res, 0);
+	ASSERT_STR_EQ("live", cJSON_GetObjectItemCaseSensitive(one, "applied")->valuestring);
+	cJSON_Delete(resp);
+	ASSERTm("resetting a key already at its default asked for a restart", 0 == st.stale_count);
+
+	unlink(path);
+	PASS();
+}
+
+/* A reset of a live key is not live: there is no value to hand the running
+ * daemon, and the default it will read is in the daemon, not in rcd. So it
+ * goes to the file and the owner is recorded behind, whatever the key's tier
+ * is when it carries a value. */
+TEST a_reset_is_never_live(void)
+{
+	rcd_state_t st;
+	char path[320];
+
+	if (!sysconf_dir_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	snprintf(path, sizeof(path), "%s/raptor.conf", RCD_SYSCONF_DIR);
+	FILE *f = fopen(path, "w");
+	ASSERT(f);
+	fputs("[image]\nbrightness = 140\n", f);
+	fclose(f);
+
+	memset(&st, 0, sizeof(st));
+	st.config_path = path;
+
+	const rcd_key_t *k = rcd_key_find("image", "brightness");
+	ASSERT(k);
+	ASSERTm("the key under test is not a live one", rcd_key_live(k));
+
+	cJSON *req = cJSON_Parse("{\"section\":\"image\",\"key\":\"brightness\",\"value\":null}");
+	cJSON *resp = rcd_cmd_set(&st, req);
+	cJSON_Delete(req);
+	ASSERT(resp);
+
+	const cJSON *one = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(resp, "results"), 0);
+	ASSERT_STR_EQ("saved", cJSON_GetObjectItemCaseSensitive(one, "applied")->valuestring);
+	cJSON_Delete(resp);
+
+	char text[256] = "";
+	f = fopen(path, "r");
+	ASSERT(f);
+	fread(text, 1, sizeof(text) - 1, f);
+	fclose(f);
+	ASSERT(strstr(text, "brightness") == NULL);
+	ASSERT_EQ(1, st.stale_count);
+
+	unlink(path);
+	PASS();
+}
+
+/* Resetting the address keys puts the stanza back to the one that shipped --
+ * including the method, because an interface nobody has configured does DHCP,
+ * and a section left half-reset is a camera with a gateway it cannot use. */
+TEST resetting_the_network_puts_the_shipped_stanza_back(void)
+{
+	char before[512], after[512];
+
+	if (!iface_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	iface_read(before, sizeof(before));
+
+	ASSERT_EQ(0, rcd_provider_net_dhcp.set("false"));
+	ASSERT_EQ(0, rcd_provider_net_address.set("192.168.1.99"));
+	ASSERT_EQ(0, rcd_provider_net_netmask.set("255.255.255.0"));
+	ASSERT_EQ(0, rcd_provider_net_gateway.set("192.168.1.1"));
+
+	iface_read(after, sizeof(after));
+	ASSERT(strcmp(before, after) != 0);
+
+	/* What a reset of each of them comes to. */
+	ASSERT_EQ(0, rcd_provider_net_gateway.set(""));
+	ASSERT_EQ(0, rcd_provider_net_netmask.set(""));
+	ASSERT_EQ(0, rcd_provider_net_address.set(""));
+	ASSERT_EQ(0, rcd_provider_net_dhcp.set(""));
+
+	iface_read(after, sizeof(after));
+	ASSERT_STR_EQm("the shipped stanza did not come back", before, after);
+	PASS();
+}
+
 SUITE(rcd_cmd_suite)
 {
 	RUN_TEST(refuses_the_named_hazards);
@@ -1569,6 +1833,13 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(every_network_key_is_guarded_and_waits_for_apply);
 	RUN_TEST(a_revert_leaves_the_stores_it_did_not_change_alone);
 	RUN_TEST(a_revert_can_unset_a_value_that_was_never_there);
+	RUN_TEST(a_null_value_asks_for_the_default);
+	RUN_TEST(a_key_with_no_default_refuses_the_reset);
+	RUN_TEST(one_key_with_no_default_refuses_the_whole_batch);
+	RUN_TEST(the_schema_names_the_keys_that_cannot_be_reset);
+	RUN_TEST(a_reset_removes_the_line_and_only_charges_for_what_moved);
+	RUN_TEST(a_reset_is_never_live);
+	RUN_TEST(resetting_the_network_puts_the_shipped_stanza_back);
 	RUN_TEST(the_schema_says_where_a_system_key_takes_effect);
 	RUN_TEST(nothing_is_unavailable_until_the_camera_says_so);
 	RUN_TEST(availability_matches_whole_key_names);

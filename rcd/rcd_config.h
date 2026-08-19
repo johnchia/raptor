@@ -40,12 +40,18 @@ struct rcd_state;
 /*
  * One validated edit: what the file will hold, and the same value in the form
  * a live command wants.
+ *
+ * `reset` is the edit that carries no value at all -- put this key back to its
+ * default -- and the default is never written, because rcd does not have one:
+ * every default is the argument at its own read site inside the owning daemon.
+ * What a reset does is take the key out, so that read site answers again.
  */
 typedef struct {
 	const struct rcd_key *k;
 	char rendered[RCD_VAL_MAX];
 	double num;
 	bool is_num;
+	bool reset;
 } rcd_edit_t;
 
 /*

@@ -471,6 +471,15 @@ rcd_impact_t rcd_key_impact(const rcd_key_t *k)
 	return rcd_daemon_impact(rcd_section_owner(k->section));
 }
 
+bool rcd_key_resettable(const rcd_key_t *k)
+{
+	if (!k)
+		return false;
+	/* A key in raptor.conf is reset by taking its line out, which is
+	 * always available. A provider answers for its own store. */
+	return k->provider ? k->provider->resettable : true;
+}
+
 const rcd_key_t *rcd_key_find(const char *section, const char *key)
 {
 	if (!section || !key)
@@ -666,6 +675,12 @@ static void emit_key(cJSON *arr, const rcd_key_t *k)
 	 * the guard renders every other key exactly as it did before. */
 	if (k->guard_sec > 0)
 		cJSON_AddNumberToObject(o, "guard_sec", k->guard_sec);
+
+	/* Said only when the answer is no, for the same reason: almost every
+	 * key can be put back, and a client that has never heard of reset
+	 * draws what it always drew. */
+	if (!rcd_key_resettable(k))
+		cJSON_AddBoolToObject(o, "resettable", false);
 
 	cJSON_AddItemToArray(arr, o);
 }

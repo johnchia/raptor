@@ -88,6 +88,10 @@ typedef struct rcd_provider {
 	 * what decides the key's tier. Takes no argument: it re-reads the
 	 * store, so the same call enacts an edit and enacts a revert. */
 	int (*enact)(void);
+
+	/* Whether this store has a state that counts as no configuration at
+	 * all, which is what a reset asks it for. */
+	bool resettable;
 } rcd_provider_t;
 ```
 
@@ -378,6 +382,86 @@ Three properties of that, each the answer to a way it could mislead:
   and waiting is itself the recovery, since the window running out puts the
   camera back where the page already is.
 
+## Reset
+
+Every setting needs a way back to the way it shipped, and the way back must not
+be a table of defaults kept here.
+
+There is nowhere in rcd that knows what `fps` should be. Each default is the
+third argument at its own read site inside the daemon that owns the key —
+`rss_config_get_int(cfg, "stream0", "fps", 25)` — and there are hundreds of
+them. A second copy in rcd's table would be a copy that drifts, silently, in
+the direction of whichever one nobody checked. It would also be wrong by
+construction on a camera whose sensor answers the question: several of these
+defaults are resolved at run time from the hardware.
+
+**So a reset removes the key rather than writing its default over it.** The
+line comes out of `raptor.conf`, and the read site answers again — with
+whatever it answers with on *this* camera, in *this* build. `rss_config_unset`
+marks the entry removed; the surgical writer drops its line, and drops every
+duplicate rather than only the last one the loader would have used, because an
+earlier duplicate left behind is the value the key was just reset from.
+
+On the wire it is a `set` whose value is `null`:
+
+```json
+{"cmd":"set","edits":[{"section":"stream0","key":"gop","value":null}]}
+```
+
+An explicit `null` and a missing `value` are distinguishable and mean opposite
+things, so they are not folded together: the second is still a request that
+forgot its value.
+
+**Three consequences worth stating.**
+
+*A reset is never live.* There is no value to hand a running daemon and rcd has
+no default to invent for one, so the key goes to the file and its owner is
+recorded behind — whatever the key's tier is when it carries a value. The cost
+is the owner's restart, and the apply bar says so before anything is pressed.
+
+*A reset that changes nothing costs nothing.* Most of a section is already at
+its default, so `rss_config_unset` reports whether there was anything to
+remove, and a reset that removed nothing is not recorded as drift. Without
+that, a whole-section reset would ask for a restart to change nothing, which is
+the same as not having the button.
+
+*Not every store has one.* A key in `raptor.conf` can always be reset — taking
+its line out is always available. A provider answers for its own store, and
+`resettable` is that answer: the address keys have a state that means nobody
+configured them, a hostname and a timezone do not. The schema carries it, so a
+client draws the control only where it leads somewhere. The interface method is
+the interesting case and it *is* resettable: the stanza has to name a method,
+and the one an unconfigured camera runs on is DHCP — which is what makes a
+whole-`[network]` reset coherent rather than leaving a static address behind
+with nothing to reach it.
+
+### Per key or per section
+
+Both, and the primitive is per key: one command with a longer array, not a
+second code path. That is what keeps a `[network]` section reset guarded, and
+subject to the same Apply, without a rule anywhere saying so.
+
+Which one is *primary* differs by section, because the sections are not the
+same kind of thing. `raptor.conf` sections are independent scalars — a bad
+bitrate should be undoable without also undoing the resolution — so per key is
+the unit and per section is a convenience. `[network]` is one object: resetting
+`address` alone leaves a static stanza with no address in it, and the useful
+action there is the whole stanza at once.
+
+### What the console can and cannot show
+
+It cannot show the value a reset will produce, because nothing in this system
+knows it until the daemon restarts and reads the file. Guessing would be worse
+than silence — it is the number the operator would then believe.
+
+So a staged reset is a *state*, not a value: the field dims and reads *default
+after apply*, and fills in for real afterwards. Two things follow. The page has
+to know which keys are configured at all, and `source` cannot tell it — a
+daemon reports its resolved default in exactly the shape of a chosen value, and
+is right to, because that is the value in force. `get` answers it directly with
+`configured: false`. And the reset is staged rather than sent, like every other
+restart-tier change, so several of them land on one Apply.
+
 ## Provisioning and the portal
 
 ### Provisioned is a fact, not a grep
@@ -483,8 +567,7 @@ that has a radio.
    page of its own, which is the property that was under test.
 2. **Confirm-or-revert.** *Done.* The guard, its deadline in `/run` and its
    snapshot on flash, `confirm`/`cancel`, the `guard` object in `set`,
-   `pending` and `state`, and the console's countdown bar. It arms on `set`
-   rather than on `apply` — see above — and it is exercised by
+   `pending` and `state`, and the console's countdown bar. It is exercised by
    `system.hostname`, whose failure mode is real and recoverable. All four
    exits were walked on the board: confirm, cancel, the timer running out, and
    a reboot inside the window.
@@ -493,11 +576,15 @@ that has a radio.
    that goes looking for the camera afterwards. Board-verified the hard way:
    the camera was moved to a second address over the connection that moved it,
    found there, and then left alone until it put itself back.
-4. **Wireless settings.** `V_TEXT`, `V_SECRET` and the `fw_setenv` provider,
+4. **Reset to defaults.** *Done.* `rss_config_unset` and the surgical writer's
+   removal path, `value: null` on the wire, `resettable` and `configured` in
+   the schema and in `get`, and the console's per-key and per-section controls.
+   No default table anywhere, which is the property that was under test.
+5. **Wireless settings.** `V_TEXT`, `V_SECRET` and the `fw_setenv` provider,
    with the packages that make a radio work at all. Configurable over the wire
    from the console before any portal exists, which is the order that lets the
    keys be wrong somewhere recoverable.
-5. **Setup mode.** `state.system.provisioned`, `provision-reset`, rhd's portal
+6. **Setup mode.** `state.system.provisioned`, `provision-reset`, rhd's portal
    mode, AP bring-up, `udhcpd` and the DNS hijack. Last because it is the only
    phase that needs hardware this bench does not have, and because by then every
    value it collects is a key that already works.
