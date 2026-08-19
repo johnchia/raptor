@@ -608,12 +608,17 @@ static void handle_request(rhd_server_t *srv, rhd_client_t *c)
 		}
 		/* The charset is not optional: the console is UTF-8 and a
 		 * browser told only "text/html" decodes it as latin-1, which
-		 * turns every separator in the page into mojibake. */
-		if (index_html)
-			http_send(c, "200 OK", "text/html; charset=utf-8", index_html,
-				  index_html_len);
-		else
+		 * turns every separator in the page into mojibake.
+		 *
+		 * Queued rather than written here: the page is tens of
+		 * kilobytes and the socket takes what it has room for, so the
+		 * epoll drain is what finishes it. The caller keeps a client
+		 * with a send buffer alive. */
+		if (!index_html)
 			http_error(c, "404 Not Found", "index page not installed");
+		else if (http_send_async(c, srv->epoll_fd, "text/html; charset=utf-8", index_html,
+					 (uint32_t)index_html_len) < 0)
+			http_error(c, "500 Internal Server Error", "Out of memory");
 	} else {
 		http_error(c, "404 Not Found", "Not found");
 	}

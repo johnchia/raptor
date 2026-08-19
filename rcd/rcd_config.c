@@ -1158,6 +1158,10 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		return rcd_err(RCD_E_IO, "the config file could not be written");
 	}
 
+	for (int i = 0; i < n; i++)
+		if (edits[i].reset && to_file[i] && !changed[i])
+			note[i] = "already at its default";
+
 	int saved = 0;
 	for (int i = 0; i < n; i++) {
 		if (staged[i]) {

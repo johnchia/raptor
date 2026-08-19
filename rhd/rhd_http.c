@@ -50,7 +50,17 @@ ssize_t rhd_read(rhd_client_t *c, void *buf, size_t len)
 
 /* ── HTTP response helpers ── */
 
-/* Small synchronous send for error/status responses (< 1KB, always fits in socket buffer) */
+/*
+ * Synchronous send for error and status responses.
+ *
+ * The socket is non-blocking, so a single write() is a single write(): it
+ * returns what fit and says nothing about the rest. That is fine for the
+ * kilobyte-sized replies this exists for and silently wrong for anything
+ * larger, which is how the console came to be served 246 bytes short of its
+ * own length the first time the page outgrew the send buffer. Looping here
+ * costs nothing and takes the size limit out of the contract; a response big
+ * enough to be worth queueing should still use http_send_async.
+ */
 void http_send(rhd_client_t *c, const char *status, const char *content_type, const void *body,
 	       int body_len)
 {
@@ -63,9 +73,10 @@ void http_send(rhd_client_t *c, const char *status, const char *content_type, co
 			    "Access-Control-Allow-Origin: *\r\n"
 			    "\r\n",
 			    status, content_type, body_len);
-	rhd_write(c, header, hlen);
+	if (nb_write_all(c, header, (size_t)hlen) < 0)
+		return;
 	if (body && body_len > 0)
-		rhd_write(c, body, body_len);
+		nb_write_all(c, body, (size_t)body_len);
 }
 
 /* Plain fd version for pre-TLS error responses (e.g., max clients rejection) */
