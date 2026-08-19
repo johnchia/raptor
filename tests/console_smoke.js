@@ -205,6 +205,7 @@ const probe_epilogue = `
 ;globalThis.__probe = {
   TABS: TABS, byId: byId, render: render, refreshBar: refreshBar,
   getKeys: function () { return KEYS; },
+  canReset: canReset, toggleReset: toggleReset,
   setActive: function (v) { active = v; },
 };
 `;
@@ -245,6 +246,30 @@ try {
 	 * used to hand a section name where a key id was expected. */
 	if (!undos) fail("no reset control was drawn on any tab");
 
+	/*
+	 * And the same tabs with a reset staged on them. A staged reset draws a
+	 * row differently -- dimmed, relabelled, its readback replaced -- which
+	 * is a second path through every widget the first pass just drew.
+	 */
+	let staged = 0;
+	p.TABS.forEach(t => {
+		p.setActive(t.id);
+		p.render();
+		const id = Object.keys(p.byId).find(i => p.canReset(i));
+		if (!id) return;
+		p.toggleReset(id, true);
+		staged++;
+		try {
+			p.render();
+			p.refreshBar();
+		} catch (e) {
+			fail("render() threw with a reset staged on '" + id + "': " + e.stack);
+		}
+		p.toggleReset(id, false);
+	});
+	if (!staged) fail("no key could be staged for reset");
+
 	console.log("ok  " + p.TABS.length + " tabs, " + drawn + " groups, " + undos +
-		    " reset controls, " + served + " requests served");
+		    " reset controls, " + staged + " redrawn with a reset staged, " + served +
+		    " requests served");
 })();
