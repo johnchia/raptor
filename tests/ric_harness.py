@@ -2191,6 +2191,190 @@ def scenario_json_discovery(stub, watch):
     ric.stop()
 
 
+def scenario_active_low(stub, watch):
+    """Inverted single-pin hardware (the tapo c100 class): logical
+    drives must come out raw-inverted from the config flags and from
+    the {pin, active_low} json object alike, and an inverted bank must
+    never see a raw-low (lit) transient, park included."""
+    conf_tail = ("trigger = luma\nnight_luma = 20\nnight_gain = 80000\n"
+                 "day_gain_pct = 25\nhysteresis_sec = 2\n")
+    conf = ("gpio_ircut = %d\ngpio_ircut_active_low = true\n"
+            "gpio_irled = %d\ngpio_irled_active_low = true\n"
+            % (IRCUT1, IRLED)) + conf_tail
+
+    stub.set_scene(luma=120, gain=500, ev=4000)
+    gm, mm = watch.mark(), stub.mark()
+    ric = Ric("alowconf", conf)
+    if not ric.wait_running():
+        result(False, "active-low conf: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    ok = wait_for(lambda: "day" in stub.modes_since(mm), 5)
+    ok = ok and wait_last(watch, gm, IRCUT1, "0") \
+        and wait_last(watch, gm, IRLED, "1")
+    led = [c for _, p, _, c in watch.since(gm) if p == IRLED]
+    result(ok and led and led[0] == "1" and "0" not in led,
+           "active-low conf: day is raw-inverted, bank never flashes",
+           str(watch.since(gm)))
+    gm, mm = watch.mark(), stub.mark()
+    stub.set_scene(luma=5, gain=20000, ev=100000)
+    ok = wait_for(lambda: "night" in stub.modes_since(mm), 4)
+    ok = ok and wait_last(watch, gm, IRCUT1, "1") \
+        and wait_last(watch, gm, IRLED, "0")
+    result(ok, "active-low conf: night holds raw 1, bank lights on raw 0",
+           str(watch.since(gm)))
+    ric.stop()
+
+    orig = open("/etc/thingino.json").read()
+    try:
+        with open("/etc/thingino.json", "w") as f:
+            json.dump({"gpio": {
+                "ircut": {"pin": IRCUT1, "active_low": True},
+                "ir850": {"pin": IRLED, "active_low": True}}}, f)
+        stub.set_scene(luma=120, gain=500, ev=4000)
+        ric = Ric("alowjson", conf_tail)
+        if not ric.wait_running():
+            result(False, "active-low json: ric start", "no 'ric running'")
+            ric.stop()
+            return
+        log = ric.read_log()
+        result("ircut-active-low" in log and "irled-active-low" in log,
+               "active-low json: discovery reports the inversion", log[:400])
+        time.sleep(0.3)
+        gm, mm = watch.mark(), stub.mark()
+        stub.set_scene(luma=5, gain=20000, ev=100000)
+        ok = wait_for(lambda: "night" in stub.modes_since(mm), 4)
+        ok = ok and wait_last(watch, gm, IRCUT1, "1") \
+            and wait_last(watch, gm, IRLED, "0")
+        result(ok, "active-low json: object-form pins drive raw-inverted",
+               str(watch.since(gm)))
+        ric.stop()
+    finally:
+        with open("/etc/thingino.json", "w") as f:
+            f.write(orig)
+
+
+def scenario_live_bank_policy(stub, watch):
+    """The ir850/ir940 enable flags are live policy: disabling a bank
+    mid-night drops its LED immediately with the mode holding (the
+    window-reflection case), enabling lights it back, and the flag
+    round-trips through get-thresholds. Out-of-range values refuse."""
+    stub.set_scene(luma=70, gain=4500, ev=1200000)
+    ric = Ric("bankpol", LUMA_CONF)
+    if not ric.wait_running():
+        result(False, "bank-policy: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    time.sleep(0.5)
+    mm = stub.mark()
+    stub.set_scene(luma=6, gain=8192, ev=50000000)
+    if not wait_for(lambda: "night" in stub.modes_since(mm), 4):
+        result(False, "bank-policy: night entry", str(stub.modes_since(mm)))
+        ric.stop()
+        return
+    gm = watch.mark()
+    r = ctrl_cmd(RUN_DIR + "/ric.sock",
+                 {"cmd": "set-threshold", "key": "ir850", "value": 0})
+    off_now = wait_for(lambda: last_value(watch.since(gm), IRLED) == "0", 3)
+    result(r is not None and r.get("status") == "ok" and off_now,
+           "bank-policy: disabling ir850 mid-night drops the LED now",
+           "resp=%s events=%s" % (r, watch.since(gm)))
+    result("day" not in stub.modes_since(mm),
+           "bank-policy: the mode holds through the policy change",
+           str(stub.modes_since(mm)))
+
+    gm2 = watch.mark()
+    r = ctrl_cmd(RUN_DIR + "/ric.sock",
+                 {"cmd": "set-threshold", "key": "ir850", "value": 1})
+    on_now = wait_for(lambda: last_value(watch.since(gm2), IRLED) == "1", 3)
+    result(r is not None and r.get("status") == "ok" and on_now,
+           "bank-policy: re-enabling lights it back",
+           "resp=%s events=%s" % (r, watch.since(gm2)))
+
+    r = ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "get-thresholds"})
+    result(r is not None and r.get("ir850") is True and "pulse_ms" in r,
+           "bank-policy: flags and pulse_ms round-trip through get-thresholds",
+           str(r))
+    r = ctrl_cmd(RUN_DIR + "/ric.sock",
+                 {"cmd": "set-threshold", "key": "ir850", "value": 2})
+    result(r is not None and r.get("status") != "ok",
+           "bank-policy: a non-boolean value is refused", str(r))
+
+    # ADC cross-validation and pulse_ms bounds, on the same instance.
+    r = ctrl_cmd(RUN_DIR + "/ric.sock",
+                 {"cmd": "set-threshold", "key": "adc_night", "value": 700})
+    result(r is not None and r.get("status") != "ok",
+           "bank-policy: adc_night above adc_day is refused", str(r))
+    r1 = ctrl_cmd(RUN_DIR + "/ric.sock",
+                  {"cmd": "set-threshold", "key": "adc_day", "value": 900})
+    r2 = ctrl_cmd(RUN_DIR + "/ric.sock",
+                  {"cmd": "set-threshold", "key": "adc_night", "value": 700})
+    result(all(x is not None and x.get("status") == "ok" for x in (r1, r2)),
+           "bank-policy: ordered adc updates land", "%s %s" % (r1, r2))
+    r = ctrl_cmd(RUN_DIR + "/ric.sock",
+                 {"cmd": "set-threshold", "key": "pulse_ms", "value": 0})
+    result(r is not None and r.get("status") != "ok",
+           "bank-policy: pulse_ms zero is refused", str(r))
+    ric.stop()
+
+
+def scenario_live_trigger_switch(stub, watch):
+    """set-trigger swaps the judge without bouncing the regime: switch
+    luma->gain mid-night, the mode holds, the machinery re-arms, and
+    the GAIN trigger's own day condition then drives the return to day.
+    Unknown names refuse; a same-trigger switch is a quiet ok."""
+    conf = LUMA_CONF + "night_threshold = 40000\nday_threshold = 25000\n"
+    stub.set_scene(luma=70, gain=4500, ev=1200000)
+    ric = Ric("trigsw", conf)
+    if not ric.wait_running():
+        result(False, "trigger-switch: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    time.sleep(0.5)
+    mm = stub.mark()
+    # The dark scene must read dark to BOTH judges: luma 6 for the luma
+    # trigger that enters night, gain above night_threshold so the gain
+    # trigger holds night after the switch instead of instantly ruling
+    # day (its model reads any gain under day_threshold as a lit scene).
+    stub.set_scene(luma=6, gain=50000, ev=50000000)
+    if not wait_for(lambda: "night" in stub.modes_since(mm), 4):
+        result(False, "trigger-switch: night entry", str(stub.modes_since(mm)))
+        ric.stop()
+        return
+
+    r = ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "set-trigger", "value": "bogus"})
+    result(r is not None and r.get("status") != "ok",
+           "trigger-switch: unknown trigger is refused", str(r))
+
+    mm2 = stub.mark()
+    r = ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "set-trigger", "value": "gain"})
+    result(r is not None and r.get("status") == "ok",
+           "trigger-switch: luma -> gain accepted", str(r))
+    time.sleep(2 * POLL_MS / 1000.0)
+    result("day" not in stub.modes_since(mm2),
+           "trigger-switch: the regime survives the switch",
+           str(stub.modes_since(mm2)))
+    g = ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "get-thresholds"})
+    result(g is not None and g.get("trigger") == "gain",
+           "trigger-switch: get-thresholds reports the new judge", str(g))
+
+    r = ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "set-trigger", "value": "gain"})
+    result(r is not None and r.get("status") == "ok",
+           "trigger-switch: same trigger is a quiet ok", str(r))
+
+    # The new judge rules: gain below day_threshold ends the night. The
+    # re-arm's cooldown can extend through the settle window (17 polls)
+    # before evaluation resumes, then the hysteresis runs -- size the
+    # wait for the worst case, not the happy path.
+    time.sleep((3 + 1) * POLL_MS / 1000.0)
+    mm3 = stub.mark()
+    stub.set_scene(luma=70, gain=1300, ev=370000)
+    ok = wait_for(lambda: "day" in stub.modes_since(mm3), 10)
+    result(ok, "trigger-switch: the gain trigger drives the next transition",
+           str(stub.modes_since(mm3)))
+    ric.stop()
+
+
 def main():
     setup_sandbox()
     stub = StubRvd()
@@ -2242,9 +2426,12 @@ def main():
         scenario_gpio_failure,
         scenario_disabled,
         scenario_json_discovery,
+        scenario_active_low,
         scenario_hostile_config,
         scenario_ctrl_contract,
         scenario_photo_threshold_order,
+        scenario_live_bank_policy,
+        scenario_live_trigger_switch,
     ]
     only = os.environ.get("RIC_SCENARIO", "")
     if only:
