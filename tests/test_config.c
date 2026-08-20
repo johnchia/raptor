@@ -185,6 +185,50 @@ TEST cfg_fresh_file_save_skips_defaults(void)
 	PASS();
 }
 
+/*
+ * The property rvd's [image] block now rests on: for a tuning knob, "nobody
+ * wrote this" and "the operator wrote the neutral value" are different
+ * instructions, and the probe has to tell them apart.
+ *
+ * They used not to be distinguishable in practice, and it cost a real tuned
+ * value. rvd read every image key with a fallback of 128 and applied it
+ * unconditionally, so a contrast the config never mentioned still wrote
+ * op_type = AUTO over Infinity6C imx335.bin's shipped { MANUAL, 65 } on every
+ * start. If a later change makes a getter's stored default look like
+ * configuration again, rvd goes straight back to overwriting the tuner and
+ * nothing else in the tree would notice -- hence pinning it here.
+ *
+ *   what happened to the key          probe result   rvd does
+ *   --------------------------------  -------------  ---------------------
+ *   nothing                           absent         leaves the tuning alone
+ *   another reader resolved a default absent         leaves the tuning alone
+ *   operator wrote the neutral 128    present, 128   writes auto
+ *   operator wrote 140                present, 140   writes manual 140
+ */
+TEST cfg_unwritten_knob_is_not_a_neutral_one(void)
+{
+	char path[128];
+	rss_config_t *cfg = empty_cfg(path, sizeof(path));
+	ASSERT(cfg);
+
+	/* Untouched, and after a reader resolved its own 128: still absent. */
+	ASSERT_EQ(NULL, rss_config_get_str(cfg, "image", "contrast", NULL));
+	(void)rss_config_get_int(cfg, "image", "contrast", 128);
+	ASSERT_EQ(NULL, rss_config_get_str(cfg, "image", "contrast", NULL));
+
+	/* Written by the operator, at the very value the getter had guessed:
+	 * now present, and distinguishable from the guess above. */
+	rss_config_set_int(cfg, "image", "contrast", 128);
+	ASSERT_STR_EQ("128", rss_config_get_str(cfg, "image", "contrast", NULL));
+
+	/* A neighbouring key is unaffected by either. */
+	ASSERT_EQ(NULL, rss_config_get_str(cfg, "image", "brightness", NULL));
+
+	rss_config_free(cfg);
+	unlink(path);
+	PASS();
+}
+
 SUITE(config_suite)
 {
 	RUN_TEST(cfg_default_is_display_only);
@@ -194,4 +238,5 @@ SUITE(config_suite)
 	RUN_TEST(cfg_set_refuses_an_empty_section);
 	RUN_TEST(cfg_null_probe_is_order_free);
 	RUN_TEST(cfg_fresh_file_save_skips_defaults);
+	RUN_TEST(cfg_unwritten_knob_is_not_a_neutral_one);
 }

@@ -312,6 +312,62 @@ static int read_sensor_proc_int(int idx, const char *key, int base, int def)
 	return read_procfs_int(path, base, def);
 }
 
+/*
+ * An [image] knob the operator actually wrote, or "not asked for".
+ *
+ * rss_config_get_int cannot answer this question. Its miss path resolves to
+ * the caller's own fallback and stores it flagged display-only, so every
+ * caller gets a number back and none of them can tell whether anybody asked
+ * for it. For a resolution or a bitrate that is exactly right -- something
+ * has to be picked. For a tuning knob it is not, because the ISP already has
+ * an answer and 128 does not mean "no opinion", it means "put this module in
+ * auto", which is a different instruction and overrules the tuning file.
+ *
+ * That distinction was costing a real value. Infinity6C's imx335.bin ships
+ * Contrast as { enable = 1, op_type = MANUAL, 65 }; rvd read a contrast the
+ * config never mentioned, resolved it to 128, and wrote op_type = AUTO over
+ * the top on every start, so the tuner's 65 never reached a frame. Measured
+ * on an SSC377QE: contrast as found and contrast explicitly set to 128 gave
+ * the same picture to 0.06 of a grey level, while the module itself is very
+ * much alive -- 0 and 255 span mean luma 119.86 to 84.70. os04a10.bin loses
+ * two that way, Brightness 87 and Contrast 61.
+ *
+ * The probe is rss_config_get_str with no default, whose order-independence
+ * is pinned by tests/test_config.c cfg_null_probe_is_order_free.
+ */
+static bool img_asked_for(rss_config_t *cfg, const char *sect, const char *key, int *out)
+{
+	const char *s = rss_config_get_str(cfg, sect, key, NULL);
+	char *end;
+	long v;
+
+	if (!s || !*s)
+		return false;
+
+	v = strtol(s, &end, 0);
+	if (end == s)
+		return false;
+
+	*out = (int)v;
+	return true;
+}
+
+/*
+ * Apply an [image] knob only if the operator named it. `call` is evaluated
+ * with `v` holding the value, so a knob whose op wants something other than a
+ * bare int (defog takes a uint8_t by pointer) still goes through one rule.
+ */
+#define ISP_IF_ASKED(sect, key, call)                                                              \
+	do {                                                                                       \
+		int v;                                                                             \
+		if (img_asked_for(cfg, sect, key, &v)) {                                           \
+			call;                                                                      \
+			RSS_DEBUG("  %s=%d", key, v);                                              \
+		} else {                                                                           \
+			RSS_DEBUG("  %s left to the tuning file", key);                            \
+		}                                                                                  \
+	} while (0)
+
 /* Load sensor config from an INI section, with a per-index procfs
  * fallback (proc_idx < 0 disables it) */
 static void load_sensor_from_section(rss_config_t *cfg, const char *section,
@@ -743,24 +799,25 @@ int rvd_pipeline_init(rvd_state_t *st)
 		}
 	}
 
-	/* ── 3c. ISP tuning defaults (apply to all sensors) ── */
+	/* ── 3c. ISP tuning knobs (apply to all sensors) ── */
 	{
 		const char *img = "image";
-		int brightness = rss_config_get_int(cfg, img, "brightness", 128);
-		int contrast = rss_config_get_int(cfg, img, "contrast", 128);
-		int saturation = rss_config_get_int(cfg, img, "saturation", 128);
-		int sharpness = rss_config_get_int(cfg, img, "sharpness", 128);
-		int sinter = rss_config_get_int(cfg, img, "sinter", 128);
-		int temper = rss_config_get_int(cfg, img, "temper", 128);
-		int hue = rss_config_get_int(cfg, img, "hue", 128);
-		int ae_comp = rss_config_get_int(cfg, img, "ae_comp", 128);
+		/*
+		 * Two kinds of key live in this section and they are not
+		 * applied the same way.
+		 *
+		 * A tuning knob addresses a module the IQ binary has already
+		 * configured, so an absent key means "the tuning decides" and
+		 * is not written at all -- see img_asked_for.
+		 *
+		 * The rest are policy this daemon owns rather than the tuner:
+		 * the gain ceilings, the orientation, the flicker rate, the
+		 * running mode and the bypass. Nothing in the tuning file
+		 * expresses them, so absence has to resolve to something and
+		 * these keep their defaults.
+		 */
 		int max_again = rss_config_get_int(cfg, img, "max_again", 160);
 		int max_dgain = rss_config_get_int(cfg, img, "max_dgain", 80);
-		int dpc = rss_config_get_int(cfg, img, "dpc_strength", 128);
-		int drc = rss_config_get_int(cfg, img, "drc_strength", 128);
-		int highlight = rss_config_get_int(cfg, img, "highlight_depress", 0);
-		int backlight = rss_config_get_int(cfg, img, "backlight_comp", 0);
-		uint8_t defog = (uint8_t)rss_config_get_int(cfg, img, "defog_strength", 128);
 		/* Read as booleans so `true` works as well as the documented
 		 * 1 — a flag written the other spelling is not a number, and
 		 * read as one it falls back to the default without a word. */
@@ -769,34 +826,44 @@ int rvd_pipeline_init(rvd_state_t *st)
 		int antiflicker =
 			rss_config_get_int(cfg, multi ? "sensor0" : "sensor", "antiflicker", 2);
 
-		RSS_HAL_CALL(st->ops, isp_set_brightness, st->hal_ctx, brightness);
-		RSS_HAL_CALL(st->ops, isp_set_contrast, st->hal_ctx, contrast);
-		RSS_HAL_CALL(st->ops, isp_set_saturation, st->hal_ctx, saturation);
-		RSS_HAL_CALL(st->ops, isp_set_sharpness, st->hal_ctx, sharpness);
-		RSS_HAL_CALL(st->ops, isp_set_sinter_strength, st->hal_ctx, sinter);
-		RSS_HAL_CALL(st->ops, isp_set_temper_strength, st->hal_ctx, temper);
-		RSS_HAL_CALL(st->ops, isp_set_hue, st->hal_ctx, hue);
-		RSS_HAL_CALL(st->ops, isp_set_ae_comp, st->hal_ctx, ae_comp);
+		RSS_DEBUG("isp tuning:");
+		ISP_IF_ASKED(img, "brightness",
+			     RSS_HAL_CALL(st->ops, isp_set_brightness, st->hal_ctx, v));
+		ISP_IF_ASKED(img, "contrast",
+			     RSS_HAL_CALL(st->ops, isp_set_contrast, st->hal_ctx, v));
+		ISP_IF_ASKED(img, "saturation",
+			     RSS_HAL_CALL(st->ops, isp_set_saturation, st->hal_ctx, v));
+		ISP_IF_ASKED(img, "sharpness",
+			     RSS_HAL_CALL(st->ops, isp_set_sharpness, st->hal_ctx, v));
+		ISP_IF_ASKED(img, "sinter",
+			     RSS_HAL_CALL(st->ops, isp_set_sinter_strength, st->hal_ctx, v));
+		ISP_IF_ASKED(img, "temper",
+			     RSS_HAL_CALL(st->ops, isp_set_temper_strength, st->hal_ctx, v));
+		ISP_IF_ASKED(img, "hue", RSS_HAL_CALL(st->ops, isp_set_hue, st->hal_ctx, v));
+		ISP_IF_ASKED(img, "ae_comp",
+			     RSS_HAL_CALL(st->ops, isp_set_ae_comp, st->hal_ctx, v));
+		ISP_IF_ASKED(img, "dpc_strength",
+			     RSS_HAL_CALL(st->ops, isp_set_dpc_strength, st->hal_ctx, v));
+		ISP_IF_ASKED(img, "drc_strength",
+			     RSS_HAL_CALL(st->ops, isp_set_drc_strength, st->hal_ctx, v));
+		ISP_IF_ASKED(img, "highlight_depress",
+			     RSS_HAL_CALL(st->ops, isp_set_highlight_depress, st->hal_ctx, v));
+		ISP_IF_ASKED(img, "backlight_comp",
+			     RSS_HAL_CALL(st->ops, isp_set_backlight_comp, st->hal_ctx, v));
+		ISP_IF_ASKED(img, "defog_strength", {
+			uint8_t defog = (uint8_t)v;
+			RSS_HAL_CALL(st->ops, isp_set_defog_strength_adv, st->hal_ctx, &defog);
+		});
+
 		RSS_HAL_CALL(st->ops, isp_set_max_again, st->hal_ctx, max_again);
 		RSS_HAL_CALL(st->ops, isp_set_max_dgain, st->hal_ctx, max_dgain);
-		RSS_HAL_CALL(st->ops, isp_set_dpc_strength, st->hal_ctx, dpc);
-		RSS_HAL_CALL(st->ops, isp_set_drc_strength, st->hal_ctx, drc);
-		RSS_HAL_CALL(st->ops, isp_set_highlight_depress, st->hal_ctx, highlight);
-		RSS_HAL_CALL(st->ops, isp_set_backlight_comp, st->hal_ctx, backlight);
-		RSS_HAL_CALL(st->ops, isp_set_defog_strength_adv, st->hal_ctx, &defog);
 		RSS_HAL_CALL(st->ops, isp_set_running_mode, st->hal_ctx, RSS_ISP_DAY);
 		ret = RSS_HAL_CALL(st->ops, isp_set_bypass, st->hal_ctx, 1);
 		RSS_HAL_CALL(st->ops, isp_set_antiflicker, st->hal_ctx, antiflicker);
 		RSS_HAL_CALL(st->ops, isp_set_hflip, st->hal_ctx, hflip);
 		RSS_HAL_CALL(st->ops, isp_set_vflip, st->hal_ctx, vflip);
 
-		RSS_DEBUG("isp tuning: brightness=%d contrast=%d saturation=%d "
-			  "sharpness=%d",
-			  brightness, contrast, saturation, sharpness);
-		RSS_DEBUG("  sinter=%d temper=%d hue=%d ae_comp=%d", sinter, temper, hue, ae_comp);
-		RSS_DEBUG("  max_again=%d max_dgain=%d dpc=%d drc=%d", max_again, max_dgain, dpc,
-			  drc);
-		RSS_DEBUG("  highlight=%d backlight=%d defog=%d", highlight, backlight, defog);
+		RSS_DEBUG("  max_again=%d max_dgain=%d", max_again, max_dgain);
 		RSS_DEBUG("  hflip=%d vflip=%d antiflicker=%d bypass=%d", hflip, vflip, antiflicker,
 			  ret == RSS_OK);
 	}
@@ -812,31 +879,33 @@ int rvd_pipeline_init(rvd_state_t *st)
 		RSS_HAL_CALL(st->ops, isp_set_custom_mode_n, st->hal_ctx, 0, 0);
 	}
 
-	/* Apply defaults to additional sensors */
+	/* Apply defaults to additional sensors. Same split as 3c: the tuning
+	 * knobs go only where asked for, the policy keys always. */
 	for (int s = 1; s < st->sensor_count; s++) {
 		char img_sect[32];
 		snprintf(img_sect, sizeof(img_sect), "sensor%d_image", s);
-		RSS_HAL_CALL(st->ops, isp_set_brightness_n, st->hal_ctx, s,
-			     rss_config_get_int(cfg, img_sect, "brightness", 128));
-		RSS_HAL_CALL(st->ops, isp_set_contrast_n, st->hal_ctx, s,
-			     rss_config_get_int(cfg, img_sect, "contrast", 128));
-		RSS_HAL_CALL(st->ops, isp_set_saturation_n, st->hal_ctx, s,
-			     rss_config_get_int(cfg, img_sect, "saturation", 128));
-		RSS_HAL_CALL(st->ops, isp_set_sharpness_n, st->hal_ctx, s,
-			     rss_config_get_int(cfg, img_sect, "sharpness", 128));
-		RSS_HAL_CALL(st->ops, isp_set_sinter_strength_n, st->hal_ctx, s,
-			     rss_config_get_int(cfg, img_sect, "sinter", 128));
-		RSS_HAL_CALL(st->ops, isp_set_temper_strength_n, st->hal_ctx, s,
-			     rss_config_get_int(cfg, img_sect, "temper", 128));
+		RSS_DEBUG("isp tuning (sensor%d):", s);
+		ISP_IF_ASKED(img_sect, "brightness",
+			     RSS_HAL_CALL(st->ops, isp_set_brightness_n, st->hal_ctx, s, v));
+		ISP_IF_ASKED(img_sect, "contrast",
+			     RSS_HAL_CALL(st->ops, isp_set_contrast_n, st->hal_ctx, s, v));
+		ISP_IF_ASKED(img_sect, "saturation",
+			     RSS_HAL_CALL(st->ops, isp_set_saturation_n, st->hal_ctx, s, v));
+		ISP_IF_ASKED(img_sect, "sharpness",
+			     RSS_HAL_CALL(st->ops, isp_set_sharpness_n, st->hal_ctx, s, v));
+		ISP_IF_ASKED(img_sect, "sinter",
+			     RSS_HAL_CALL(st->ops, isp_set_sinter_strength_n, st->hal_ctx, s, v));
+		ISP_IF_ASKED(img_sect, "temper",
+			     RSS_HAL_CALL(st->ops, isp_set_temper_strength_n, st->hal_ctx, s, v));
+		ISP_IF_ASKED(img_sect, "hue",
+			     RSS_HAL_CALL(st->ops, isp_set_hue_n, st->hal_ctx, s, v));
+		ISP_IF_ASKED(img_sect, "ae_comp",
+			     RSS_HAL_CALL(st->ops, isp_set_ae_comp_n, st->hal_ctx, s, v));
 		RSS_HAL_CALL(st->ops, isp_set_running_mode_n, st->hal_ctx, s, RSS_ISP_DAY);
 		RSS_HAL_CALL(st->ops, isp_set_hflip_n, st->hal_ctx, s,
 			     rss_config_get_bool(cfg, img_sect, "hflip", false) ? 1 : 0);
 		RSS_HAL_CALL(st->ops, isp_set_vflip_n, st->hal_ctx, s,
 			     rss_config_get_bool(cfg, img_sect, "vflip", false) ? 1 : 0);
-		RSS_HAL_CALL(st->ops, isp_set_hue_n, st->hal_ctx, s,
-			     rss_config_get_int(cfg, img_sect, "hue", 128));
-		RSS_HAL_CALL(st->ops, isp_set_ae_comp_n, st->hal_ctx, s,
-			     rss_config_get_int(cfg, img_sect, "ae_comp", 128));
 		RSS_HAL_CALL(st->ops, isp_set_max_again_n, st->hal_ctx, s,
 			     rss_config_get_int(cfg, img_sect, "max_again", 160));
 		RSS_HAL_CALL(st->ops, isp_set_max_dgain_n, st->hal_ctx, s,
