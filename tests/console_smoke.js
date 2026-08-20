@@ -85,6 +85,11 @@ class El {
 	remove() {}
 	focus() {}
 	blur() {}
+	contains(n) {
+		if (!n) return false;
+		if (n === this) return true;
+		return this.children.some(c => c instanceof El && c.contains(n));
+	}
 	/* Depth-first walk; enough for the ".chip" and ".tab" lookups the page does. */
 	querySelectorAll(sel) {
 		const want = sel.replace(/^\./, "");
@@ -146,12 +151,46 @@ function reply(body) {
 	if (cmd === "schema") return SCHEMA;
 	if (cmd === "get") return {api: 1, status: "ok", values: valuesFor(body.section)};
 	if (cmd === "pending") return {api: 1, status: "ok", stale: []};
+	/* The camera's answer echoed back, which is what the page writes into
+	 * the control -- an ISP quantises, and the value that comes back is
+	 * the one in force. */
+	if (cmd === "set") {
+		const e = (body.edits || [])[0] || {};
+		return {api: 1, status: "ok",
+			results: [{section: e.section, key: e.key, value: e.value,
+				   applied: "live"}]};
+	}
 	if (cmd === "state") return {api: 1, status: "ok", up: {}, daemons_up: 6,
-				    ir: {mode: "auto", state: "day"}};
+				    ir: {mode: "auto", state: "day"}, image: ISP_STATE};
 	return {api: 1, status: "ok"};
 }
 
 const SCHEMA = JSON.parse(fs.readFileSync(path.join(__dirname, "console_schema.json"), "utf8"));
+
+/*
+ * [image] as an Infinity6C answers for it, copied from an SSC377QE running
+ * the imx335 tuning. The numbers are the point: none of these ranges is the
+ * 0-255 the schema carries, brightness is a module the tuning ships switched
+ * off, and three knobs are following the tuning's own curve rather than any
+ * value of ours. A page that drew its own bounds instead would look right on
+ * this reply and be wrong on every value it sent.
+ */
+const ISP_STATE = {
+	brightness: 50, contrast: 65, sharpness: 40, temper: 1, ae_comp: 0,
+	drc_strength: 128, defog_strength: 52, hflip: 0, vflip: 0,
+	auto: ",brightness,sharpness,drc_strength,",
+	settable: ",brightness,contrast,sharpness,temper,hflip,vflip,ae_comp," +
+		  "drc_strength,defog_strength,",
+	caps: {
+		brightness: {min: 0, max: 100, neutral: 50, auto: true, enabled: false},
+		contrast: {min: 0, max: 100, neutral: 50, auto: true, enabled: true},
+		sharpness: {min: 0, max: 127, neutral: 40, auto: true, enabled: true},
+		temper: {min: 0, max: 7, neutral: 1, auto: false, enabled: true},
+		ae_comp: {min: -20, max: 20, neutral: 0, auto: false, enabled: true},
+		drc_strength: {min: 0, max: 255, neutral: 128, auto: true, enabled: true},
+		defog_strength: {min: 0, max: 255, neutral: 128, auto: true, enabled: true},
+	},
+};
 
 /*
  * Half of every section is configured and half is not, so both branches of the
@@ -163,6 +202,19 @@ function valuesFor(section) {
 	SCHEMA.keys.filter(k => k.section === section).forEach((k, i) => {
 		const o = {section: k.section, key: k.key};
 		if (k.type === "credential") { o.set = true; out.push(o); return; }
+		/*
+		 * rvd stops writing an [image] key the config never named, so
+		 * the ordinary state of a knob is absent from the file and
+		 * following the tuning -- and one of them carries the word,
+		 * which is what a knob handed back on purpose looks like.
+		 */
+		if (section === "image" && ISP_STATE.caps[k.key]) {
+			if (k.key === "defog_strength") { o.value = "auto"; o.source = "daemon"; }
+			else if (k.key === "contrast") { o.value = 65; o.source = "daemon"; }
+			else o.set = false;
+			out.push(o);
+			return;
+		}
 		o.value = k.type === "bool" ? true
 			: k.type === "enum" ? (k.choices || ["x"])[0]
 			: k.type === "host" ? "camera.local"
@@ -211,6 +263,7 @@ const probe_epilogue = `
   canReset: canReset, toggleReset: toggleReset,
   setActive: function (v) { active = v; },
   ACT_STATE: ACT_STATE,
+  V: V,
 };
 `;
 
@@ -301,7 +354,92 @@ try {
 		fail("the page did not read the mode out of `state` (got " +
 		     p.ACT_STATE["ircut-mode"] + ")");
 
+	/*
+	 * The image knobs, which have no fixed scale to draw from. Their range
+	 * is the hardware's and arrives in `state`; the schema's bounds are the
+	 * widest any platform accepts and are wrong for every one of them here.
+	 * A page that ignored caps would look plausible and send values the
+	 * camera refuses -- or, worse, take them: 140 on a 0-100 knob.
+	 */
+	p.setActive("image");
+	p.render();
+	const rowFor = key => sheet.querySelectorAll(".row").find(r => r.dataset.id === "image." + key);
+	const sliderIn = row => row.querySelectorAll("input").find(i => i.type === "range");
+
+	const contrast = rowFor("contrast");
+	if (!contrast) fail("the image tab drew no contrast row");
+	if (sliderIn(contrast).max !== 100)
+		fail("contrast was drawn 0-" + sliderIn(contrast).max +
+		     ", not the 0-100 the camera published");
+
+	const ae = rowFor("ae_comp");
+	if (Number(sliderIn(ae).min) >= 0)
+		fail("exposure compensation was drawn from " + sliderIn(ae).min +
+		     ", so the whole darker half is unreachable");
+
+	/* A module the tuning ships switched off takes the value and does
+	 * nothing with it, which is the one failure that cannot be seen. */
+	if (!rowFor("brightness").querySelectorAll(".modoff").length)
+		fail("brightness is switched off in the tuning and the page did not say so");
+	if (rowFor("contrast").querySelectorAll(".modoff").length)
+		fail("contrast is switched on and the page said otherwise");
+
+	/* Auto is a state of the camera, not a memory of what was clicked: the
+	 * knobs it names are following the tuning whoever set them that way. */
+	const autoBtn = key => rowFor(key).querySelector(".autobtn");
+	if (autoBtn("brightness").getAttribute("aria-pressed") !== "true")
+		fail("brightness is in the camera's auto list and the page drew it as chosen");
+	if (autoBtn("contrast").getAttribute("aria-pressed") !== "false")
+		fail("contrast carries a value of 65 and the page drew it as auto");
+	if (autoBtn("defog_strength").getAttribute("aria-pressed") !== "true")
+		fail("defog is configured as the word auto and the page drew it as a number");
+	/* 3DNR is a VPE level with no tuning curve behind it, so there is
+	 * nothing to hand back and nothing to offer. */
+	if (rowFor("temper").querySelector(".autobtn"))
+		fail("temporal denoise has no auto mode on this camera and the page offered one");
+
+	/* And the knob on auto still shows where the picture is -- the tuner's
+	 * value, read from the camera rather than left blank. */
+	if (Number(sliderIn(rowFor("brightness")).value) !== 50)
+		fail("a knob on auto drew " + sliderIn(rowFor("brightness")).value +
+		     " instead of the value the camera reports");
+
+	const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setTimeout(r, 1)); };
+
+	autoBtn("contrast").handlers.click[0]();
+	await settle();
+	let set = sent[sent.length - 1];
+	if (set.cmd !== "set" || set.edits[0].key !== "contrast" || set.edits[0].value !== "auto")
+		fail("pressing auto sent " + JSON.stringify(set) + ", not the word auto");
+	if (p.V["image.contrast"] !== "auto")
+		fail("the page did not keep the camera's answer of auto");
+
+	/* Pressing it again takes the knob back, pinned where the tuning had
+	 * it -- a number, because that is what leaving auto means. */
+	autoBtn("brightness").handlers.click[0]();
+	await settle();
+	set = sent[sent.length - 1];
+	if (set.edits[0].key !== "brightness" || set.edits[0].value !== 50)
+		fail("releasing auto sent " + JSON.stringify(set.edits[0]) +
+		     ", not the value the knob was sitting at");
+
+	/*
+	 * And a number past the end of the camera's range never leaves the
+	 * page. Sent, it would be refused by the ISP, fall back to the file
+	 * and stage a pipeline restart to enact something the silicon cannot
+	 * do -- 200 on a knob whose ceiling is 127.
+	 */
+	const shp = rowFor("sharpness").querySelectorAll("input").find(i => i.type === "number");
+	shp.value = 200;
+	shp.handlers.change[0]();
+	await settle();
+	set = sent[sent.length - 1];
+	if (set.edits[0].key !== "sharpness" || set.edits[0].value !== 127)
+		fail("sharpness 200 was sent as " + JSON.stringify(set.edits[0].value) +
+		     ", where the camera's ceiling is 127");
+
 	console.log("ok  " + p.TABS.length + " tabs, " + drawn + " groups, " + undos +
 		    " reset controls, " + staged + " redrawn with a reset staged, " +
-		    "day/night override wired, " + served + " requests served");
+		    "day/night override wired, image knobs on the camera's own " +
+		    "ranges, " + served + " requests served");
 })();

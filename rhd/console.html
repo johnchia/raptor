@@ -167,6 +167,15 @@ main{display:flex;flex-direction:column;min-width:0;min-height:100vh}
 .sl{display:flex;align-items:center;gap:11px}
 input[type=range]{flex:1;-webkit-appearance:none;appearance:none;height:2px;background:var(--line);
                   border-radius:2px}
+/* A knob following the tuning still shows where the picture is, faintly: the
+   number is real and worth seeing, but nobody here chose it. */
+.sl.auto input[type=range],.sl.auto .num{opacity:.5}
+.autobtn{background:var(--sink);border:1px solid var(--line);border-radius:var(--r);
+         padding:4px 9px;font-family:var(--mono);font-size:11px;color:var(--ink-dim);
+         cursor:pointer;flex:0 0 auto}
+.autobtn[aria-pressed="true"]{background:var(--accent-dim);border-color:var(--accent);
+                              color:var(--ink)}
+.modoff{font-family:var(--mono);font-size:11px;color:var(--amber)}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;
   border-radius:50%;background:var(--ink);border:0;cursor:pointer}
 input[type=range]::-moz-range-thumb{width:13px;height:13px;border-radius:50%;background:var(--ink);
@@ -440,7 +449,8 @@ const help  = id => (L[id] && L[id][2]) || "";
  * reports that no tab claims are collected onto a final page, so a new one
  * cannot go unreachable. */
 const TABS = [
- {id:"image",   name:"Image",       groups:[{title:"Picture", section:"image"}]},
+ {id:"image",   name:"Image",       groups:[{title:"Picture", section:"image",
+                                            note:"Every range here is this camera's own. A knob on auto is following the tuning file for this sensor, which varies it with the light; a number holds it there instead."}]},
  {id:"streams", name:"Streams",     groups:[{title:"Sensor", section:"sensor"},
                                             {title:"Encoders", matrix:["stream0","stream1"]},
                                             {title:"Snapshots", section:"jpeg"},
@@ -531,6 +541,73 @@ const id_of = k => k.section + "." + k.key;
 const MISSING_DAEMON = new Set();
 const usable = k => k.available !== false && !MISSING_DAEMON.has(k.owner);
 
+/* ═══ the ISP's own account of its knobs ═════════════════════════════════
+ * The schema's bounds on [image] are the widest any platform accepts, and
+ * they have to be: the table is compiled into the camera and the real range
+ * belongs to the silicon and to the tuning file loaded for this sensor.
+ * Brightness is 0-100 on one SoC and a byte on another; 3DNR has eight
+ * positions, not 256; exposure compensation is signed. rvd answers all of it
+ * per knob and rcd forwards it in `state`, so this page draws the control the
+ * hardware actually has instead of a scale somebody agreed on.
+ *
+ * `auto` is the knobs the ISP is running from the tuning's own curve rather
+ * than from a value of ours. Those report the tuner's neutral, which is a
+ * real number and indistinguishable from a knob deliberately set there -- so
+ * without this list a slider sitting at 50 cannot say whether anyone chose
+ * it.
+ */
+const ISP = {caps: {}, auto: new Set(), live: {}, sig: ""};
+
+/*
+ * What this knob accepts here, falling back to the table for a camera that
+ * has not said -- rvd down, or a build older than caps. The fallback is the
+ * optimistic direction: a control drawn from a range too wide refuses at the
+ * edges, where one hidden for want of an answer cannot be used at all.
+ *
+ * Two different questions about auto, and both have to be yes. The schema
+ * says the word is a value for this key at all; caps says this camera's knob
+ * has a curve to hand back to. Temporal denoise is the example -- a real knob
+ * on every platform, and a VPE level with no tuning behind it, so there is
+ * nothing for auto to mean.
+ */
+function bounds(k) {
+  const c = k.section === "image" ? ISP.caps[k.key] : null;
+  if (!c) return {min: k.min, max: k.max, neutral: null,
+                  auto: k.auto === true, enabled: true};
+  return {min: c.min, max: c.max, neutral: c.neutral,
+          auto: k.auto === true && c.auto !== false, enabled: c.enabled !== false};
+}
+
+/*
+ * Whether this knob is following the tuning.
+ *
+ * A key nobody has configured is: rvd stopped writing [image] keys the config
+ * never named, precisely so the tuning's own answer survives a restart. So
+ * "unset" and "auto" are the same state here, and the camera's list is what
+ * confirms it.
+ */
+function isAuto(id) {
+  const k = byId[id];
+  if (!k || k.section !== "image" || !bounds(k).auto) return false;
+  if (V[id] === "auto") return true;
+  return V[id] === undefined && ISP.auto.has(k.key);
+}
+
+/*
+ * The number a control shows. For a knob on auto that is the camera's own
+ * reading -- the value the picture is at, which is the tuner's and not ours.
+ * Drawing an empty slider there would be the one thing that is certainly
+ * wrong: the knob has a position, it just has not got one from this page.
+ */
+function shown(id) {
+  const k = byId[id];
+  if (typeof V[id] === "number") return V[id];
+  if (!k || k.section !== "image") return V[id];
+  if (typeof ISP.live[k.key] === "number") return ISP.live[k.key];
+  const b = bounds(k);
+  return b.neutral !== null ? b.neutral : b.min;
+}
+
 const OWNER_IMPACT = {};
 function learnImpacts() {
   KEYS.forEach(k => {
@@ -556,7 +633,8 @@ function widgetFor(k) {
   if (k.type === "host" || k.type === "ipv4") return "text";
   if (k.type === "enum") return (k.choices || []).length <= 4 ? "seg" : "select";
   if (k.labels) return k.labels.length <= 4 ? "seg" : "select";
-  const span = k.max - k.min;
+  const b = bounds(k);
+  const span = b.max - b.min;
   if (span === 1) return "switch";
   if (isIdentifier(k)) return "number";
   if (span <= 4) return "seg";
@@ -734,10 +812,18 @@ function mark(el, text, warn, bold) {
 }
 function syncControl(el, k, val) {
   if (!el) return;
+  /* "auto" is not a position on the scale, so the slider keeps showing where
+     the camera says the picture is and the button carries the state. */
+  const on = val === "auto";
+  const num = on ? shown(id_of(k)) : val;
+  const row = el.querySelector(".sl");
+  if (row) row.classList.toggle("auto", on);
+  const ab = el.querySelector(".autobtn");
+  if (ab) ab.setAttribute("aria-pressed", String(on));
   const sl = el.querySelector("input[type=range]");
-  if (sl) sl.value = val;
+  if (sl && num !== undefined) sl.value = num;
   const nm = el.querySelector(".num");
-  if (nm) nm.value = val;
+  if (nm && num !== undefined) nm.value = num;
   const tx = el.querySelector(".txt");
   if (tx && document.activeElement !== tx) tx.value = val === undefined || val === null ? "" : val;
 }
@@ -816,32 +902,111 @@ function buildControl(id, onChange) {
     wrap.append(inp); return wrap;
   }
 
+  const b = bounds(k);
+
   if (w === "slider") {
     const row = document.createElement("div"); row.className = "sl";
     const sl = document.createElement("input"); sl.type = "range";
-    sl.min = k.min; sl.max = k.max; sl.value = V[id];
+    sl.min = b.min; sl.max = b.max; sl.value = shown(id);
     const nm = document.createElement("input"); nm.className = "num"; nm.type = "number";
-    nm.min = k.min; nm.max = k.max; nm.value = V[id];
+    nm.min = b.min; nm.max = b.max; nm.value = shown(id);
+    const send = v => {
+      const c = clamp(id, b, v);
+      sl.value = c; nm.value = c;
+      onChange(c);
+    };
     sl.addEventListener("input", () => { nm.value = sl.value; });
-    sl.addEventListener("change", () => onChange(Number(sl.value)));
-    nm.addEventListener("change", () => { sl.value = nm.value; onChange(Number(nm.value)); });
+    sl.addEventListener("change", () => send(Number(sl.value)));
+    nm.addEventListener("change", () => send(Number(nm.value)));
+    if (b.auto) row.append(autoButton(id, row, onChange));
     row.append(sl, nm);
     if (u) { const us = document.createElement("span"); us.className = "unit"; us.textContent = u; row.append(us); }
+    row.classList.toggle("auto", isAuto(id));
     wrap.append(row);
-    const rng = document.createElement("span"); rng.className = "unit";
-    rng.textContent = k.min + "–" + k.max; wrap.append(rng);
+    wrap.append(rangeHint(b));
+    if (!b.enabled) wrap.append(moduleOff());
     return wrap;
   }
 
   const box = document.createElement("div"); box.className = "numwrap";
   const nm = document.createElement("input"); nm.className = "num wide"; nm.type = "number";
-  nm.min = k.min; nm.max = k.max; nm.value = V[id];
+  nm.min = b.min; nm.max = b.max; nm.value = shown(id);
   const us = document.createElement("span"); us.className = "unit"; us.textContent = u;
-  nm.addEventListener("change", () => onChange(Number(nm.value)));
+  nm.addEventListener("change", () => {
+    const c = clamp(id, b, Number(nm.value));
+    nm.value = c;
+    onChange(c);
+  });
   box.append(nm, us); wrap.append(box);
   const hint = document.createElement("span"); hint.className = "unit";
-  hint.textContent = fmt(k.min) + " – " + fmt(k.max); wrap.append(hint);
+  hint.textContent = fmt(b.min) + " – " + fmt(b.max); wrap.append(hint);
   return wrap;
+}
+
+/*
+ * A typed number the camera cannot take, held to what it can.
+ *
+ * A refused live command falls back to the file and asks for a restart, which
+ * is right for a key the running channel will not take now and wrong for one
+ * no channel will ever take: it stages an edit that cannot be enacted and
+ * charges a pipeline restart to find that out. The page knows the range --
+ * for the ISP it is the camera's own, published beside the value -- so it
+ * says so here instead, in the log, where an unexplained number lands next to
+ * the request that caused it.
+ */
+function clamp(id, b, v) {
+  if (!isFinite(v)) return b.min;
+  const c = Math.min(b.max, Math.max(b.min, v));
+  if (c !== v)
+    wlog("sys", id + ": " + v + " is outside what this camera takes (" +
+                b.min + "–" + b.max + "), sent " + c);
+  return c;
+}
+
+/*
+ * Hand the knob back to the tuning, or take it. Pressed means the ISP is
+ * following its own curve; pressing it again pins the knob where it is now,
+ * which is the tuner's neutral and a value somebody may well want fixed.
+ *
+ * The word goes to the camera as the word. It is not a number on this scale
+ * and cannot be one: the scale says how much, and this says who decides.
+ */
+function autoButton(id, row, onChange) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "autobtn"; b.textContent = "auto";
+  b.title = "Follow the tuning file's own curve for this knob, which varies " +
+            "it with the light, instead of holding one value";
+  b.setAttribute("aria-pressed", String(isAuto(id)));
+  b.addEventListener("click", () => {
+    const on = b.getAttribute("aria-pressed") !== "true";
+    b.setAttribute("aria-pressed", String(on));
+    row.classList.toggle("auto", on);
+    onChange(on ? "auto" : Number(shown(id)));
+  });
+  return b;
+}
+
+/*
+ * The range, and where the tuning sits inside it. The neutral is not the
+ * midpoint on every knob -- MI's unity for a saturation field is 32 of 127,
+ * and Ingenic's highlight suppression is off at 0 -- so a reader guessing
+ * from the ends alone would guess wrong on exactly the knobs that matter.
+ */
+function rangeHint(b) {
+  const s = document.createElement("span"); s.className = "unit";
+  s.textContent = fmt(b.min) + "–" + fmt(b.max) +
+    (b.neutral === null ? "" : " · tuning " + fmt(b.neutral));
+  return s;
+}
+
+/* A module the tuning binary ships switched off. The write is accepted and
+ * stored and the picture does not move, which is the one failure nobody can
+ * diagnose from the control itself. Infinity6C's imx335 tuning ships
+ * Brightness this way. */
+function moduleOff() {
+  const s = document.createElement("span"); s.className = "modoff";
+  s.textContent = "the loaded tuning has this module switched off";
+  return s;
 }
 
 const COST = {
@@ -889,6 +1054,9 @@ function buildRow(id) {
   mk.append(chip(k));
   const rb = document.createElement("span"); rb.className = "readback";
   if (RESET.has(id)) rb.textContent = "default after apply";
+  /* Ahead of "not set", and it is why the knob is not set: the tuning owns
+     it, which is a state the camera is in rather than a gap in the file. */
+  else if (isAuto(id)) rb.textContent = "from the tuning";
   else if (UNSET.has(id)) rb.textContent = "not set";
   else if (DEFAULTED.has(id)) rb.textContent = "default";
   mk.append(rb);
@@ -1450,6 +1618,11 @@ async function loadState() {
   if (s.rtsp && s.rtsp.clients !== undefined) statLine(box, "RTSP clients", String(s.rtsp.clients));
   if (s.http && s.http.clients !== undefined) statLine(box, "HTTP clients", String(s.http.clients));
 
+  /* The ISP's ranges and its auto list, which the [image] controls are drawn
+   * from -- see noteIsp. Nothing above depends on it, so it goes before the
+   * readings rather than into them. */
+  noteIsp(s.image || {});
+
   /*
    * Day/night sits here rather than over the picture. It is a reading, and
    * the two readings that decide it belong beside it: on a gain trigger the
@@ -1469,6 +1642,54 @@ async function loadState() {
     statLine(box, "Exposure", shutter(ir.exposure_us), "", ir.exposure_us + " \u00b5s");
   if (ir.total_gain)
     statLine(box, "Gain", gain(ir.total_gain), "", "raw " + ir.total_gain + " (1024 = 1\u00d7)");
+}
+
+/*
+ * What the ISP says about itself, and what changes because of it.
+ *
+ * Two different lifetimes in one reply. The ranges come from the silicon and
+ * the tuning binary, so they move when a sensor is reloaded and not
+ * otherwise; a change there is redrawn, because every control on the page was
+ * built from the old ones. Which knobs are on auto changes whenever anyone
+ * moves one -- from here, from MQTT, from the CLI -- so it is written into
+ * the rows that are already drawn. Redrawing on that would take the page out
+ * from under whoever is dragging a slider, every five seconds.
+ */
+function noteIsp(img) {
+  ISP.live = img;
+  ISP.caps = img.caps || {};
+  ISP.auto = new Set((img.auto || "").split(",").filter(Boolean));
+
+  const sig = JSON.stringify(ISP.caps);
+  const moved = ISP.sig !== "" && ISP.sig !== sig;
+  ISP.sig = sig;
+  if (moved) { render(); return; }
+  ispRefresh();
+}
+
+/*
+ * The auto state of the rows already on screen.
+ *
+ * Skips a row the operator is working in: a key with a request in flight, one
+ * staged for Apply, and one holding the focus are all rows where the page's
+ * value is newer than the camera's, and writing the reading back over them is
+ * how a control ends up fighting the person using it.
+ */
+function ispRefresh() {
+  document.querySelectorAll(".row").forEach(row => {
+    const id = row.dataset.id || "", k = byId[id];
+    if (!k || k.section !== "image") return;
+    if (inflight.has(id) || dirty.has(id) || RESET.has(id)) return;
+    if (row.contains(document.activeElement)) return;
+    const on = isAuto(id);
+    const ab = row.querySelector(".autobtn");
+    if (ab) ab.setAttribute("aria-pressed", String(on));
+    const sl = row.querySelector(".sl");
+    if (sl) sl.classList.toggle("auto", on);
+    if (V[id] === undefined || on) syncControl(row, k, on ? "auto" : shown(id));
+    const rb = row.querySelector(".readback");
+    if (rb && on && !rb.classList.contains("warn")) rb.textContent = "from the tuning";
+  });
 }
 
 /*
@@ -1620,10 +1841,13 @@ async function boot() {
 
   await loadValues();
   await loadPending();
+  /* Before the first render, not after it: [image] is drawn from the ranges
+     the ISP publishes here, and a page built from the table's own bounds
+     first would draw every knob on the wrong scale and then redraw it. */
+  await loadState();
   render();
   refreshBar();
   startPreview();
-  loadState();
   setInterval(loadState, 5000);
 }
 
