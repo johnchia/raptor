@@ -130,6 +130,21 @@ struct rmq_state {
 	int jpeg_channels;	/* rvd's JPEG channels; 0 = no picture to offer */
 	char isp_settable[320]; /* ",key,key," — see rvd's get-isp */
 
+	/*
+	 * The range each ISP knob accepts on this camera, as the camera
+	 * reported it. The entity table carries a compiled-in bound too, but
+	 * that bound is a guess made without knowing the silicon: brightness
+	 * is 0..100 on one SoC and 0..255 on another, and 3DNR has eight
+	 * levels rather than 256. Cached alongside isp_settable and for the
+	 * same reason -- what an entity offers and what it reports have to
+	 * come from one document.
+	 */
+	struct {
+		char key[24];
+		int min, max;
+	} isp_caps[24];
+	int isp_caps_count;
+
 	/* Control socket */
 	rss_ctrl_t *ctrl;
 };

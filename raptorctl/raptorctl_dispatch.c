@@ -523,7 +523,13 @@ int build_generic_set(const char *cmd, int argc, char **argv, char *json, int js
 	cJSON *j = jcmd(cmd);
 	if (!j)
 		return -1;
-	jadd_i(j, "value", val_arg);
+	/*
+	 * Typed by what it looks like, because an ISP knob takes either a
+	 * number in the hardware's own units or the word `auto`. Forcing it to
+	 * a number turned `auto` into 0 -- a valid, very different request that
+	 * the daemon had no way to recognise as a mistake.
+	 */
+	jadd_auto(j, "value", val_arg);
 	if (sensor_idx >= 0)
 		cJSON_AddNumberToObject(j, "sensor", (double)sensor_idx);
 	jstr(j, json, json_size);

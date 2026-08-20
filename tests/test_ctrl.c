@@ -177,10 +177,25 @@ static int rec_isp_set_brightness(void *ctx, int val)
 	return rec.return_val;
 }
 
-static int rec_isp_get_brightness(void *ctx, uint8_t *val)
+static int rec_isp_get_brightness(void *ctx, int *val)
 {
 	(void)ctx;
-	*val = (uint8_t)rec.brightness_stored;
+	*val = rec.brightness_stored;
+	return 0;
+}
+
+/* A knob whose hardware range is not 0..255 and which has an auto mode --
+ * Infinity6C's brightness, whose MI field is a level in 0..100. */
+static int rec_isp_get_knob_caps(void *ctx, const char *name, rss_isp_knob_t *caps)
+{
+	(void)ctx;
+	if (strcmp(name, "brightness") != 0)
+		return RSS_ERR_NOTSUP;
+	caps->min = 0;
+	caps->max = 100;
+	caps->neutral = 50;
+	caps->has_auto = true;
+	caps->enabled = false;
 	return 0;
 }
 
@@ -331,6 +346,7 @@ static void setup(void)
 	ops.enc_get_color2grey = (void *)rec_enc_get_color2grey;
 	ops.isp_set_brightness = (void *)rec_isp_set_brightness;
 	ops.isp_get_brightness = (void *)rec_isp_get_brightness;
+	ops.isp_get_knob_caps = (void *)rec_isp_get_knob_caps;
 	ops.isp_get_wb = rec_isp_get_wb;
 	ops.isp_set_wb = (void *)rec_isp_set_wb;
 
@@ -1017,6 +1033,103 @@ TEST get_wb_returns_current_state(void)
  * through get-exposure the whole time. Measured on an SSC377QE: r=1604 b=2341
  * out of ric, wb_r=0 wb_b=0 out of get-isp, in the same second.
  */
+/*
+ * A knob has three states and the control protocol has to carry all three:
+ * a number in the hardware's own units, the word "auto" for the tuning file's
+ * curve, and -- in the config -- absence.
+ *
+ * It used to carry one. The neutral value 128 doubled as the request for auto,
+ * so a module could not be pinned at whatever its tuner called neutral, the
+ * daemon could not tell a deliberate midpoint from "leave it to the ISP", and
+ * a reply reporting 128 was making a claim the caller could not check.
+ *
+ *   sent                        HAL receives    config records
+ *   --------------------------  --------------  --------------
+ *   {"value": 70}               70              70
+ *   {"value": "auto"}           RSS_ISP_AUTO    auto
+ *   {"value": 50}               50              50
+ */
+TEST set_isp_takes_a_number_or_the_word_auto(void)
+{
+	setup();
+	rec.return_val = 0;
+
+	call("{\"cmd\":\"set-brightness\",\"value\":70}");
+	ASSERT_EQ(70, rec.set_brightness);
+	ASSERT_STR_EQ("70", rss_config_get_str(st.cfg, "image", "brightness", ""));
+
+	call("{\"cmd\":\"set-brightness\",\"value\":\"auto\"}");
+	ASSERT_EQ(RSS_ISP_AUTO, rec.set_brightness);
+	/* Stored as the word: the sentinel is a HAL detail and would not
+	 * survive a round trip through the file as a number. */
+	ASSERT_STR_EQ("auto", rss_config_get_str(st.cfg, "image", "brightness", ""));
+
+	/* The neutral is now just a value like any other, and says so. */
+	call("{\"cmd\":\"set-brightness\",\"value\":50}");
+	ASSERT_EQ(50, rec.set_brightness);
+	ASSERT_STR_EQ("50", rss_config_get_str(st.cfg, "image", "brightness", ""));
+
+	teardown();
+	PASS();
+}
+
+/*
+ * What get-isp says about a knob the ISP is running from the tuning: the
+ * number reported is the tuner's own neutral, because that is what the picture
+ * is near, and the knob is named in the auto list so a reader can tell that
+ * from someone having chosen 50.
+ *
+ * The value stays a number rather than becoming the string "auto" -- every
+ * reader of this reply pulls it with a typed accessor, and a union would make
+ * them all silently read zero.
+ */
+TEST get_isp_separates_auto_from_a_value(void)
+{
+	setup();
+
+	rec.brightness_stored = RSS_ISP_AUTO;
+	call("{\"cmd\":\"get-isp\"}");
+	ASSERT(strstr(resp, "\"brightness\":50") != NULL);
+	ASSERT(strstr(resp, "\",brightness,") != NULL);
+
+	rec.brightness_stored = 70;
+	call("{\"cmd\":\"get-isp\"}");
+	ASSERT(strstr(resp, "\"brightness\":70") != NULL);
+	/* Named in neither the auto list nor by accident in some other key. */
+	ASSERT(strstr(resp, "\"auto\":\",\"") != NULL);
+
+	teardown();
+	PASS();
+}
+
+/*
+ * And the range, from the only layer that knows it. A client drawing a control
+ * over brightness has no other source: it is 0..100 on this SoC and 0..255 on
+ * another, and the compiled-in 255 that every client used to assume is wrong
+ * on the first of those by a factor of two and a half.
+ *
+ * enabled is reported too, because a tuning that ships the module switched off
+ * takes the write and changes nothing -- which is worth saying rather than
+ * offering a control that quietly does not work.
+ */
+TEST get_isp_publishes_the_range_the_hardware_accepts(void)
+{
+	setup();
+	call("{\"cmd\":\"get-isp\"}");
+
+	ASSERT(strstr(resp, "\"caps\":") != NULL);
+	ASSERT(strstr(resp, "\"min\":0,\"max\":100,\"neutral\":50") != NULL);
+	ASSERT(strstr(resp, "\"auto\":true") != NULL);
+	ASSERT(strstr(resp, "\"enabled\":false") != NULL);
+
+	/* A knob the platform cannot describe carries no caps entry at all,
+	 * rather than a fabricated range a client would then trust. */
+	ASSERT(strstr(resp, "\"contrast\":{\"min\"") == NULL);
+
+	teardown();
+	PASS();
+}
+
 TEST get_isp_falls_back_to_the_exposure_gains(void)
 {
 	setup();
@@ -1315,6 +1428,9 @@ SUITE(ctrl_suite)
 	RUN_TEST(set_wb_mode_only_preserves_gains);
 	RUN_TEST(set_wb_gain_only_preserves_mode);
 	RUN_TEST(get_wb_returns_current_state);
+	RUN_TEST(set_isp_takes_a_number_or_the_word_auto);
+	RUN_TEST(get_isp_separates_auto_from_a_value);
+	RUN_TEST(get_isp_publishes_the_range_the_hardware_accepts);
 	RUN_TEST(get_isp_falls_back_to_the_exposure_gains);
 	RUN_TEST(get_isp_prefers_the_wb_op_where_there_is_one);
 

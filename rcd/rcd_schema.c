@@ -249,6 +249,19 @@ static const rcd_key_t keys[] = {
 	 *    falls back to the default, so a flip written that way is silently
 	 *    not applied. The type here is the one the owning daemon reads with.
 	 */
+	/*
+	 * The ISP knobs' bounds here are the widest any platform accepts, not
+	 * the bound in force on this camera. They cannot be the latter: this
+	 * table is a compile-time constant and the real range belongs to the
+	 * silicon and the loaded tuning -- brightness is a level in 0..100 on
+	 * Infinity6C and a byte on Ingenic, and 3DNR is eight positions rather
+	 * than 256. rvd publishes the true range per knob in get-isp's `caps`,
+	 * enforces it in the HAL, and rcd forwards it to subscribers.
+	 *
+	 * So what these do is reject a value no platform could take. A value
+	 * inside them but outside this camera's range is refused by rvd when
+	 * the key is applied, with an error naming the knob.
+	 */
 	{"image", "brightness", V_INT, 0, 255, NULL, LIVE("set-brightness")},
 	{"image", "contrast", V_INT, 0, 255, NULL, LIVE("set-contrast")},
 	{"image", "saturation", V_INT, 0, 255, NULL, LIVE("set-saturation")},

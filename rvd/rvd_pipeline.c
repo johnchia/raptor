@@ -344,6 +344,19 @@ static bool img_asked_for(rss_config_t *cfg, const char *sect, const char *key, 
 	if (!s || !*s)
 		return false;
 
+	/*
+	 * A knob has three states and the file can spell all three: absent
+	 * leaves the tuning alone entirely, `auto` puts the module into its
+	 * auto mode, and a number pins it there in the hardware's own units.
+	 * The middle one used to be spelled as the neutral value, which meant
+	 * it could not be told apart from a deliberate midpoint, and could not
+	 * coexist with "no opinion" at all.
+	 */
+	if (strcasecmp(s, "auto") == 0) {
+		*out = RSS_ISP_AUTO;
+		return true;
+	}
+
 	v = strtol(s, &end, 0);
 	if (end == s)
 		return false;
@@ -362,7 +375,10 @@ static bool img_asked_for(rss_config_t *cfg, const char *sect, const char *key, 
 		int v;                                                                             \
 		if (img_asked_for(cfg, sect, key, &v)) {                                           \
 			call;                                                                      \
-			RSS_DEBUG("  %s=%d", key, v);                                              \
+			if (v == RSS_ISP_AUTO)                                                     \
+				RSS_DEBUG("  %s=auto", key);                                       \
+			else                                                                       \
+				RSS_DEBUG("  %s=%d", key, v);                                      \
 		} else {                                                                           \
 			RSS_DEBUG("  %s left to the tuning file", key);                            \
 		}                                                                                  \

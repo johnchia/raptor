@@ -426,6 +426,23 @@ static bool isp_settable(const struct rmq_state *st, const char *key)
 	return strstr(st->isp_settable, needle) != NULL;
 }
 
+/* The camera's own bound for a knob, if it published one. Leaves the caller's
+ * fallback in place otherwise, so an older rvd keeps the compiled-in guess
+ * rather than losing the control. */
+static void isp_caps_range(const struct rmq_state *st, const char *key, int *lo, int *hi)
+{
+	if (!key)
+		return;
+
+	for (int i = 0; i < st->isp_caps_count; i++) {
+		if (strcmp(st->isp_caps[i].key, key) != 0)
+			continue;
+		*lo = st->isp_caps[i].min;
+		*hi = st->isp_caps[i].max;
+		return;
+	}
+}
+
 bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 {
 	bool changed = false;
@@ -449,6 +466,41 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 	const cJSON *s = image ? cJSON_GetObjectItemCaseSensitive(image, "settable") : NULL;
 	if (cJSON_IsString(s) && s->valuestring)
 		rss_strlcpy(settable, s->valuestring, sizeof(settable));
+
+	/*
+	 * The ranges, cached the same way and compared the same way: a change
+	 * here changes what every image entity offers, so it has to force a
+	 * discovery republish just as the settable list does. A tuning reload
+	 * can move them -- the neutral of a knob whose baseline is learned
+	 * comes from the binary.
+	 */
+	{
+		const cJSON *caps = image ? cJSON_GetObjectItemCaseSensitive(image, "caps") : NULL;
+		const cJSON *k;
+		int n = 0;
+
+		cJSON_ArrayForEach(k, caps)
+		{
+			const cJSON *lo = cJSON_GetObjectItemCaseSensitive(k, "min");
+			const cJSON *hi = cJSON_GetObjectItemCaseSensitive(k, "max");
+
+			if (n >= (int)(sizeof(st->isp_caps) / sizeof(st->isp_caps[0])))
+				break;
+			if (!k->string || !cJSON_IsNumber(lo) || !cJSON_IsNumber(hi))
+				continue;
+			if (strcmp(st->isp_caps[n].key, k->string) != 0 ||
+			    st->isp_caps[n].min != lo->valueint ||
+			    st->isp_caps[n].max != hi->valueint)
+				changed = true;
+			rss_strlcpy(st->isp_caps[n].key, k->string, sizeof(st->isp_caps[n].key));
+			st->isp_caps[n].min = lo->valueint;
+			st->isp_caps[n].max = hi->valueint;
+			n++;
+		}
+		if (n != st->isp_caps_count)
+			changed = true;
+		st->isp_caps_count = n;
+	}
 
 	if (strcmp(settable, st->isp_settable) != 0) {
 		rss_strlcpy(st->isp_settable, settable, sizeof(st->isp_settable));
@@ -738,9 +790,15 @@ static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct)
 		cJSON_AddStringToObject(c, "cmd_tpl", ct->cmd_tpl);
 
 	switch (ct->kind) {
-	case CTRL_NUMBER:
-		cJSON_AddNumberToObject(c, "min", ct->min);
-		cJSON_AddNumberToObject(c, "max", ct->max);
+	case CTRL_NUMBER: {
+		int lo = ct->min, hi = ct->max;
+
+		/* The camera's answer beats the table's guess where there is
+		 * one; the table stays as the fallback for a camera too old to
+		 * publish caps at all. */
+		isp_caps_range(st, ct->cap, &lo, &hi);
+		cJSON_AddNumberToObject(c, "min", lo);
+		cJSON_AddNumberToObject(c, "max", hi);
 		cJSON_AddNumberToObject(c, "step", ct->step);
 		/*
 		 * Always a box, never a slider. Home Assistant's slider offers
@@ -753,6 +811,7 @@ static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct)
 		if (ct->unit)
 			cJSON_AddStringToObject(c, "unit_of_meas", ct->unit);
 		break;
+	}
 	case CTRL_TEXT:
 		/* A length cap and nothing else. What the value may contain is
 		 * enforced where it is applied, not here: a pattern in the

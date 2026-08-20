@@ -101,6 +101,29 @@ static void collect_rvd_isp(cJSON *state)
 		const cJSON *set = cJSON_GetObjectItemCaseSensitive(resp, "settable");
 		if (cJSON_IsString(set) && set->valuestring)
 			cJSON_AddStringToObject(o, "settable", set->valuestring);
+
+		/*
+		 * And which of them the ISP is currently running from the
+		 * tuning file's own curve rather than from a value of raptor's.
+		 * Those report the tuner's neutral, which is a real number and
+		 * indistinguishable from a knob deliberately set there -- so
+		 * the difference has to be carried separately or a subscriber
+		 * showing "50" cannot say whether anyone chose it.
+		 */
+		const cJSON *au = cJSON_GetObjectItemCaseSensitive(resp, "auto");
+		if (cJSON_IsString(au) && au->valuestring)
+			cJSON_AddStringToObject(o, "auto", au->valuestring);
+
+		/*
+		 * The range each knob actually accepts on this camera, which is
+		 * the hardware's and not a convention: brightness is 0..100 on
+		 * one SoC and 0..255 on another, and 3DNR is eight levels. A
+		 * subscriber drawing a control has no other source for it --
+		 * this used to be a constant compiled into each client.
+		 */
+		const cJSON *caps = cJSON_GetObjectItemCaseSensitive(resp, "caps");
+		if (cJSON_IsObject(caps))
+			cJSON_AddItemToObject(o, "caps", cJSON_Duplicate(caps, 1));
 	}
 
 	cJSON_Delete(resp);

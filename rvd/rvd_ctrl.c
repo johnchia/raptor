@@ -1136,6 +1136,42 @@ static const char *image_section(int sensor_idx, char *buf, size_t bufsz)
 	return buf;
 }
 
+/*
+ * An ISP knob's value: a number in the hardware's own units, or the word
+ * "auto" for a module that should follow the tuning file's curve instead.
+ *
+ * Two spellings because they are two different instructions, and the knob used
+ * to have only one way to say both -- the neutral value doubled as the request
+ * for auto, so a module could not be pinned at the value its tuner considered
+ * neutral, and the daemon could not tell a deliberate midpoint from "leave it
+ * to the ISP". The word is stored in the config as the word, so the file says
+ * which was meant.
+ */
+static int isp_value_arg(const char *cmd_json, int *val)
+{
+	char word[16] = "";
+
+	if (rss_json_get_str(cmd_json, "value", word, sizeof(word)) == 0 &&
+	    strcmp(word, "auto") == 0) {
+		*val = RSS_ISP_AUTO;
+		return 0;
+	}
+	return rss_json_get_int(cmd_json, "value", val);
+}
+
+/* Written back as the word rather than as RSS_ISP_AUTO's sentinel, which is a
+ * HAL implementation detail and would not survive a round trip through the
+ * file as a number. */
+static void isp_store(rss_config_t *cfg, const char *sect, const char *key, int val)
+{
+	if (!key)
+		return;
+	if (val == RSS_ISP_AUTO)
+		rss_config_set_str(cfg, sect, key, "auto");
+	else
+		rss_config_set_int(cfg, sect, key, val);
+}
+
 static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st, char *resp,
 			  int resp_size)
 {
@@ -1154,17 +1190,16 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 /* ISP_SET_N: supports --sensor N via _n variant */
 #define ISP_SET_N(name, fn, key)                                                                   \
 	if (strcmp(cmd, name) == 0) {                                                              \
-		if (rss_json_get_int(cmd_json, "value", &val) == 0) {                              \
+		if (isp_value_arg(cmd_json, &val) == 0) {                                          \
 			int ret;                                                                   \
 			if (sensor_idx >= 0)                                                       \
 				ret = RSS_HAL_CALL(st->ops, fn##_n, st->hal_ctx, sensor_idx, val); \
 			else                                                                       \
 				ret = RSS_HAL_CALL(st->ops, fn, st->hal_ctx, val);                 \
-			if (ret == 0 && (key))                                                     \
-				rss_config_set_int(                                                \
-					st->cfg,                                                   \
-					image_section(sensor_idx, img_sect, sizeof(img_sect)),     \
-					(key), val);                                               \
+			if (ret == 0)                                                              \
+				isp_store(st->cfg,                                                 \
+					  image_section(sensor_idx, img_sect, sizeof(img_sect)),   \
+					  (key), val);                                             \
 			return fmt_hal_result(resp, resp_size, ret);                               \
 		}                                                                                  \
 		return rss_ctrl_resp_error(resp, resp_size, "need value");                         \
@@ -1173,10 +1208,10 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 /* ISP_SET: single-sensor only (no _n variant) */
 #define ISP_SET(name, fn, key)                                                                     \
 	if (strcmp(cmd, name) == 0) {                                                              \
-		if (rss_json_get_int(cmd_json, "value", &val) == 0) {                              \
+		if (isp_value_arg(cmd_json, &val) == 0) {                                          \
 			int ret = RSS_HAL_CALL(st->ops, fn, st->hal_ctx, val);                     \
-			if (ret == 0 && (key))                                                     \
-				rss_config_set_int(st->cfg, "image", (key), val);                  \
+			if (ret == 0)                                                              \
+				isp_store(st->cfg, "image", (key), val);                           \
 			return fmt_hal_result(resp, resp_size, ret);                               \
 		}                                                                                  \
 		return rss_ctrl_resp_error(resp, resp_size, "need value");                         \
@@ -1241,8 +1276,8 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 	}
 
 	if (strcmp(cmd, "get-isp") == 0) {
-		uint8_t bri = 0, con = 0, sat = 0, shp = 0, hue = 0, sin = 0, tem = 0;
-		uint8_t dpc = 0, drc = 0, hld = 0, blc = 0, dfg = 0;
+		int bri = 0, con = 0, sat = 0, shp = 0, hue = 0, sin = 0, tem = 0;
+		int dpc = 0, drc = 0, hld = 0, blc = 0, dfg = 0;
 		int hf = 0, vf = 0, ae = 0;
 		uint32_t again = 0, dgain = 0;
 		RSS_HAL_CALL(st->ops, isp_get_brightness, st->hal_ctx, &bri);
@@ -1284,25 +1319,90 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 				wb.b_gain = exp.wb_bgain;
 			}
 		}
+		const struct {
+			const char *key;
+			int val;
+		} knobs[] = {
+			{"brightness", bri},
+			{"contrast", con},
+			{"saturation", sat},
+			{"sharpness", shp},
+			{"hue", hue},
+			{"sinter", sin},
+			{"temper", tem},
+			{"ae_comp", ae},
+			{"dpc_strength", dpc},
+			{"drc_strength", drc},
+			{"highlight_depress", hld},
+			{"backlight_comp", blc},
+			{"defog_strength", dfg},
+		};
 		cJSON *r = cJSON_CreateObject();
+		cJSON *caps = NULL;
+		/* Same comma-delimited, comma-terminated shape as settable, so
+		 * a membership test is a search for ",key," -- see there. */
+		char autos[320] = ",";
+		size_t al = 1;
+
 		cJSON_AddStringToObject(r, "status", "ok");
-		cJSON_AddNumberToObject(r, "brightness", (double)bri);
-		cJSON_AddNumberToObject(r, "contrast", (double)con);
-		cJSON_AddNumberToObject(r, "saturation", (double)sat);
-		cJSON_AddNumberToObject(r, "sharpness", (double)shp);
-		cJSON_AddNumberToObject(r, "hue", (double)hue);
-		cJSON_AddNumberToObject(r, "sinter", (double)sin);
-		cJSON_AddNumberToObject(r, "temper", (double)tem);
+		caps = cJSON_AddObjectToObject(r, "caps");
+
+		for (size_t i = 0; i < sizeof(knobs) / sizeof(knobs[0]); i++) {
+			rss_isp_knob_t k;
+			int val = knobs[i].val;
+			bool have_caps;
+
+			have_caps = RSS_HAL_CALL(st->ops, isp_get_knob_caps, st->hal_ctx,
+						 knobs[i].key, &k) == RSS_OK;
+
+			/*
+			 * A knob in auto holds no value of raptor's -- the
+			 * tuning's curve is what the ISP is following, and the
+			 * module's manual field is whatever was last left
+			 * there. Report the tuner's own neutral, which is what
+			 * the picture is actually near, and name the knob in
+			 * the auto list so a caller can tell the two apart.
+			 *
+			 * The number stays a number rather than becoming the
+			 * string "auto": every reader of this reply pulls it
+			 * with a typed accessor, and a union would make them
+			 * all silently read zero. The config file, whose
+			 * readers are people, does spell it out.
+			 */
+			if (val == RSS_ISP_AUTO) {
+				val = have_caps ? k.neutral : 0;
+				if (al < sizeof(autos) - 1)
+					al += (size_t)snprintf(autos + al, sizeof(autos) - al,
+							       "%s,", knobs[i].key);
+			}
+			cJSON_AddNumberToObject(r, knobs[i].key, (double)val);
+
+			/*
+			 * What this knob will accept here, from the only layer
+			 * that knows: the range is the hardware's own, and
+			 * whether the module is switched on is the tuning
+			 * binary's business. Absent for a knob the platform
+			 * cannot describe, which a client should read as "no
+			 * better information" rather than as a range of zero.
+			 */
+			if (caps && have_caps) {
+				cJSON *c = cJSON_AddObjectToObject(caps, knobs[i].key);
+
+				if (c) {
+					cJSON_AddNumberToObject(c, "min", (double)k.min);
+					cJSON_AddNumberToObject(c, "max", (double)k.max);
+					cJSON_AddNumberToObject(c, "neutral", (double)k.neutral);
+					cJSON_AddBoolToObject(c, "auto", k.has_auto);
+					cJSON_AddBoolToObject(c, "enabled", k.enabled);
+				}
+			}
+		}
+
+		cJSON_AddStringToObject(r, "auto", autos);
 		cJSON_AddNumberToObject(r, "hflip", (double)hf);
 		cJSON_AddNumberToObject(r, "vflip", (double)vf);
-		cJSON_AddNumberToObject(r, "ae_comp", (double)ae);
 		cJSON_AddNumberToObject(r, "max_again", (double)again);
 		cJSON_AddNumberToObject(r, "max_dgain", (double)dgain);
-		cJSON_AddNumberToObject(r, "dpc_strength", (double)dpc);
-		cJSON_AddNumberToObject(r, "drc_strength", (double)drc);
-		cJSON_AddNumberToObject(r, "highlight_depress", (double)hld);
-		cJSON_AddNumberToObject(r, "backlight_comp", (double)blc);
-		cJSON_AddNumberToObject(r, "defog_strength", (double)dfg);
 		cJSON_AddStringToObject(r, "wb_mode", wb.mode == RSS_WB_MANUAL ? "manual" : "auto");
 		cJSON_AddNumberToObject(r, "wb_r", (double)wb.r_gain);
 		cJSON_AddNumberToObject(r, "wb_g", (double)wb.g_gain);
