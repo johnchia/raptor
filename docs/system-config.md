@@ -1,11 +1,23 @@
 # System configuration, and the portal it has to be ready for
 
+> **Renamed.** What this document calls `[system]` is the section `[device]`
+> in the shipped schema. `raptor.conf` already has a real `[system]`, holding
+> `video_backend` and `video_device` for rvd, and the virtual section shadowed
+> it: `get section=system` answered with timezone and hostname while silently
+> omitting what an operator meant by the name. `[device]` collides with nothing
+> and says what the keys have in common. The *owner* string these keys report is
+> still `"system"` — that is a different field, meaning "no daemon owns this,
+> it changes the camera itself", and `[network]`'s keys report it too.
+>
+> The prose below is left in the original spelling where it is describing the
+> design rather than the interface; the key names in the tables are current.
+
 A design for `[system]` — timezone, NTP, hostname, network — as a section of
 `rcd` rather than a daemon of its own, written so that a captive portal is a
 client of the same socket instead of a second way to configure the camera.
 
 Status: the provider hook, the time keys, the confirm-or-revert timer,
-`system.hostname` and the whole of `[network]` are **built and
+`device.hostname` and the whole of `[network]` are **built and
 board-verified** -- the camera has been moved to a second address over the
 connection it was moved with, and left to put itself back. Everything from
 [Wireless settings](#phasing) onward is still design. Verified facts cite the
@@ -196,9 +208,9 @@ Cost is what an `apply` of that key costs whoever is using the camera.
 
 | Key | Type | Store | Cost | Notes |
 |---|---|---|---|---|
-| `system.timezone` | `V_ENUM` | `/etc/TZ` + `/etc/timezone` | reboot | 309 choices from the generated zone table. `/etc/TZ` takes the POSIX rule, `/etc/timezone` the name, so the control reads back the zone that was picked rather than whichever one shares its rule |
-| `system.ntp_server` | `V_HOST` | `/etc/ntp.conf` | service | Written as `server <host> iburst`; `S49ntpd restart` applies it now. Already implemented |
-| `system.hostname` | `V_HOST` | `/etc/hostname` + `/etc/hosts` (overlay) | service, revert | `apply` renames the running kernel and reloads mdnsd. Also advertised by udhcpc, so it is how the camera names itself on the LAN. Implemented |
+| `device.timezone` | `V_ENUM` | `/etc/TZ` + `/etc/timezone` | reboot | 309 choices from the generated zone table. `/etc/TZ` takes the POSIX rule, `/etc/timezone` the name, so the control reads back the zone that was picked rather than whichever one shares its rule |
+| `device.ntp_server` | `V_HOST` | `/etc/ntp.conf` | service | Written as `server <host> iburst`; `S49ntpd restart` applies it now. Already implemented |
+| `device.hostname` | `V_HOST` | `/etc/hostname` + `/etc/hosts` (overlay) | service, revert | `apply` renames the running kernel and reloads mdnsd. Also advertised by udhcpc, so it is how the camera names itself on the LAN. Implemented |
 | `network.dhcp` | `V_BOOL` | `interfaces.d/<primary>` | network, revert | The method word on the `iface` line. False switches the stanza to `static` and uses the three below. Implemented |
 | `network.address` | `V_IPV4` | `interfaces.d/<primary>` | network, revert | Kept while `dhcp` is true, so switching back and forth does not lose the static settings — busybox's ifupdown stores options it does not recognise rather than refusing them. Implemented |
 | `network.netmask` | `V_IPV4` | `interfaces.d/<primary>` | network, revert | Implemented |
@@ -568,7 +580,7 @@ that has a radio.
 2. **Confirm-or-revert.** *Done.* The guard, its deadline in `/run` and its
    snapshot on flash, `confirm`/`cancel`, the `guard` object in `set`,
    `pending` and `state`, and the console's countdown bar. It is exercised by
-   `system.hostname`, whose failure mode is real and recoverable. All four
+   `device.hostname`, whose failure mode is real and recoverable. All four
    exits were walked on the board: confirm, cancel, the timer running out, and
    a reboot inside the window.
 3. **Wired network settings.** *Done.* `V_IPV4`, `RCD_IMPACT_NETWORK`, the

@@ -606,14 +606,14 @@ TEST the_timezone_is_an_enum_over_the_zone_table(void)
 	rcd_edit_t e[RCD_EDITS_MAX];
 	int n = 0;
 
-	ASSERT_EQ(0, validate_set("{\"section\":\"system\",\"key\":\"timezone\","
+	ASSERT_EQ(0, validate_set("{\"section\":\"device\",\"key\":\"timezone\","
 				  "\"value\":\"America/Los_Angeles\"}",
 				  e, &n));
 	ASSERT_STR_EQ("America/Los_Angeles", e[0].rendered);
 
 	/* A zone this build does not carry is refused by name rather than
 	 * written and discovered at the next boot. */
-	ASSERT_EQ(-1, validate_set("{\"section\":\"system\",\"key\":\"timezone\","
+	ASSERT_EQ(-1, validate_set("{\"section\":\"device\",\"key\":\"timezone\","
 				   "\"value\":\"Mars/Olympus\"}",
 				   e, &n));
 	ASSERT_STR_EQ(RCD_E_CHOICE, code);
@@ -630,7 +630,7 @@ TEST a_host_is_a_hostname_or_an_address_and_nothing_else(void)
 	for (int i = 0; good[i]; i++) {
 		char req[192];
 		snprintf(req, sizeof(req),
-			 "{\"section\":\"system\",\"key\":\"ntp_server\",\"value\":\"%s\"}",
+			 "{\"section\":\"device\",\"key\":\"ntp_server\",\"value\":\"%s\"}",
 			 good[i]);
 		ASSERT_EQm(good[i], 0, validate_set(req, e, &n));
 		ASSERT_STR_EQ(good[i], e[0].rendered);
@@ -645,13 +645,13 @@ TEST a_host_is_a_hostname_or_an_address_and_nothing_else(void)
 	for (int i = 0; bad[i]; i++) {
 		char req[192];
 		snprintf(req, sizeof(req),
-			 "{\"section\":\"system\",\"key\":\"ntp_server\",\"value\":\"%s\"}",
+			 "{\"section\":\"device\",\"key\":\"ntp_server\",\"value\":\"%s\"}",
 			 bad[i]);
 		ASSERT_EQm(bad[i], -1, validate_set(req, e, &n));
 	}
 
 	/* And it is a string: a number is not a lenient spelling of one. */
-	ASSERT_EQ(-1, validate_set("{\"section\":\"system\",\"key\":\"ntp_server\","
+	ASSERT_EQ(-1, validate_set("{\"section\":\"device\",\"key\":\"ntp_server\","
 				   "\"value\":8}",
 				   e, &n));
 	ASSERT_STR_EQ(RCD_E_TYPE, code);
@@ -901,7 +901,7 @@ TEST cancelling_a_staged_change_leaves_nothing_owed(void)
 	/* What `set` does for a provider that can enact. */
 	rcd_guard_hold(&st);
 	ASSERT_EQ(0, rcd_provider_hostname.set("camera-staged"));
-	rcd_stale_add(&st, "system", "hostname", RCD_D_COUNT);
+	rcd_stale_add(&st, "device", "hostname", RCD_D_COUNT);
 	ASSERT_EQ(1, st.stale_count);
 
 	cJSON *r = rcd_cmd_cancel(&st, NULL);
@@ -1206,7 +1206,7 @@ TEST a_revert_can_unset_a_value_that_was_never_there(void)
 	 * revert writes nothing and the drift goes with it. */
 	rcd_guard_hold(&st);
 	ASSERT_EQ(0, rcd_provider_hostname.set("camera-before"));
-	rcd_stale_add(&st, "system", "hostname", RCD_D_COUNT);
+	rcd_stale_add(&st, "device", "hostname", RCD_D_COUNT);
 	cJSON *same = rcd_cmd_cancel(&st, NULL);
 	cJSON_Delete(same);
 	ASSERT_EQ(0, st.stale_count);
@@ -1230,7 +1230,7 @@ TEST a_revert_can_unset_a_value_that_was_never_there(void)
 TEST the_schema_says_where_a_system_key_takes_effect(void)
 {
 	cJSON *out = cJSON_CreateObject();
-	rcd_schema_emit(out, "system");
+	rcd_schema_emit(out, "device");
 	const cJSON *keys = cJSON_GetObjectItemCaseSensitive(out, "keys");
 	ASSERT(cJSON_IsArray(keys));
 	ASSERT_EQ(3, cJSON_GetArraySize(keys));
@@ -1716,12 +1716,12 @@ TEST a_key_with_no_default_refuses_the_reset(void)
 	rcd_edit_t edits[RCD_EDITS_MAX];
 	int n = 0;
 
-	ASSERT_EQ(-1, validate_set("{\"section\":\"system\",\"key\":\"hostname\",\"value\":null}",
+	ASSERT_EQ(-1, validate_set("{\"section\":\"device\",\"key\":\"hostname\",\"value\":null}",
 				   edits, &n));
 	ASSERT(strstr(reason, "hostname") != NULL);
-	ASSERT_EQ(-1, validate_set("{\"section\":\"system\",\"key\":\"timezone\",\"value\":null}",
+	ASSERT_EQ(-1, validate_set("{\"section\":\"device\",\"key\":\"timezone\",\"value\":null}",
 				   edits, &n));
-	ASSERT_EQ(-1, validate_set("{\"section\":\"system\",\"key\":\"ntp_server\",\"value\":null}",
+	ASSERT_EQ(-1, validate_set("{\"section\":\"device\",\"key\":\"ntp_server\",\"value\":null}",
 				   edits, &n));
 
 	/* The address keys do have one: not being configured is a
@@ -1741,7 +1741,7 @@ TEST one_key_with_no_default_refuses_the_whole_batch(void)
 
 	ASSERT_EQ(-1, validate_set("{\"edits\":["
 				   "{\"section\":\"network\",\"key\":\"address\",\"value\":null},"
-				   "{\"section\":\"system\",\"key\":\"hostname\",\"value\":null}]}",
+				   "{\"section\":\"device\",\"key\":\"hostname\",\"value\":null}]}",
 				   edits, &n));
 	PASS();
 }
@@ -1751,7 +1751,7 @@ TEST one_key_with_no_default_refuses_the_whole_batch(void)
 TEST the_schema_names_the_keys_that_cannot_be_reset(void)
 {
 	cJSON *out = cJSON_CreateObject();
-	rcd_schema_emit(out, "system");
+	rcd_schema_emit(out, "device");
 	const cJSON *keys = cJSON_GetObjectItemCaseSensitive(out, "keys");
 	ASSERT(cJSON_IsArray(keys));
 

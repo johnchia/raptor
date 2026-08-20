@@ -111,7 +111,7 @@ static const struct {
 	{"image", RCD_D_RVD},	  {"jpeg", RCD_D_RVD},	   {"audio", RCD_D_RAD},
 	{"rtsp", RCD_D_RSD},	  {"http", RCD_D_RHD},	   {"osd", RCD_D_ROD},
 	{"ircut", RCD_D_RIC},	  {"motion", RCD_D_RMD},   {"recording", RCD_D_RMR},
-	{"timelapse", RCD_D_RMR}, {"system", RCD_D_COUNT}, {"network", RCD_D_COUNT},
+	{"timelapse", RCD_D_RMR}, {"device", RCD_D_COUNT}, {"network", RCD_D_COUNT},
 	{NULL, RCD_D_COUNT},
 };
 
@@ -412,9 +412,9 @@ static const rcd_key_t keys[] = {
 	 *    saying anything else here would be a promise the camera cannot
 	 *    keep. --
 	 */
-	{"system", "timezone", V_ENUM, 0, 0, rcd_zone_names,
+	{"device", "timezone", V_ENUM, 0, 0, rcd_zone_names,
 	 PROVIDED(rcd_provider_timezone, RCD_IMPACT_REBOOT)},
-	{"system", "ntp_server", V_HOST, 0, 63, NULL,
+	{"device", "ntp_server", V_HOST, 0, 63, NULL,
 	 PROVIDED(rcd_provider_ntp_server, RCD_IMPACT_NONE)},
 
 	/*
@@ -429,7 +429,7 @@ static const rcd_key_t keys[] = {
 	 * costs a name rather than an address. Nothing that can actually
 	 * strand a camera is guarded until this one has been.
 	 */
-	{"system", "hostname", V_HOST, 1, 63, NULL,
+	{"device", "hostname", V_HOST, 1, 63, NULL,
 	 GUARDED(rcd_provider_hostname, RCD_IMPACT_SERVICE, RCD_GUARD_NAME_SEC)},
 
 	/*
@@ -694,6 +694,17 @@ static void emit_key(cJSON *arr, const rcd_key_t *k)
 	 * owns it, and a client that groups by owner needs a name it can group
 	 * under rather than the "?" an absent daemon renders as -- one that
 	 * cannot collide with a daemon it might otherwise try to restart.
+	 *
+	 * This is an owner, not a section, and the distinction is why the
+	 * section holding the provider-backed keys is called [device]. The two
+	 * shared the spelling until they were told apart: raptor.conf has a real
+	 * [system] that rvd reads video_backend and video_device out of, so the
+	 * virtual section shadowed it and `get section=system` answered with
+	 * timezone and hostname while silently omitting what an operator meant.
+	 * The owner keeps the name because nothing else claims it -- [network]'s
+	 * keys report this same owner, and console.html reads it to decide that
+	 * a change "changes the camera itself" and cannot be undone by
+	 * restarting a daemon.
 	 */
 	cJSON_AddStringToObject(o, "owner",
 				k->provider ? "system"

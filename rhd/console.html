@@ -370,14 +370,14 @@ async function api(req, quiet) {
    Wording and grouping live here and nowhere on the camera. A key missing
    from this map still renders -- see label() below. */
 const L = {
- "system.timezone":["Timezone","","Sets the clock's zone and its daylight-saving rule. Nothing running re-reads it, so the camera has to restart before timestamps move."],
+ "device.timezone":["Timezone","","Sets the clock's zone and its daylight-saving rule. Nothing running re-reads it, so the camera has to restart before timestamps move."],
  "network.dhcp":["Get an address automatically","","Ask the network for an address at boot. Off means the four settings below are used instead."],
  "network.address":["IP address","","The address this camera answers on. Applied together with the three below, and put back unless you confirm."],
  "network.netmask":["Subnet mask","","Which part of the address is the network. 255.255.255.0 for an ordinary home or office network."],
  "network.gateway":["Gateway","","The router traffic leaves through. Leave empty on a network with no route out."],
  "network.dns":["Name server","","Who resolves names for the camera. With an automatic address this is replaced by whatever the network hands out."],
- "system.hostname":["Camera name","","What this camera calls itself on the network — mdnsd answers to <name>.local and the DHCP lease carries it. Changing it takes effect at once, so confirm within the window or the camera puts the old name back."],
- "system.ntp_server":["Time server","","The host to sync the clock from. Applied at once — ntpd is restarted with it."],
+ "device.hostname":["Camera name","","What this camera calls itself on the network — mdnsd answers to <name>.local and the DHCP lease carries it. Changing it takes effect at once, so confirm within the window or the camera puts the old name back."],
+ "device.ntp_server":["Time server","","The host to sync the clock from. Applied at once — ntpd is restarted with it."],
  "sensor.fps":["Sensor frame rate","fps","The rate the sensor is driven at. Every stream is capped by it."],
  "sensor.antiflicker":["Anti-flicker","","Locks exposure to the mains period so lighting does not band."],
  "image.brightness":["Brightness"],"image.contrast":["Contrast"],
@@ -462,7 +462,7 @@ const TABS = [
  {id:"record",  name:"Recording",   groups:[{title:"Motion", section:"motion"},
                                             {title:"Recording", section:"recording"},
                                             {title:"Time-lapse", section:"timelapse"}]},
- {id:"system",  name:"System",       groups:[{title:"Time", section:"system"},
+ {id:"system",  name:"System",       groups:[{title:"Time", section:"device"},
                                             {title:"Network", section:"network",
                                              note:"Applied together, and put back after 90 seconds unless you confirm — so a wrong address costs a wait, not a trip to the camera."}]},
  {id:"services",name:"Services",    groups:[{title:"RTSP", section:"rtsp"},
@@ -1472,8 +1472,8 @@ function reconnectTarget(ids) {
                  ids.some(i => i.startsWith("network.") && RESET.has(i));
   if (!toDhcp && ids.includes("network.address") && V["network.address"]) return url(V["network.address"]);
 
-  if (ids.includes("system.hostname") && V["system.hostname"] && !RESET.has("system.hostname")) {
-    const n = V["system.hostname"];
+  if (ids.includes("device.hostname") && V["device.hostname"] && !RESET.has("device.hostname")) {
+    const n = V["device.hostname"];
     /* mdnsd answers for <name>.local; a name that is already qualified is
        one somebody's DNS is expected to know, and is used as given. */
     return url(n.includes(".") ? n : n + ".local");

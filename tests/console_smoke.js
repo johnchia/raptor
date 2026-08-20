@@ -221,7 +221,7 @@ function valuesFor(section) {
 			: k.type === "ipv4" ? "192.168.1.50"
 			: k.labels ? k.labels[0]
 			: (k.min || 0);
-		o.source = k.section === "system" || k.section === "network" ? "system" : "daemon";
+		o.source = k.section === "device" || k.section === "network" ? "system" : "daemon";
 		if (i % 2) o.configured = false;
 		out.push(o);
 	});
