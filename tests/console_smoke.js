@@ -128,8 +128,10 @@ const ids = [...html.matchAll(/getElementById\("([a-zA-Z0-9_]+)"\)/g)].map(m => 
 /* ── the camera, as far as the page can tell ── */
 
 let served = 0;
+const sent = [];          /* every request body, so a test can read the last one */
 function reply(body) {
 	served++;
+	sent.push(body);
 	const cmd = body.cmd;
 	if (cmd === "hello")
 		return {api: 1, status: "ok", daemon: "rcd", build: "smoke",
@@ -144,7 +146,8 @@ function reply(body) {
 	if (cmd === "schema") return SCHEMA;
 	if (cmd === "get") return {api: 1, status: "ok", values: valuesFor(body.section)};
 	if (cmd === "pending") return {api: 1, status: "ok", stale: []};
-	if (cmd === "state") return {api: 1, status: "ok", up: {}, daemons_up: 6};
+	if (cmd === "state") return {api: 1, status: "ok", up: {}, daemons_up: 6,
+				    ir: {mode: "auto", state: "day"}};
 	return {api: 1, status: "ok"};
 }
 
@@ -207,6 +210,7 @@ const probe_epilogue = `
   getKeys: function () { return KEYS; },
   canReset: canReset, toggleReset: toggleReset,
   setActive: function (v) { active = v; },
+  ACT_STATE: ACT_STATE,
 };
 `;
 
@@ -269,7 +273,35 @@ try {
 	});
 	if (!staged) fail("no key could be staged for reset");
 
+	/*
+	 * Actions, which nothing above touches: the day/night override shipped
+	 * broken because the page named the verb `name` where rcd reads
+	 * `action`, and every button on the page failed the same way with
+	 * nothing on screen to show it.
+	 */
+	p.setActive("night");
+	p.render();
+	const seg = sheet.querySelectorAll(".seg").find(e => e.dataset.act === "ircut-mode");
+	if (!seg) fail("the day/night tab drew no override control");
+	const night = seg.querySelectorAll("button").find(b => b.textContent === "night");
+	if (!night) fail("the override control has no 'night' choice");
+
+	await night.handlers.click[0]();
+	const req = sent[sent.length - 1];
+	if (req.cmd !== "action" || req.action !== "ircut-mode")
+		fail("clicking 'night' sent " + JSON.stringify(req) + ", not an ircut-mode action");
+	if (req.value !== "night")
+		fail("the ircut-mode action carried value " + JSON.stringify(req.value));
+	if (night.getAttribute("aria-pressed") !== "true")
+		fail("'night' did not latch after the camera took it");
+
+	/* And the camera's own answer wins over the click: an override moved by
+	 * raptorctl or MQTT has to reach this page too. */
+	if (p.ACT_STATE["ircut-mode"] !== "auto")
+		fail("the page did not read the mode out of `state` (got " +
+		     p.ACT_STATE["ircut-mode"] + ")");
+
 	console.log("ok  " + p.TABS.length + " tabs, " + drawn + " groups, " + undos +
-		    " reset controls, " + staged + " redrawn with a reset staged, " + served +
-		    " requests served");
+		    " reset controls, " + staged + " redrawn with a reset staged, " +
+		    "day/night override wired, " + served + " requests served");
 })();

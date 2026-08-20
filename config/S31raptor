@@ -149,10 +149,16 @@ stop_daemon() {
 stop() {
 	echo "Stopping Raptor Streaming System..."
 
-	# Stop consumers first, then producer (RVD) last. rmq leads: it issues
-	# control commands to the rest, so stopping it first keeps it from
-	# restarting a daemon mid-shutdown.
-	for d in rmq rsr rsp rwd rmd rmr ric rhd rsd rod rad rvd; do
+	# Stop consumers first, then producer (RVD) last. rmq and rcd lead: both
+	# issue control commands to the rest, so stopping them first keeps them
+	# from restarting a daemon mid-shutdown.
+	#
+	# Every daemon start() starts has to appear here, because the cleanup
+	# below deletes the whole run directory. One left out survives the stop
+	# with its socket unlinked underneath it and never rebinds -- start()
+	# then finds it running and skips it, so it stays unreachable until the
+	# next reboot. rcd omitted here is what silently killed the web console.
+	for d in rmq rcd rsr rsp rwd rmd rmr ric rhd rsd rsd-555 rod rad rvd; do
 		stop_daemon $d
 	done
 

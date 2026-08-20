@@ -472,6 +472,13 @@ const ACTION_UI = {
 /* ═══ live model ═════════════════════════════════════════════════════════ */
 let KEYS = [];            /* the schema, as served */
 let ACTIONS = [];
+/*
+ * What the camera says an action's state is, for the few that have one.
+ * A segmented action is a view of the daemon, not a record of what was last
+ * clicked: `raptorctl ric mode`, MQTT and the automatic switch all move
+ * day/night without this page, and the poll below is what notices.
+ */
+const ACT_STATE = {};
 const byId = {};
 const V = {};             /* current value per key id */
 const SAVED = {};         /* last value known to be on disk */
@@ -936,6 +943,16 @@ function buildMatrix(sections) {
   t.append(body); return t;
 }
 
+const SEGS = {};          /* the segmented control per action, as last drawn */
+
+/* Press the button that matches `value`, if that segment has been drawn. */
+function segShow(action, value) {
+  const seg = SEGS[action];
+  if (!seg) return;
+  seg.querySelectorAll("button").forEach(
+    b => b.setAttribute("aria-pressed", String(b.dataset.choice === value)));
+}
+
 function buildActions(names) {
   const box = document.createElement("div"); box.className = "acts";
   names.forEach(n => {
@@ -946,15 +963,18 @@ function buildActions(names) {
     if (arg && arg.choices && !ui.toggle) {
       const lab = document.createElement("span"); lab.className = "unit"; lab.textContent = ui.label;
       const seg = document.createElement("div"); seg.className = "seg";
+      seg.dataset.act = n; SEGS[n] = seg;
       arg.choices.forEach(c => {
         const b = document.createElement("button"); b.type = "button"; b.textContent = c;
-        b.addEventListener("click", () => {
-          seg.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", "false"));
-          b.setAttribute("aria-pressed", "true");
-          fire(n, {[arg.key]: c});
+        b.dataset.choice = c;
+        b.addEventListener("click", async () => {
+          segShow(n, c);                       /* answer the click at once */
+          if (!await fire(n, {[arg.key]: c}))  /* refused: show what is true */
+            segShow(n, ACT_STATE[n]);
         });
         seg.append(b);
       });
+      segShow(n, ACT_STATE[n]);
       box.append(lab, seg);
     } else if (ui.toggle && arg) {
       const b = document.createElement("button"); b.className = "btn"; b.textContent = ui.label;
@@ -972,9 +992,16 @@ function buildActions(names) {
   });
   return box;
 }
+
+/*
+ * rcd reads the verb out of `action`, not out of `name` -- `name` is what the
+ * schema calls the field it emits, and sending that back is a malformed
+ * request, not an unknown action. Returns whether the camera took it, so a
+ * control that latched on the click can un-latch when it did not.
+ */
 async function fire(name, args) {
-  try { await api(Object.assign({cmd:"action", name:name}, args || {})); }
-  catch (e) { wlog("err", "! " + name + ": " + e.message); }
+  try { await api(Object.assign({cmd:"action", action:name}, args || {})); return true; }
+  catch (e) { wlog("err", "! " + name + ": " + e.message); return false; }
 }
 
 /* ═══ render ═════════════════════════════════════════════════════════════ */
@@ -1430,6 +1457,8 @@ async function loadState() {
    * wondering why the camera has not gone to night wants to see the gain.
    */
   const ir = s.ir || {};
+  ACT_STATE["ircut-mode"] = ir.mode || "auto";
+  segShow("ircut-mode", ACT_STATE["ircut-mode"]);
   if (ir.state || ir.mode) {
     const auto = ir.mode === "auto" || ir.mode === undefined;
     statLine(box, "Day / night",
