@@ -377,8 +377,10 @@ try {
 		fail("exposure compensation was drawn from " + sliderIn(ae).min +
 		     ", so the whole darker half is unreachable");
 
-	/* A module the tuning ships switched off takes the value and does
-	 * nothing with it, which is the one failure that cannot be seen. */
+	/* A module the tuning ships switched off. Setting a value switches it
+	 * on, so the control is not dead -- but using it leaves the tuning
+	 * behind in a way the number alone does not show, and the page has to
+	 * say so while it is still true. */
 	if (!rowFor("brightness").querySelectorAll(".modoff").length)
 		fail("brightness is switched off in the tuning and the page did not say so");
 	if (rowFor("contrast").querySelectorAll(".modoff").length)

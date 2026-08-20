@@ -999,13 +999,15 @@ function rangeHint(b) {
   return s;
 }
 
-/* A module the tuning binary ships switched off. The write is accepted and
- * stored and the picture does not move, which is the one failure nobody can
- * diagnose from the control itself. Infinity6C's imx335 tuning ships
- * Brightness this way. */
+/* A module the tuning binary ships switched off -- Infinity6C's imx335 does
+ * this to Brightness. Setting a value switches it on, so the control works;
+ * what the operator is being told is that using it departs from the tuning by
+ * more than the number suggests, and that `auto` is the way back. The note
+ * clears itself once the module is on, which is the state the camera then
+ * reports. */
 function moduleOff() {
   const s = document.createElement("span"); s.className = "modoff";
-  s.textContent = "the loaded tuning has this module switched off";
+  s.textContent = "the tuning ships this module off — setting a value switches it on";
   return s;
 }
 
