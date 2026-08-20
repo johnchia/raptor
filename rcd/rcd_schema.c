@@ -192,14 +192,19 @@ static const char *const choices_threshold[] = {
  * because -Werror=missing-field-initializers means the whole of it has to be
  * spelled out either way.
  */
-#define LIVE(cmd)	 cmd, "value", -1, NULL, RCD_IMPACT_NONE, 0
-#define LIVE_CH(c, n)	 c, "value", n, NULL, RCD_IMPACT_NONE, 0
-#define SAVED		 NULL, NULL, -1, NULL, RCD_IMPACT_NONE, 0
-#define PROVIDED(p, imp) NULL, NULL, -1, &(p), (imp), 0
+#define LIVE(cmd)	 cmd, "value", -1, NULL, RCD_IMPACT_NONE, 0, false
+#define LIVE_CH(c, n)	 c, "value", n, NULL, RCD_IMPACT_NONE, 0, false
+#define SAVED		 NULL, NULL, -1, NULL, RCD_IMPACT_NONE, 0, false
+#define PROVIDED(p, imp) NULL, NULL, -1, &(p), (imp), 0, false
+
+/* An ISP knob: live like the rest, and it takes the word "auto" as well as a
+ * number. See rcd_key_t::auto_ok -- the word says "follow the tuning's own
+ * curve", which no number on the scale can say. */
+#define LIVE_ISP(cmd) cmd, "value", -1, NULL, RCD_IMPACT_NONE, 0, true
 
 /* A provider whose value can cost the client its way back in: written like
  * any other, and put back if nobody confirms within `sec`. */
-#define GUARDED(p, imp, sec) NULL, NULL, -1, &(p), (imp), (sec)
+#define GUARDED(p, imp, sec) NULL, NULL, -1, &(p), (imp), (sec), false
 
 static const rcd_key_t keys[] = {
 	/* -- Sensor -- */
@@ -262,21 +267,33 @@ static const rcd_key_t keys[] = {
 	 * inside them but outside this camera's range is refused by rvd when
 	 * the key is applied, with an error naming the knob.
 	 */
-	{"image", "brightness", V_INT, 0, 255, NULL, LIVE("set-brightness")},
-	{"image", "contrast", V_INT, 0, 255, NULL, LIVE("set-contrast")},
-	{"image", "saturation", V_INT, 0, 255, NULL, LIVE("set-saturation")},
-	{"image", "sharpness", V_INT, 0, 255, NULL, LIVE("set-sharpness")},
-	{"image", "hue", V_INT, 0, 255, NULL, LIVE("set-hue")},
-	{"image", "sinter", V_INT, 0, 255, NULL, LIVE("set-sinter")},
-	{"image", "temper", V_INT, 0, 255, NULL, LIVE("set-temper")},
-	{"image", "ae_comp", V_INT, 0, 255, NULL, LIVE("set-ae-comp")},
+	{"image", "brightness", V_INT, 0, 255, NULL, LIVE_ISP("set-brightness")},
+	{"image", "contrast", V_INT, 0, 255, NULL, LIVE_ISP("set-contrast")},
+	{"image", "saturation", V_INT, 0, 255, NULL, LIVE_ISP("set-saturation")},
+	{"image", "sharpness", V_INT, 0, 255, NULL, LIVE_ISP("set-sharpness")},
+	{"image", "hue", V_INT, 0, 255, NULL, LIVE_ISP("set-hue")},
+	{"image", "sinter", V_INT, 0, 255, NULL, LIVE_ISP("set-sinter")},
+	{"image", "temper", V_INT, 0, 255, NULL, LIVE_ISP("set-temper")},
+	/*
+	 * Signed, and the one knob here that is: exposure compensation biases
+	 * the AE target either way, and SigmaStar states it in EV steps around
+	 * zero. The old 0-255 made the whole darker half unreachable through
+	 * rcd -- rvd took -3 from the CLI and rcd refused it as out of range.
+	 * The magnitude is Ingenic's, which takes a bare int with no bound the
+	 * vendor documents, so this rejects the absurd and nothing else.
+	 */
+	{"image", "ae_comp", V_INT, -255, 255, NULL, LIVE_ISP("set-ae-comp")},
+	/* The gain ceilings are policy this daemon owns rather than knobs a
+	 * tuning expresses, so there is no curve to hand back and no auto. */
 	{"image", "max_again", V_INT, 0, 160, NULL, LIVE("set-max-again")},
 	{"image", "max_dgain", V_INT, 0, 160, NULL, LIVE("set-max-dgain")},
-	{"image", "dpc_strength", V_INT, 0, 255, NULL, LIVE("set-dpc")},
-	{"image", "drc_strength", V_INT, 0, 255, NULL, LIVE("set-drc")},
-	{"image", "defog_strength", V_INT, 0, 255, NULL, LIVE("set-defog-strength")},
-	{"image", "highlight_depress", V_INT, 0, 255, NULL, LIVE("set-highlight-depress")},
-	{"image", "backlight_comp", V_INT, 0, 10, NULL, LIVE("set-backlight-comp")},
+	{"image", "dpc_strength", V_INT, 0, 255, NULL, LIVE_ISP("set-dpc")},
+	{"image", "drc_strength", V_INT, 0, 255, NULL, LIVE_ISP("set-drc")},
+	{"image", "defog_strength", V_INT, 0, 255, NULL, LIVE_ISP("set-defog-strength")},
+	{"image", "highlight_depress", V_INT, 0, 255, NULL, LIVE_ISP("set-highlight-depress")},
+	{"image", "backlight_comp", V_INT, 0, 10, NULL, LIVE_ISP("set-backlight-comp")},
+	/* Orientation is a channel property, not an image one: there is no
+	 * "either way" for the sensor to be reading out. */
 	{"image", "hflip", V_INT, 0, 1, NULL, LIVE("set-hflip")},
 	{"image", "vflip", V_INT, 0, 1, NULL, LIVE("set-vflip")},
 
@@ -648,6 +665,19 @@ static void emit_key(cJSON *arr, const rcd_key_t *k)
 		 * correctly, as a number within the range above. */
 		if (k->choices)
 			emit_labels(o, k->choices);
+		/*
+		 * And that the word "auto" is a value here too, which a client
+		 * has no other way to learn: it is not a number in the range,
+		 * and a form that only offers the range can never say "leave
+		 * this to the tuning". Said only where it is true, so a client
+		 * that has never heard of it draws what it always drew.
+		 *
+		 * This is the grammar. Whether this camera's knob has an auto
+		 * mode at all is the silicon's answer and arrives with the
+		 * rest of its range, in `state`'s per-knob caps.
+		 */
+		if (k->auto_ok)
+			cJSON_AddBoolToObject(o, "auto", true);
 	} else if (k->type == V_CRED || k->type == V_HOST) {
 		cJSON_AddNumberToObject(o, "max_length", k->max);
 	} else if (k->type == V_IPV4) {

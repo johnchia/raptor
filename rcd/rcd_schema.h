@@ -216,6 +216,25 @@ typedef struct rcd_key {
 	 * is longer. See rcd_guard.h.
 	 */
 	int guard_sec;
+
+	/*
+	 * The word "auto" is a value for this key as well as a number, and is
+	 * stored and reported as the word.
+	 *
+	 * It is the ISP knobs and only them. A tuning binary holds a curve per
+	 * knob -- what the module does at each sensor gain -- and setting a
+	 * number replaces that curve with one constant, so "leave it to the
+	 * tuning" is a third thing to say and not a value on the scale. It
+	 * used to be said by writing the neutral, which meant the one value a
+	 * tuner might have chosen deliberately could not be asked for.
+	 *
+	 * Grammar, not capability: this says the word parses here, not that
+	 * this camera's knob has an auto mode. Whether it does belongs to the
+	 * silicon and the loaded tuning, and rvd answers it per knob in
+	 * get-isp's `caps`, which rcd forwards in `state`. A knob without one
+	 * refuses the word, with an error naming the key.
+	 */
+	bool auto_ok;
 } rcd_key_t;
 
 /*

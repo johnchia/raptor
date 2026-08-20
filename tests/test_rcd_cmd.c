@@ -1368,6 +1368,153 @@ TEST unlabelled_integers_still_refuse_a_string(void)
 	PASS();
 }
 
+/*
+ * An ISP knob takes the word as well as a number, and keeps it as the word.
+ *
+ * "auto" means the tuning file's own curve -- what the module does at each
+ * sensor gain -- and that is not a point on the knob's scale. It used to be
+ * said by writing the neutral, which cost the tuner the one value they might
+ * have chosen on purpose. Sent to the daemon as a string, so rvd can tell the
+ * two requests apart, and written to the file as the same five characters.
+ */
+TEST an_isp_knob_takes_the_word_auto(void)
+{
+	rcd_edit_t e[RCD_EDITS_MAX];
+	int n = 0;
+
+	ASSERT_SET_OK("{\"section\":\"image\",\"key\":\"contrast\",\"value\":\"auto\"}", e, &n);
+	ASSERT_STR_EQ("auto", e[0].rendered);
+	ASSERTm("auto reached the daemon as a number", !e[0].is_num);
+
+	/* The numbers still are numbers. */
+	ASSERT_SET_OK("{\"section\":\"image\",\"key\":\"contrast\",\"value\":61}", e, &n);
+	ASSERT_STR_EQ("61", e[0].rendered);
+	ASSERT(e[0].is_num);
+	PASS();
+}
+
+/* And only where a tuning has a curve to hand back. The gain ceilings and the
+ * orientation are this daemon's policy, with no representation in the binary,
+ * so the word means nothing there and is a typo rather than a request. */
+TEST only_the_isp_knobs_take_it(void)
+{
+	ASSERT_SET_REFUSED("{\"section\":\"image\",\"key\":\"max_again\",\"value\":\"auto\"}");
+	ASSERT_STR_EQ(RCD_E_TYPE, code);
+	ASSERT_SET_REFUSED("{\"section\":\"image\",\"key\":\"hflip\",\"value\":\"auto\"}");
+	ASSERT_STR_EQ(RCD_E_TYPE, code);
+	ASSERT_SET_REFUSED("{\"section\":\"jpeg\",\"key\":\"quality\",\"value\":\"auto\"}");
+	ASSERT_STR_EQ(RCD_E_TYPE, code);
+
+	/* The word and nothing near it: a knob cannot be set to "automatic",
+	 * and a client that sends one is told so rather than having it
+	 * guessed at. */
+	ASSERT_SET_REFUSED("{\"section\":\"image\",\"key\":\"contrast\",\"value\":\"Auto\"}");
+	ASSERT_SET_REFUSED("{\"section\":\"image\",\"key\":\"contrast\",\"value\":\"automatic\"}");
+	PASS();
+}
+
+/*
+ * A client has no other way to learn the word exists: it is not a number in
+ * the range, and a form drawn from the range alone can never say "leave this
+ * to the tuning". Said only where it is true.
+ */
+TEST the_schema_says_which_keys_take_auto(void)
+{
+	cJSON *out = cJSON_CreateObject();
+	rcd_schema_emit(out, NULL);
+	const cJSON *keys = cJSON_GetObjectItemCaseSensitive(out, "keys");
+	ASSERT(cJSON_IsArray(keys));
+
+	int checked = 0;
+	const cJSON *k = NULL;
+	cJSON_ArrayForEach(k, keys)
+	{
+		const cJSON *sec = cJSON_GetObjectItemCaseSensitive(k, "section");
+		const cJSON *key = cJSON_GetObjectItemCaseSensitive(k, "key");
+		const cJSON *au = cJSON_GetObjectItemCaseSensitive(k, "auto");
+		if (!cJSON_IsString(sec) || !cJSON_IsString(key))
+			continue;
+		if (strcmp(sec->valuestring, "image") != 0)
+			continue;
+		if (strcmp(key->valuestring, "contrast") == 0) {
+			ASSERT(cJSON_IsTrue(au));
+			checked++;
+		}
+		if (strcmp(key->valuestring, "hflip") == 0) {
+			ASSERT_EQ(NULL, au);
+			checked++;
+		}
+	}
+	ASSERT_EQ(2, checked);
+	cJSON_Delete(out);
+	PASS();
+}
+
+/*
+ * Exposure compensation is the one signed knob: it biases the AE target either
+ * way, and SigmaStar states it in EV steps around zero. Bounded at 0 here, the
+ * whole darker half was unreachable through rcd -- rvd took -3 from the CLI
+ * and rcd refused the same edit as out of range.
+ */
+TEST exposure_compensation_goes_both_ways(void)
+{
+	rcd_edit_t e[RCD_EDITS_MAX];
+	int n = 0;
+
+	ASSERT_SET_OK("{\"section\":\"image\",\"key\":\"ae_comp\",\"value\":-3}", e, &n);
+	ASSERT_STR_EQ("-3", e[0].rendered);
+
+	const rcd_key_t *k = rcd_key_find("image", "ae_comp");
+	ASSERT(k);
+	ASSERTm("ae_comp cannot express a negative bias", k->min < 0);
+	PASS();
+}
+
+/*
+ * And the word survives the round trip. Read as a number it is 0 -- in range,
+ * on the scale, and wrong: a knob following the tuning would be reported as
+ * one pinned at its floor, and a client writing that value back would pin it
+ * there for real.
+ */
+TEST a_knob_left_on_auto_reads_back_as_auto(void)
+{
+	rcd_state_t st;
+	char path[320];
+
+	if (!sysconf_dir_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	snprintf(path, sizeof(path), "%s/raptor.conf", RCD_SYSCONF_DIR);
+	FILE *f = fopen(path, "w");
+	ASSERT(f);
+	fputs("[image]\ncontrast = auto\nsharpness = 90\n", f);
+	fclose(f);
+
+	memset(&st, 0, sizeof(st));
+	st.config_path = path;
+
+	cJSON *req = cJSON_Parse("{\"keys\":[{\"section\":\"image\",\"key\":\"contrast\"},"
+				 "{\"section\":\"image\",\"key\":\"sharpness\"}]}");
+	cJSON *resp = rcd_cmd_get(&st, req);
+	cJSON_Delete(req);
+	ASSERT(resp);
+
+	const cJSON *vals = cJSON_GetObjectItemCaseSensitive(resp, "values");
+	const cJSON *con = cJSON_GetArrayItem(vals, 0);
+	const cJSON *shp = cJSON_GetArrayItem(vals, 1);
+	const cJSON *cv = cJSON_GetObjectItemCaseSensitive(con, "value");
+	const cJSON *sv = cJSON_GetObjectItemCaseSensitive(shp, "value");
+
+	ASSERTm("a knob on auto read back as a number", cJSON_IsString(cv));
+	ASSERT_STR_EQ("auto", cv->valuestring);
+	ASSERTm("a knob with a value read back as a string", cJSON_IsNumber(sv));
+	ASSERT_EQ(90, (int)cJSON_GetNumberValue(sv));
+
+	cJSON_Delete(resp);
+	unlink(path);
+	PASS();
+}
+
 /* Every label array must cover exactly the key's range, or a value in the
  * middle of it would have no name and a client would render a gap. */
 TEST every_label_array_spans_its_range(void)
@@ -1849,6 +1996,11 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(labelled_integers_refuse_anything_else);
 	RUN_TEST(unlabelled_integers_still_refuse_a_string);
 	RUN_TEST(every_label_array_spans_its_range);
+	RUN_TEST(an_isp_knob_takes_the_word_auto);
+	RUN_TEST(only_the_isp_knobs_take_it);
+	RUN_TEST(the_schema_says_which_keys_take_auto);
+	RUN_TEST(exposure_compensation_goes_both_ways);
+	RUN_TEST(a_knob_left_on_auto_reads_back_as_auto);
 	RUN_TEST(refuses_more_edits_than_a_request_may_carry);
 
 	RUN_TEST(every_refusal_explains_itself);

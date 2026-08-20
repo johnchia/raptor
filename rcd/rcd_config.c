@@ -437,6 +437,19 @@ static const char *render(const rcd_key_t *k, const cJSON *v, rcd_edit_t *e, cha
 	if (k->type == V_INT) {
 		double d;
 		const char *code;
+		/*
+		 * An ISP knob also takes the word, and keeps it as the word:
+		 * "auto" asks for the tuning file's own curve, which is not a
+		 * point on the knob's scale and cannot be written as one. The
+		 * live command carries the string and rvd reads it there; the
+		 * file gets the same five characters, so somebody reading it
+		 * later sees what was meant. See rcd_key_t::auto_ok.
+		 */
+		if (k->auto_ok && cJSON_IsString(v) && v->valuestring &&
+		    strcmp(v->valuestring, "auto") == 0) {
+			rss_strlcpy(e->rendered, "auto", sizeof(e->rendered));
+			return NULL;
+		}
 		/* A labelled integer accepts the label as well as the number:
 		 * the number is what gets written either way. */
 		if (k->choices && cJSON_IsString(v) && v->valuestring)
@@ -666,8 +679,18 @@ static cJSON *typed_value(const rcd_key_t *k, const char *raw)
 	if (k->type == V_BOOL)
 		return cJSON_CreateBool(strcmp(raw, "true") == 0 || strcmp(raw, "1") == 0 ||
 					strcmp(raw, "yes") == 0 || strcmp(raw, "on") == 0);
-	if (k->type == V_INT)
+	if (k->type == V_INT) {
+		/*
+		 * Except for the one integer that has a word among its values.
+		 * Read as a number, "auto" is 0 -- a value on the scale, in
+		 * range, and wrong: it would show a knob following the tuning
+		 * as one pinned at its floor, and a client that wrote it back
+		 * would pin it there for real.
+		 */
+		if (k->auto_ok && strcmp(raw, "auto") == 0)
+			return cJSON_CreateString(raw);
 		return cJSON_CreateNumber(strtol(raw, NULL, 10));
+	}
 	return cJSON_CreateString(raw);
 }
 
