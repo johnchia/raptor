@@ -22,6 +22,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <raptor_hal.h>
+
 #include "greatest.h"
 #include "../rcd/rcd.h"
 #include "../rcd/rcd_apply.h"
@@ -1366,6 +1368,244 @@ TEST the_live_cache_holds_every_section_the_table_has(void)
 
 	ASSERT(n > 0);
 	ASSERT_EQm("more sections than the get cache can hold", true, n <= RCD_LIVE_MAX);
+	PASS();
+}
+
+/* ------------------------------------------------------------------ */
+/* Assumptions about the image underneath                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The codec numbers arrive on rvd's wire and originate in the HAL. rcd used to
+ * spell them 0, 1, 2, 3 next to a comment saying they mirrored rss_codec_t --
+ * a copy, and a copy can drift. Reordering the HAL's enum would have
+ * relabelled every stream on the console with nothing failing to build.
+ *
+ * They are the enum now, so this test cannot fail by drift. It asserts the
+ * values themselves instead, because they are a wire format: rvd on an older
+ * build is still sending the old numbers, and renumbering the enum is a
+ * protocol change whoever does it should be made to notice.
+ */
+TEST the_codec_numbers_are_a_wire_format(void)
+{
+	ASSERT_EQ(0, RSS_CODEC_H264);
+	ASSERT_EQ(1, RSS_CODEC_H265);
+	ASSERT_EQ(2, RSS_CODEC_JPEG);
+	ASSERT_EQ(3, RSS_CODEC_MJPEG);
+	PASS();
+}
+
+/*
+ * An init script is found by name whatever number it carries.
+ *
+ * The number is boot order and moves when a package is added ahead of one; the
+ * name is the convention. Spelling both meant an image that renumbered ntpd
+ * wrote the file, reloaded nothing, and reported the change as in force.
+ */
+static bool initd_ready(void)
+{
+	char dir[192];
+
+	if (!sysconf_dir_ready())
+		return false;
+	snprintf(dir, sizeof(dir), "%s/init.d", RCD_SYSCONF_DIR);
+	mkdir(dir, 0755);
+	return access(dir, W_OK) == 0;
+}
+
+#define RAN_MARKER RCD_SYSCONF_DIR "/init.d/ran"
+
+/*
+ * A script that records having been run. Which script was chosen is the whole
+ * question, and a set() that returns 0 either way cannot answer it.
+ */
+static bool put_script(const char *basename)
+{
+	char path[256];
+	FILE *f;
+
+	snprintf(path, sizeof(path), "%s/init.d/%s", RCD_SYSCONF_DIR, basename);
+	f = fopen(path, "w");
+	if (!f)
+		return false;
+	fprintf(f, "#!/bin/sh\necho \"%s $1\" > %s\nexit 0\n", basename, RAN_MARKER);
+	fclose(f);
+	return chmod(path, 0755) == 0;
+}
+
+static void drop_script(const char *basename)
+{
+	char path[256];
+
+	snprintf(path, sizeof(path), "%s/init.d/%s", RCD_SYSCONF_DIR, basename);
+	unlink(path);
+}
+
+/* What the marker says, or "" when nothing ran. */
+static const char *what_ran(char *buf, size_t sz)
+{
+	FILE *f = fopen(RAN_MARKER, "r");
+
+	buf[0] = '\0';
+	if (!f)
+		return buf;
+	if (fgets(buf, (int)sz, f))
+		buf[strcspn(buf, "\r\n")] = '\0';
+	fclose(f);
+	return buf;
+}
+
+static const char *const initd_decoys[] = {"S49ntpdx", "K49ntpd", "S49ntpd.bak",
+					   "ntpdx",    "S49ntp",  NULL};
+
+static void initd_clean(void)
+{
+	unlink(RAN_MARKER);
+	drop_script("S49ntpd");
+	drop_script("S43ntpd");
+	drop_script("ntpd");
+	for (int i = 0; initd_decoys[i]; i++)
+		drop_script(initd_decoys[i]);
+}
+
+TEST an_init_script_is_found_whatever_number_it_carries(void)
+{
+	char ran[128];
+
+	if (!initd_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	initd_clean();
+
+	/* The number this image happens to ship is not the one another does. */
+	if (!put_script("S43ntpd"))
+		SKIPm("cannot write an init script");
+
+	ASSERT_EQ(0, rcd_provider_ntp_server.set("10.0.0.1"));
+	ASSERT_STR_EQm("a renumbered ntpd was not the one that ran", "S43ntpd restart",
+		       what_ran(ran, sizeof(ran)));
+
+	/* A sysvinit /etc spells it without the number at all. */
+	initd_clean();
+	if (!put_script("ntpd"))
+		SKIPm("cannot write an init script");
+	ASSERT_EQ(0, rcd_provider_ntp_server.set("10.0.0.2"));
+	ASSERT_STR_EQ("ntpd restart", what_ran(ran, sizeof(ran)));
+
+	/* And with no script at all the value is still stored, because an
+	 * image that does not run ntpd is not a failed request. */
+	initd_clean();
+	ASSERT_EQ(0, rcd_provider_ntp_server.set("10.0.0.3"));
+	ASSERT_STR_EQm("something ran with no ntpd installed", "", what_ran(ran, sizeof(ran)));
+
+	char got[RCD_VAL_MAX] = "";
+
+	ASSERT_EQ(0, rcd_provider_ntp_server.get(got, sizeof(got)));
+	ASSERT_STR_EQ("10.0.0.3", got);
+	PASS();
+}
+
+/*
+ * And the match is anchored at both ends, so it cannot pick up a neighbour: a
+ * stop link, a backup somebody left behind, or a different service whose name
+ * merely starts the same way. Reloading the wrong service is worse than
+ * reloading none.
+ */
+TEST the_init_script_match_is_anchored(void)
+{
+	char ran[128];
+
+	if (!initd_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	initd_clean();
+
+	for (int i = 0; initd_decoys[i]; i++) {
+		if (!put_script(initd_decoys[i]))
+			SKIPm("cannot write init scripts");
+	}
+
+	ASSERT_EQ(0, rcd_provider_ntp_server.set("10.0.0.4"));
+	ASSERT_STR_EQm("a script that is not ntpd was run", "", what_ran(ran, sizeof(ran)));
+
+	initd_clean();
+	PASS();
+}
+
+/*
+ * A daemon is installed wherever this image puts it.
+ *
+ * `hello` looked in /usr/bin and nowhere else, and the console draws a control
+ * only for a daemon that is installed -- so on an image that installs to
+ * /usr/sbin, every daemon read as absent and the console drew almost nothing.
+ * This camera's own PATH puts /usr/sbin first, so that layout is not a
+ * hypothetical one.
+ */
+TEST a_daemon_is_found_wherever_the_image_puts_it(void)
+{
+	char dir[192], bin[256];
+
+	if (!sysconf_dir_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	snprintf(dir, sizeof(dir), "%s/sbin", RCD_SYSCONF_DIR);
+	mkdir(dir, 0755);
+	snprintf(bin, sizeof(bin), "%s/rvd", dir);
+	unlink(bin);
+
+	char *saved = getenv("PATH");
+	char keep[512] = "";
+
+	if (saved)
+		rss_strlcpy(keep, saved, sizeof(keep));
+
+	/* Nowhere on PATH: absent, and no daemon is running under the suite. */
+	setenv("PATH", dir, 1);
+
+	rcd_state_t st;
+	char resp[8192];
+
+	memset(&st, 0, sizeof(st));
+	st.config_path = "/dev/null";
+	ASSERT(rcd_handle("{\"cmd\":\"hello\"}", resp, sizeof(resp), &st) > 0);
+
+	cJSON *r = cJSON_Parse(resp);
+
+	ASSERT(r != NULL);
+	const cJSON *rvd = cJSON_GetObjectItemCaseSensitive(
+		cJSON_GetObjectItemCaseSensitive(r, "daemons"), "rvd");
+	ASSERT(rvd != NULL);
+	ASSERT_FALSEm("rvd was reported installed with nothing on PATH",
+		      cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(rvd, "installed")));
+	cJSON_Delete(r);
+
+	/* Now put it somewhere that is not /usr/bin. */
+	FILE *f = fopen(bin, "w");
+
+	if (!f) {
+		if (keep[0])
+			setenv("PATH", keep, 1);
+		SKIPm("cannot write a stand-in daemon");
+	}
+	fputs("#!/bin/sh\nexit 0\n", f);
+	fclose(f);
+	chmod(bin, 0755);
+
+	ASSERT(rcd_handle("{\"cmd\":\"hello\"}", resp, sizeof(resp), &st) > 0);
+	r = cJSON_Parse(resp);
+	ASSERT(r != NULL);
+	rvd = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(r, "daemons"),
+					       "rvd");
+	ASSERT(rvd != NULL);
+	ASSERTm("a daemon outside /usr/bin was reported absent",
+		cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(rvd, "installed")));
+	cJSON_Delete(r);
+
+	unlink(bin);
+	if (keep[0])
+		setenv("PATH", keep, 1);
+	else
+		unsetenv("PATH");
 	PASS();
 }
 
@@ -2716,6 +2956,10 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(get_asks_once_per_distinct_section);
 	RUN_TEST(get_refuses_more_keys_than_a_request_may_carry);
 	RUN_TEST(the_live_cache_holds_every_section_the_table_has);
+	RUN_TEST(the_codec_numbers_are_a_wire_format);
+	RUN_TEST(an_init_script_is_found_whatever_number_it_carries);
+	RUN_TEST(the_init_script_match_is_anchored);
+	RUN_TEST(a_daemon_is_found_wherever_the_image_puts_it);
 
 	RUN_TEST(the_wait_budget_is_wall_time_not_a_count_of_sleeps);
 	RUN_TEST(the_wait_reports_the_time_it_measured);

@@ -14,6 +14,7 @@
 #include <rss_common.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -58,6 +59,48 @@ void rcd_err_where(cJSON *e, const char *section, const char *key)
 /* ------------------------------------------------------------------ */
 
 /*
+ * Whether this image carries the daemon at all.
+ *
+ * This looked in /usr/bin and nowhere else. The console draws a control only
+ * for a daemon that is installed -- deliberately, so a build without rod does
+ * not offer an OSD tab that cannot work -- so on an image that installs to
+ * /usr/sbin instead, every daemon read as absent and the console drew almost
+ * nothing. This camera's own PATH puts /usr/sbin first, so that layout is not
+ * hypothetical.
+ *
+ * PATH, then, with the usual places as the fallback for a daemon started by
+ * an init system that did not export one.
+ */
+static bool daemon_installed(const char *name)
+{
+	const char *path = getenv("PATH");
+
+	if (!path || !*path)
+		path = "/usr/sbin:/usr/bin:/sbin:/bin";
+
+	while (*path) {
+		const char *sep = strchr(path, ':');
+		size_t len = sep ? (size_t)(sep - path) : strlen(path);
+
+		/* An empty entry means the working directory, which is not
+		 * somewhere a daemon is installed. */
+		if (len > 0 && len < 200) {
+			char full[256];
+
+			snprintf(full, sizeof(full), "%.*s/%s", (int)len, path, name);
+			if (access(full, X_OK) == 0)
+				return true;
+		}
+
+		if (!sep)
+			break;
+		path = sep + 1;
+	}
+
+	return false;
+}
+
+/*
  * What this build is and what it is talking to.
  *
  * A client's first call: it learns the protocol version before it depends on
@@ -87,10 +130,12 @@ static cJSON *cmd_hello(rcd_state_t *st)
 		if (!o)
 			continue;
 
-		char path[64];
-		snprintf(path, sizeof(path), "/usr/bin/%s", name);
-		cJSON_AddBoolToObject(o, "installed", access(path, X_OK) == 0);
-		cJSON_AddBoolToObject(o, "running", rss_daemon_check(name) > 0);
+		/* Running settles it without a search: a daemon that answers is
+		 * installed wherever it happens to live. */
+		bool running = rss_daemon_check(name) > 0;
+
+		cJSON_AddBoolToObject(o, "installed", running || daemon_installed(name));
+		cJSON_AddBoolToObject(o, "running", running);
 		cJSON_AddStringToObject(o, "impact",
 					rcd_impact_name(rcd_daemon_impact((rcd_daemon_t)i)));
 	}

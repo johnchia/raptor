@@ -56,7 +56,14 @@ $(SDP_SRC): ../rwd/rwd_sdp.c
 # suite run outside that sandbox fails to write rather than editing this host.
 RCD_TEST_ETC = /run/rss/rcd-test-etc
 
-tests: $(TEST_SRCS) $(LIB_SRCS) $(CTRL_SRCS) $(IPC_SRCS) $(RCD_SRCS) $(SDP_SRC) greatest.h
+# Headers too. The suite compiles every source in one command, so there are no
+# object files to carry -MMD dependencies -- which meant a header change left
+# the binary silently stale, and a test asserting something about a header went
+# on asserting the old value. Found the hard way, twice.
+TEST_HDRS = $(wildcard *.h ../*/*.h ../../raptor-hal/include/*.h \
+                       ../../raptor-common/include/*.h ../../raptor-ipc/include/*.h)
+
+tests: $(TEST_SRCS) $(LIB_SRCS) $(CTRL_SRCS) $(IPC_SRCS) $(RCD_SRCS) $(SDP_SRC) $(TEST_HDRS)
 	$(CC) $(CFLAGS) -DRWD_H -DRCD_SYSCONF_DIR='"$(RCD_TEST_ETC)"' \
 		-include ../fuzz/fuzz_rwd_shim.h \
 		-o $@ $(TEST_SRCS) $(LIB_SRCS) $(CTRL_SRCS) $(IPC_SRCS) $(RCD_SRCS) $(SDP_SRC) $(LDFLAGS)

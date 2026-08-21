@@ -10,25 +10,34 @@
 #include "rcd_proto.h"
 #include "rcd_schema.h"
 
+#include <raptor_hal.h>
 #include <rss_common.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * The codec numbers come off rvd's wire, and rvd gets them from the HAL. They
+ * used to be spelled here as 0, 1, 2, 3 beside a comment saying they mirrored
+ * rss_codec_t -- which is a copy, and a copy of an enum is a copy that can
+ * drift. Reordering the HAL's enum would have relabelled every stream on the
+ * console with nothing failing to build.
+ *
+ * Naming them costs nothing: raptor_hal.h is standard headers and typedefs,
+ * and it is already on rcd's include path. Including it is not linking the
+ * HAL, which rcd still does not do.
+ */
 static const char *codec_name(int c)
 {
-	/* Mirrors rss_codec_t in raptor-hal/include/raptor_hal.h. Duplicated
-	 * rather than included: rcd deliberately does not link the HAL, and
-	 * one enum is a smaller cost than that dependency. */
 	switch (c) {
-	case 0:
+	case RSS_CODEC_H264:
 		return "h264";
-	case 1:
+	case RSS_CODEC_H265:
 		return "h265";
-	case 2:
+	case RSS_CODEC_JPEG:
 		return "jpeg";
-	case 3:
+	case RSS_CODEC_MJPEG:
 		return "mjpeg";
 	default:
 		return "unknown";
@@ -168,9 +177,9 @@ static void collect_rvd(cJSON *state)
 		cJSON_ArrayForEach(s, streams)
 		{
 			int codec = json_int(s, "codec", -1);
-			if (codec == 2 || codec == 3)
+			if (codec == RSS_CODEC_JPEG || codec == RSS_CODEC_MJPEG)
 				jpeg_channels++;
-			if (codec != 0 && codec != 1)
+			if (codec != RSS_CODEC_H264 && codec != RSS_CODEC_H265)
 				continue; /* skip JPEG/MJPEG channels */
 
 			/* Bound the channel so the key below cannot truncate,

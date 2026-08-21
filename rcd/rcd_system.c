@@ -6,6 +6,7 @@
 
 #include <rss_common.h>
 
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,10 +17,9 @@
 #define PATH_TZ	      RCD_SYSCONF_DIR "/TZ"
 #define PATH_TIMEZONE RCD_SYSCONF_DIR "/timezone"
 #define PATH_NTP      RCD_SYSCONF_DIR "/ntp.conf"
-#define PATH_NTPD     RCD_SYSCONF_DIR "/init.d/S49ntpd"
+#define DIR_INITD     RCD_SYSCONF_DIR "/init.d"
 #define PATH_HOSTNAME RCD_SYSCONF_DIR "/hostname"
 #define PATH_HOSTS    RCD_SYSCONF_DIR "/hosts"
-#define PATH_MDNSD    RCD_SYSCONF_DIR "/init.d/S50mdnsd"
 
 /*
  * Names are what an operator picks; the POSIX string at the same index is what
@@ -703,6 +703,73 @@ static const char *zone_name_for_posix(const char *posix)
 /* ------------------------------------------------------------------ */
 
 /* First line of a file, newline stripped. Empty string if unreadable. */
+/*
+ * An init script by name, whatever number it carries.
+ *
+ * These were spelled out as S49ntpd and S50mdnsd. The name is a convention
+ * across Buildroot images; the number is not -- it is the boot order, and it
+ * moves whenever a package is added ahead of one. An image that renumbers
+ * ntpd to S43 would have found no script, written the file, and reported the
+ * change as being in force, which is a camera that quietly keeps the old time
+ * server until it next reboots.
+ *
+ * The match is anchored: 'S', digits, then exactly `name`. So the basename
+ * that reaches system() below is that literal and nothing else -- there is no
+ * spelling of a file in this directory that puts a shell metacharacter in it.
+ */
+static bool init_script(const char *name, char *out, size_t outsz)
+{
+	DIR *d = opendir(DIR_INITD);
+
+	if (!d)
+		return false;
+
+	bool found = false;
+	const struct dirent *e;
+
+	while (!found && (e = readdir(d))) {
+		const char *p = e->d_name;
+
+		/*
+		 * Either `S<digits><name>`, which is how Buildroot and OpenIPC
+		 * spell it, or plain `<name>`, which is how a sysvinit /etc
+		 * does. Anchored at both ends, so `S50mdnsd` is not ntpd and
+		 * neither is `S49ntpd.bak` or a `K49ntpd` stop link.
+		 */
+		if (*p == 'S') {
+			const char *q = p + 1;
+
+			while (*q >= '0' && *q <= '9')
+				q++;
+			if (q != p + 1)
+				p = q;
+		}
+		if (strcmp(p, name) != 0)
+			continue;
+
+		snprintf(out, outsz, "%s/%s", DIR_INITD, e->d_name);
+		found = access(out, X_OK) == 0;
+	}
+
+	closedir(d);
+	return found;
+}
+
+/* Poke a service through its init script. False when this image has no such
+ * script, which is not a failure -- it is an image that does not run it. */
+static bool init_script_do(const char *name, const char *verb)
+{
+	char path[192];
+
+	if (!init_script(name, path, sizeof(path)))
+		return false;
+
+	char cmd[256];
+
+	snprintf(cmd, sizeof(cmd), "%s %s >/dev/null 2>&1", path, verb);
+	return system(cmd) == 0;
+}
+
 static void read_line(const char *path, char *out, size_t outsz)
 {
 	out[0] = '\0';
@@ -873,12 +940,19 @@ static int ntp_set(const char *host)
 	 * A build with no ntpd is not a failure. The file is written either
 	 * way, and whatever reads it next gets the new server.
 	 */
-	if (access(PATH_NTPD, X_OK) == 0) {
-		int rc = system(PATH_NTPD " restart >/dev/null 2>&1");
-		RSS_INFO("system: ntp server %s (ntpd restart %s)", host,
-			 rc == 0 ? "ok" : "failed -- will apply at reboot");
-	} else {
+	char script[192];
+
+	if (!init_script("ntpd", script, sizeof(script))) {
 		RSS_INFO("system: ntp server %s (no ntpd here)", host);
+	} else if (init_script_do("ntpd", "restart")) {
+		RSS_INFO("system: ntp server %s (ntpd restarted)", host);
+	} else {
+		/* Warned, not logged quietly. The key is a live one, so a
+		 * client has been told the value is in force -- and here it is
+		 * stored and not in force until the camera next boots. */
+		RSS_WARN("system: ntp server %s stored, but %s restart failed; it takes effect "
+			 "at the next boot",
+			 host, script);
 	}
 	return 0;
 }
@@ -1033,11 +1107,18 @@ static int hostname_enact(void)
 	 * service is poked belongs in one place, and that place already
 	 * exists.
 	 */
-	if (access(PATH_MDNSD, X_OK) == 0) {
-		int rc = system(PATH_MDNSD " reload >/dev/null 2>&1");
-		RSS_INFO("system: hostname %s (mdnsd reload %s)", name, rc == 0 ? "ok" : "failed");
-	} else {
+	char script[192];
+
+	if (!init_script("mdnsd", script, sizeof(script))) {
 		RSS_INFO("system: hostname %s", name);
+	} else if (init_script_do("mdnsd", "reload")) {
+		RSS_INFO("system: hostname %s (mdnsd reloaded)", name);
+	} else {
+		/* The condition this key is guarded against: the camera answers
+		 * to the new name and advertises the old one. */
+		RSS_WARN("system: hostname %s, but %s reload failed; the camera still advertises "
+			 "its old name over mDNS",
+			 name, script);
 	}
 
 	/* The DHCP lease still carries the old name until the interface next
