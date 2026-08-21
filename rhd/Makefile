@@ -1,4 +1,4 @@
-SRCS := rhd_main.c rhd_http.c rhd_audio.c rhd_api.c
+SRCS := rhd_main.c rhd_http.c rhd_audio.c rhd_api.c rhd_authrate.c
 OBJS := $(SRCS:.c=.o)
 BIN  := rhd
 

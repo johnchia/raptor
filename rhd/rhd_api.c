@@ -5,6 +5,7 @@
  */
 
 #include <crypt.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,7 @@
 
 #include "rhd.h"
 #include "rhd_api.h"
+#include "rhd_authrate.h"
 
 /*
  * One round trip, owned by two threads.
@@ -224,13 +226,50 @@ static bool system_account_ok(const char *user, const char *pass)
 	return got && rss_secure_compare(got, hash);
 }
 
-static bool api_authenticated(const char *request)
+/*
+ * Duplicated from rhd_main.c rather than shared through rhd.h, because that
+ * file is upstream's and this one is not: five lines here cost less than a
+ * conflict there.
+ */
+static int64_t api_now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/*
+ * A username on its way to the log, which is attacker-supplied text going
+ * somewhere an operator will read. Printable ASCII only and short: a name
+ * carrying a newline could otherwise forge a second log line, and one
+ * carrying terminal escapes could rewrite what the reader sees.
+ */
+static void auth_safe_name(const char *in, char *out, size_t outsz)
+{
+	size_t n = 0;
+
+	for (; in[n] && n + 1 < outsz; n++)
+		out[n] = (in[n] >= 0x20 && in[n] < 0x7f) ? in[n] : '?';
+	out[n] = '\0';
+	if (n == 0)
+		rss_strlcpy(out, "(empty)", outsz);
+}
+
+typedef enum {
+	API_AUTH_NONE,	    /* nothing offered -- no hash was computed */
+	API_AUTH_THROTTLED, /* offered, but this host is paying for earlier guesses */
+	API_AUTH_BAD,	    /* offered and wrong -- one hash was computed */
+	API_AUTH_OK,
+} api_auth_t;
+
+static api_auth_t api_authenticate(const char *request, const char *host, int *retry_sec)
 {
 	size_t vlen = 0;
 	const char *v = header_value(request, "Authorization", &vlen);
 
 	if (!v || vlen <= 6 || strncasecmp(v, "Basic ", 6) != 0)
-		return false;
+		return API_AUTH_NONE;
 	v += 6;
 	vlen -= 6;
 
@@ -238,16 +277,60 @@ static bool api_authenticated(const char *request)
 	int dlen = rss_base64_decode(v, vlen, decoded, sizeof(decoded) - 1);
 
 	if (dlen <= 0)
-		return false;
+		return API_AUTH_NONE;
 	decoded[dlen] = '\0';
 
 	char *colon = strchr(decoded, ':');
 
 	if (!colon)
-		return false;
+		return API_AUTH_NONE;
 	*colon = '\0';
 
-	return system_account_ok(decoded, colon + 1);
+	int64_t now = api_now_ms();
+
+	if (!rhd_auth_may_hash(host, now, retry_sec))
+		return API_AUTH_THROTTLED;
+
+	if (system_account_ok(decoded, colon + 1)) {
+		rhd_auth_succeeded(host, now);
+		return API_AUTH_OK;
+	}
+
+	rhd_auth_failed(host, now);
+
+	/* The name that was tried, which the old line left out -- so a log
+	 * showing a hundred of these says whether somebody is working through
+	 * usernames or has one account's password slightly wrong. */
+	char name[64];
+
+	auth_safe_name(decoded, name, sizeof(name));
+	RSS_WARN("api: %s offered the wrong system password for '%s'", host, name);
+	return API_AUTH_BAD;
+}
+
+/*
+ * Too many wrong answers. A separate code from 401 on purpose: an operator
+ * who has mistyped their password wants to be told they are being made to
+ * wait, not handed the same rejection again. Retry-After says how long, and
+ * saying so gives away nothing an attacker cannot measure anyway.
+ */
+static void api_429(rhd_client_t *c, int retry_sec)
+{
+	static const char body[] = "{\"api\":1,\"status\":\"error\",\"code\":\"auth\","
+				   "\"reason\":\"too many failed attempts; wait and try "
+				   "again\"}\n";
+	char header[256];
+	int hlen = snprintf(header, sizeof(header),
+			    "HTTP/1.1 429 Too Many Requests\r\n"
+			    "Retry-After: %d\r\n"
+			    "Content-Type: application/json\r\n"
+			    "Content-Length: %d\r\n"
+			    "Connection: close\r\n"
+			    "\r\n",
+			    retry_sec > 0 ? retry_sec : 1, (int)strlen(body));
+
+	rhd_write(c, header, (size_t)hlen);
+	rhd_write(c, body, strlen(body));
 }
 
 static void api_401(rhd_client_t *c)
@@ -287,8 +370,23 @@ bool rhd_api_handle(rhd_server_t *srv, rhd_client_t *c, const char *method, cons
 	 * After the enabled check, so a camera with the api switched off says
 	 * so rather than asking for credentials it will refuse anyway.
 	 */
-	if (!api_authenticated(c->recv_buf)) {
-		RSS_WARN("api: refused a request with no system account");
+	char host[64];
+	int retry_sec = 1;
+
+	client_addr_str(&c->addr, host, sizeof(host));
+
+	switch (api_authenticate(c->recv_buf, host, &retry_sec)) {
+	case API_AUTH_OK:
+		break;
+	case API_AUTH_THROTTLED:
+		api_429(c, retry_sec);
+		return true;
+	case API_AUTH_NONE:
+	case API_AUTH_BAD:
+		/* Unlogged here. A request carrying no credentials is what
+		 * every browser sends first, and a line for each of those
+		 * buries the ones that mean something; the wrong-password case
+		 * has already logged itself, with the name that was tried. */
 		api_401(c);
 		return true;
 	}
