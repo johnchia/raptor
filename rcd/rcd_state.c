@@ -451,10 +451,29 @@ cJSON *rcd_cmd_state(rcd_state_t *st, const cJSON *root)
 	 * file as it is now, so there is nothing left for an apply to enact
 	 * and a flag saying otherwise would outlive the condition it describes.
 	 */
+	bool cleared = false;
 	for (int i = 0; i < RCD_D_COUNT; i++) {
-		if (st->stale_daemon[i] && !alive[i])
+		if (st->stale_daemon[i] && !alive[i]) {
 			rcd_stale_clear(st, (rcd_daemon_t)i);
+			cleared = true;
+		}
 	}
+
+	/*
+	 * Written out, not just dropped from memory. /run is where the drift
+	 * record lives across an rcd restart, so leaving the file saying what
+	 * this poll has just decided is over means the next rcd start reads
+	 * the drift back and offers to enact it -- against a daemon that read
+	 * the file on its own way up and is not behind at all.
+	 *
+	 * A read verb writing a file is worth saying out loud. What `state`
+	 * reports is drawn from who answered, and this is the same discovery
+	 * being recorded rather than a second one: the alternative is not a
+	 * `state` that changes nothing, it is a `state` whose answer disagrees
+	 * with the file it was derived from.
+	 */
+	if (cleared)
+		rcd_stale_save(st);
 
 	rcd_config_report_stale(st, resp);
 	rcd_guard_report(st, resp);

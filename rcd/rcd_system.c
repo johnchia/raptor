@@ -820,7 +820,7 @@ static int tz_set(const char *name)
 	return 0;
 }
 
-const rcd_provider_t rcd_provider_timezone = {tz_get, tz_set, NULL, false};
+const rcd_provider_t rcd_provider_timezone = {.get = tz_get, .set = tz_set};
 
 /* ------------------------------------------------------------------ */
 /* NTP server                                                          */
@@ -883,7 +883,7 @@ static int ntp_set(const char *host)
 	return 0;
 }
 
-const rcd_provider_t rcd_provider_ntp_server = {ntp_get, ntp_set, NULL, false};
+const rcd_provider_t rcd_provider_ntp_server = {.get = ntp_get, .set = ntp_set};
 
 /* ------------------------------------------------------------------ */
 /* Hostname                                                            */
@@ -900,6 +900,19 @@ const rcd_provider_t rcd_provider_ntp_server = {ntp_get, ntp_set, NULL, false};
  * the image it is about to flash.
  */
 
+/*
+ * No `stored` op, deliberately -- see rcd_provider_t and rcd_provider_net_dns,
+ * which has one for a fallback of exactly this shape.
+ *
+ * The difference is what a revert to "nothing was set" would mean. An unset
+ * name server is a camera that goes on asking DHCP, so emptying the store
+ * restores it. An unset hostname is not: the store cannot be emptied at all,
+ * so hiding the fallback from the snapshot would leave a renamed camera
+ * keeping the new name -- which is the client losing the camera, and the whole
+ * of what the guard is for. The kernel's name is also the camera's own, not a
+ * value borrowed from whichever network it is plugged into, so writing it back
+ * pins nothing that was not already true.
+ */
 static int hostname_get(char *out, size_t outsz)
 {
 	char name[128];
@@ -1033,4 +1046,5 @@ static int hostname_enact(void)
 	return 0;
 }
 
-const rcd_provider_t rcd_provider_hostname = {hostname_get, hostname_set, hostname_enact, false};
+const rcd_provider_t rcd_provider_hostname = {
+	.get = hostname_get, .set = hostname_set, .enact = hostname_enact};

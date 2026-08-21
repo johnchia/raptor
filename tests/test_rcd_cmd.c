@@ -30,6 +30,7 @@
 #include "../rcd/rcd_network.h"
 #include "../rcd/rcd_proto.h"
 #include "../rcd/rcd_schema.h"
+#include "../rcd/rcd_state.h"
 #include "../rcd/rcd_system.h"
 
 #include <sys/stat.h>
@@ -886,6 +887,235 @@ TEST a_second_change_inside_the_window_keeps_the_first_snapshot(void)
 }
 
 /*
+ * A revert that cannot finish must not forget what it was reverting to.
+ *
+ * The stores are on an overlay over NOR, and the reasons a write to one fails
+ * are mostly temporary: a filesystem that is momentarily full, an overlay that
+ * has not finished coming back. Clearing the snapshot on the first of those
+ * left the camera holding a setting nobody confirmed with no record of what it
+ * had before -- which is the one failure the guard exists to prevent, arriving
+ * by way of the guard itself.
+ */
+#define HOSTNAME_TMP RCD_SYSCONF_DIR "/hostname.tmp"
+#define GUARD_RECORD RCD_SYSCONF_DIR "/" RCD_GUARD_RECORD_NAME
+
+/*
+ * write_file() writes through <path>.tmp and renames, so a directory in that
+ * name makes the write fail. Chmod would not: the suite runs in a user
+ * namespace where it is root, and root is not stopped by a mode bit.
+ */
+static int block_hostname_writes(void)
+{
+	/* Defensively, in the same spirit as guard_ready(): a test that fails
+	 * partway through leaves this behind, and the next one skipping
+	 * because of it would hide the second failure behind the first. */
+	rmdir(HOSTNAME_TMP);
+	return mkdir(HOSTNAME_TMP, 0755) == 0;
+}
+
+static void unblock_hostname_writes(void)
+{
+	rmdir(HOSTNAME_TMP);
+}
+
+TEST a_revert_that_cannot_write_keeps_the_record_and_tries_again(void)
+{
+	rcd_state_t st;
+	char now[RCD_VAL_MAX];
+
+	if (!guard_ready(&st, "camera-before"))
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	ASSERT_EQ(0, guard_change(&st, "camera-after", 90));
+
+	if (!block_hostname_writes())
+		SKIPm("cannot make " HOSTNAME_TMP " refuse a write");
+
+	rcd_guard_tick(&st, GUARD_LATER);
+
+	/*
+	 * Everything the blocked pass has to say, read out before the block is
+	 * lifted. An assertion firing while the store is still unwritable
+	 * would leave it that way for every test after this one, and the
+	 * cascade of skips would bury the failure that caused it.
+	 */
+	int record_kept = access(GUARD_RECORD, F_OK) == 0;
+	int rearmed = rcd_guard_remaining(&st) > 0;
+	hostname_now(now, sizeof(now));
+	unblock_hostname_writes();
+
+	/* It did not go back. */
+	ASSERT_STR_EQ("camera-after", now);
+
+	/* So the snapshot is still on flash and the clock is running again.
+	 * Both of those were cleared unconditionally before this fix. */
+	ASSERTm("the record was cleared by a revert that did not happen", record_kept);
+	ASSERTm("nothing is going to try again", rearmed);
+
+	rcd_guard_tick(&st, GUARD_LATER);
+
+	ASSERT_STR_EQ("camera-before", hostname_now(now, sizeof(now)));
+	ASSERT(access(GUARD_RECORD, F_OK) != 0);
+	PASS();
+}
+
+/*
+ * And when it never lands, what stops is the retrying and not the guard.
+ *
+ * A record with no deadline beside it is what rcd reads as "armed, and the
+ * camera has rebooted since" -- so leaving the pair in that shape is what
+ * keeps power-cycling a recovery for somebody who has lost the camera
+ * entirely. It is the last thing that still works, and it costs one unlink to
+ * keep.
+ */
+TEST a_revert_that_never_lands_leaves_the_record_for_a_power_cycle(void)
+{
+	rcd_state_t st;
+	char now[RCD_VAL_MAX];
+
+	if (!guard_ready(&st, "camera-before"))
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	ASSERT_EQ(0, guard_change(&st, "camera-after", 90));
+
+	if (!block_hostname_writes())
+		SKIPm("cannot make " HOSTNAME_TMP " refuse a write");
+
+	/* Every attempt the guard allows itself. The cap is the guard's own
+	 * business; what is asserted is that there is one, because a revert
+	 * that can never succeed should not log until the camera is
+	 * rebooted. */
+	for (int i = 0; i < 16 && rcd_guard_remaining(&st) > 0; i++)
+		rcd_guard_tick(&st, GUARD_LATER);
+
+	/* Read out before the block is lifted, for the reason above. */
+	int still_armed = rcd_guard_remaining(&st) > 0;
+	int record_kept = access(GUARD_RECORD, F_OK) == 0;
+	int marker_gone = access(RCD_GUARD_ARMED_PATH, F_OK) != 0;
+	hostname_now(now, sizeof(now));
+	unblock_hostname_writes();
+
+	ASSERTm("it is still retrying after every attempt it allows itself", !still_armed);
+	ASSERT_STR_EQ("camera-after", now);
+
+	ASSERTm("nothing is left to put the camera back", record_kept);
+	ASSERTm("the deadline outlived the retrying", marker_gone);
+
+	/* Which is exactly the state a reboot is read from. */
+
+	rcd_state_t fresh;
+	memset(&fresh, 0, sizeof(fresh));
+	rcd_guard_load(&fresh);
+
+	ASSERT_STR_EQ("camera-before", hostname_now(now, sizeof(now)));
+	PASS();
+}
+
+/*
+ * An enact that failed leaves its key owed.
+ *
+ * The store holds the new address and the interface is still running the old
+ * one, which is precisely the drift `pending` exists to show. Forgetting it
+ * because an enact was attempted made the report say nothing was owed and the
+ * next `apply` a no-op -- so the camera stayed on the old address with
+ * everything claiming it had taken the new one.
+ */
+/*
+ * And `cancel` says which of those happened.
+ *
+ * "Reverted, nothing armed" is what a client goes away believing, so it has to
+ * be true. A cancel whose write failed leaves a retry behind it and the camera
+ * still on the settings the operator just asked to be rid of -- reporting that
+ * as done is the same class of lie as the record that was cleared.
+ */
+TEST a_cancel_that_could_not_write_says_so(void)
+{
+	rcd_state_t st;
+
+	if (!guard_ready(&st, "camera-before"))
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	ASSERT_EQ(0, guard_change(&st, "camera-after", 90));
+
+	if (!block_hostname_writes())
+		SKIPm("cannot make " HOSTNAME_TMP " refuse a write");
+
+	cJSON *r = rcd_cmd_cancel(&st, NULL);
+	int said_reverted = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "reverted"));
+	int said_armed = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "armed"));
+	cJSON_Delete(r);
+	unblock_hostname_writes();
+
+	ASSERTm("it reported a revert that did not happen", !said_reverted);
+	ASSERTm("it reported nothing armed while a retry is pending", said_armed);
+
+	/* And the retry still puts it back. */
+	rcd_guard_tick(&st, GUARD_LATER);
+
+	char now[RCD_VAL_MAX];
+	ASSERT_STR_EQ("camera-before", hostname_now(now, sizeof(now)));
+	PASS();
+}
+
+TEST an_enact_that_did_not_take_stays_owed(void)
+{
+	rcd_state_t st;
+	memset(&st, 0, sizeof(st));
+
+	rcd_stale_add(&st, "network", "address", RCD_D_COUNT);
+	ASSERT_EQ(1, st.stale_count);
+
+	/* What apply hands back when the interface would not come up. */
+	rcd_enact_done(&st, NULL, 0);
+	ASSERT_EQ(1, st.stale_count);
+
+	/* And what it hands back when it did. One enact settles every key of
+	 * the stanza it brought up, because they share the call. */
+	rcd_stale_add(&st, "network", "netmask", RCD_D_COUNT);
+	ASSERT_EQ(2, st.stale_count);
+
+	const rcd_provider_t *ok[1] = {&rcd_provider_net_address};
+	rcd_enact_done(&st, ok, 1);
+	ASSERT_EQ(0, st.stale_count);
+	PASS();
+}
+
+/*
+ * `state` writes out the drift it decides is over.
+ *
+ * A daemon that is not running is not running behind: it reads the file on its
+ * own way up. Dropping that from memory and leaving the /run record saying
+ * otherwise meant the next rcd start read the drift back and offered to enact
+ * it -- against a daemon that was never behind. `state` is polled constantly,
+ * so the file would have been wrong far more often than right.
+ */
+TEST state_writes_out_the_drift_it_clears(void)
+{
+	rcd_state_t st;
+	memset(&st, 0, sizeof(st));
+
+	rcd_stale_add(&st, "image", "brightness", RCD_D_RVD);
+	rcd_stale_save(&st);
+
+	rcd_state_t reloaded;
+	memset(&reloaded, 0, sizeof(reloaded));
+	rcd_stale_load(&reloaded);
+	if (reloaded.stale_count != 1)
+		SKIPm("no writable /run/rss -- run the suite under unshare -rm");
+
+	/* No daemon is running under the suite, so the poll finds rvd down. */
+	cJSON *r = rcd_cmd_state(&st, NULL);
+	ASSERT(r != NULL);
+	cJSON_Delete(r);
+	ASSERT_EQ(0, st.stale_count);
+
+	memset(&reloaded, 0, sizeof(reloaded));
+	rcd_stale_load(&reloaded);
+	ASSERT_EQ(0, reloaded.stale_count);
+	PASS();
+}
+
+/*
  * A staged change is not in force, so cancelling it is a file write and not an
  * outage -- and afterwards there must be nothing left for an apply to do. A
  * key still listed as drift here is a pending change the operator is invited
@@ -1120,6 +1350,57 @@ TEST clearing_an_address_removes_its_line(void)
 
 /* Every one of them is on the same clock, and none of them is live: a change
  * of address is applied, never typed into effect. */
+/*
+ * A snapshot records the store, not what the store falls back to.
+ *
+ * `dns` answers from /etc/resolv.conf when the interface stanza is silent,
+ * which is the right answer to an operator asking what the camera resolves
+ * with. It is the wrong thing to write back: a revert would put this network's
+ * DHCP resolver into the stanza as a setting, where it outlives the lease it
+ * came from and follows the camera onto every network it is moved to
+ * afterwards.
+ */
+TEST a_dns_snapshot_does_not_pin_what_dhcp_supplied(void)
+{
+	rcd_state_t st;
+	memset(&st, 0, sizeof(st));
+
+	if (!iface_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+	unlink(GUARD_RECORD);
+
+	/* A camera that has only ever used DHCP: nothing in the stanza -- the
+	 * shipped one iface_ready() lays down has no dns-nameserver line --
+	 * and a resolver the lease supplied. */
+	ASSERT_EQ(0, rcd_provider_net_dns.set(""));
+
+	FILE *f = fopen(RCD_SYSCONF_DIR "/resolv.conf", "w");
+	if (!f)
+		SKIPm("cannot write resolv.conf");
+	fputs("nameserver 10.9.9.9\n", f);
+	fclose(f);
+
+	/* The fallback is live, and it is what a client is told. */
+	char out[RCD_VAL_MAX] = "";
+	ASSERT_EQ(0, rcd_provider_net_dns.get(out, sizeof(out)));
+	ASSERT_STR_EQ("10.9.9.9", out);
+
+	/* The snapshot is told the truth instead. */
+	rcd_guard_hold(&st);
+
+	int found = 0;
+	for (int i = 0; i < st.guard_count; i++) {
+		if (strcmp(st.guard[i].section, "network") != 0 ||
+		    strcmp(st.guard[i].key, "dns") != 0)
+			continue;
+		found = 1;
+		ASSERTm("the snapshot recorded resolv.conf as a setting", !st.guard[i].had);
+	}
+	ASSERT_EQm("the dns key was not in the snapshot at all", 1, found);
+
+	unlink(GUARD_RECORD);
+	PASS();
+}
 TEST every_network_key_is_guarded_and_waits_for_apply(void)
 {
 	int seen = 0;
@@ -2142,6 +2423,12 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(an_rcd_restart_inside_the_window_keeps_it_armed);
 	RUN_TEST(a_second_change_inside_the_window_keeps_the_first_snapshot);
 	RUN_TEST(cancelling_a_staged_change_leaves_nothing_owed);
+	RUN_TEST(a_revert_that_cannot_write_keeps_the_record_and_tries_again);
+	RUN_TEST(a_revert_that_never_lands_leaves_the_record_for_a_power_cycle);
+	RUN_TEST(a_cancel_that_could_not_write_says_so);
+	RUN_TEST(an_enact_that_did_not_take_stays_owed);
+	RUN_TEST(state_writes_out_the_drift_it_clears);
+	RUN_TEST(a_dns_snapshot_does_not_pin_what_dhcp_supplied);
 	RUN_TEST(the_guard_reports_itself_only_while_it_is_armed);
 	RUN_TEST(an_address_is_four_octets_and_nothing_else);
 	RUN_TEST(the_interface_stanza_keeps_what_it_did_not_write);

@@ -96,6 +96,15 @@ struct rcd_state {
 	int guard_count;
 	uint64_t guard_deadline_ms; /* 0 = nothing armed */
 	int guard_window_sec;
+
+	/*
+	 * Reverts that did not fully land. A store that could not be written
+	 * back, or an interface that would not come up on the old stanza, is
+	 * retried rather than forgotten -- so this counts the attempts and
+	 * stops them, because a failure that will never clear should not log
+	 * forever. See rcd_guard.c.
+	 */
+	int guard_retries;
 };
 
 typedef struct rcd_state rcd_state_t;

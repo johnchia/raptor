@@ -108,6 +108,21 @@ static void armed_write(const rcd_state_t *st)
 /* Arming                                                              */
 /* ------------------------------------------------------------------ */
 
+/*
+ * What the store holds, which is not always what `get` answers. A provider
+ * that falls back elsewhere when its own store is silent publishes `stored`
+ * so the guard can tell the two apart -- rcd_provider_t says why that matters
+ * here and nowhere else.
+ *
+ * Both the snapshot and the comparison below go through this, because a
+ * snapshot taken one way and compared the other would find every such key
+ * changed and write the fallback back on the strength of it.
+ */
+static int guard_get(const rcd_provider_t *p, char *out, size_t outsz)
+{
+	return p->stored ? p->stored(out, outsz) : p->get(out, outsz);
+}
+
 static void snapshot(rcd_state_t *st)
 {
 	st->guard_count = 0;
@@ -125,7 +140,7 @@ static void snapshot(rcd_state_t *st)
 		memset(s, 0, sizeof(*s));
 		rss_strlcpy(s->section, k->section, sizeof(s->section));
 		rss_strlcpy(s->key, k->key, sizeof(s->key));
-		s->had = k->provider->get(s->prev, sizeof(s->prev)) == 0;
+		s->had = guard_get(k->provider, s->prev, sizeof(s->prev)) == 0;
 		if (!s->had)
 			s->prev[0] = '\0';
 	}
@@ -158,6 +173,7 @@ void rcd_guard_arm(rcd_state_t *st, int window_sec)
 		snapshot(st);
 
 	bool extend = st->guard_deadline_ms != 0;
+	st->guard_retries = 0; /* a fresh experiment, not a stuck revert */
 	st->guard_window_sec = window_sec;
 	st->guard_deadline_ms = now_ms() + (uint64_t)window_sec * 1000;
 
@@ -224,6 +240,7 @@ void rcd_guard_confirm(rcd_state_t *st)
 	st->guard_deadline_ms = 0;
 	st->guard_window_sec = 0;
 	st->guard_count = 0;
+	st->guard_retries = 0;
 	record_clear();
 	RSS_INFO("guard: confirmed");
 }
@@ -245,6 +262,57 @@ static void add_enact(const rcd_provider_t **list, int *count, const rcd_provide
 	list[(*count)++] = p;
 }
 
+/*
+ * A revert that did not fully land is retried, not forgotten.
+ *
+ * The reasons one fails are mostly the ones that pass: an overlay that has not
+ * finished coming back, a filesystem that is momentarily full, an interface
+ * that will not come up on the first attempt. Dropping the snapshot on the
+ * first of those would leave the camera on settings nobody confirmed with no
+ * record of what it had before -- the precise moment the guard exists for, and
+ * the one case where giving up is unrecoverable.
+ */
+#define RCD_GUARD_RETRY_MS 15000
+#define RCD_GUARD_RETRIES  4
+
+static void guard_retry(rcd_state_t *st, int failed)
+{
+	/* Whatever did go back is settled and no longer owed to an apply, so
+	 * the drift record is written even though the guard is not done. */
+	rcd_stale_save(st);
+
+	if (st->guard_retries < RCD_GUARD_RETRIES) {
+		st->guard_retries++;
+		st->guard_deadline_ms = now_ms() + RCD_GUARD_RETRY_MS;
+
+		/* The marker only. The snapshot on flash is unchanged and this
+		 * is a camera whose /etc is already refusing writes; rewriting
+		 * it every fifteen seconds would spend the flash on saying the
+		 * same thing. */
+		armed_write(st);
+		RSS_ERROR("guard: %d key(s) did not go back; trying again in %d s (attempt %d "
+			  "of %d)",
+			  failed, RCD_GUARD_RETRY_MS / 1000, st->guard_retries, RCD_GUARD_RETRIES);
+		return;
+	}
+
+	/*
+	 * Out of attempts. The record stays and the marker goes, which is the
+	 * pair rcd_guard_load reads as "armed, and the camera has rebooted
+	 * since" -- so power-cycling still puts the old settings back, exactly
+	 * as rcd_guard.h promises. What stops here is the retrying, not the
+	 * guard.
+	 */
+	RSS_ERROR("guard: %d key(s) still will not go back after %d attempts; the record is kept, "
+		  "so power-cycling the camera restores them",
+		  failed, RCD_GUARD_RETRIES);
+	st->guard_deadline_ms = 0;
+	st->guard_window_sec = 0;
+	st->guard_count = 0;
+	st->guard_retries = 0;
+	unlink(RCD_GUARD_ARMED_PATH);
+}
+
 void rcd_guard_revert(rcd_state_t *st, const char *why)
 {
 	if (!st->guard_deadline_ms && st->guard_count == 0)
@@ -262,6 +330,10 @@ void rcd_guard_revert(rcd_state_t *st, const char *why)
 	const rcd_provider_t *enacted[RCD_GUARD_MAX];
 	int enact_count = 0;
 
+	/* Anything that would not go back. Counted rather than noted, because
+	 * what happens next is the same whichever key it was. */
+	int failed = 0;
+
 	/*
 	 * Table order, which is the order they were taken in. Providers that
 	 * share a file are adjacent in the table for that reason: a stanza is
@@ -269,7 +341,9 @@ void rcd_guard_revert(rcd_state_t *st, const char *why)
 	 * coming back.
 	 */
 	for (int i = 0; i < st->guard_count; i++) {
-		const rcd_guard_snap_t *s = &st->guard[i];
+		/* Not const: a revert that writes a store marks it as owing the
+		 * enact that puts it back into force. */
+		rcd_guard_snap_t *s = &st->guard[i];
 		const rcd_key_t *k = rcd_key_find(s->section, s->key);
 		if (!k || !k->provider)
 			continue;
@@ -285,7 +359,7 @@ void rcd_guard_revert(rcd_state_t *st, const char *why)
 		 * that all still hold their old values is not an outage.
 		 */
 		char cur[RCD_VAL_MAX] = "";
-		bool has_cur = k->provider->get(cur, sizeof(cur)) == 0;
+		bool has_cur = guard_get(k->provider, cur, sizeof(cur)) == 0;
 
 		if ((!s->had && !has_cur) || (s->had && has_cur && strcmp(cur, s->prev) == 0)) {
 			/* Already what it was. Nothing to write, nothing to
@@ -294,6 +368,18 @@ void rcd_guard_revert(rcd_state_t *st, const char *why)
 			 * staged and then set back by hand is settled, and
 			 * leaving it in the drift list would offer to enact a
 			 * change that is no longer one. */
+
+			/*
+			 * Unless an earlier pass is what made it match and
+			 * could not then put it into force. That key is not
+			 * settled, it is halfway back -- and telling it apart
+			 * from one that never moved is the whole reason the
+			 * snapshot carries `owed_enact`, because re-enacting
+			 * the ones that never moved bounces every guarded
+			 * interface on the camera.
+			 */
+			if (s->owed_enact && k->provider->enact)
+				add_enact(enacted, &enact_count, k->provider, was_armed);
 			rcd_stale_forget(st, s->section, s->key);
 			continue;
 		}
@@ -310,11 +396,14 @@ void rcd_guard_revert(rcd_state_t *st, const char *why)
 				RSS_WARN("guard: [%s] %s cannot be emptied; it keeps the new "
 					 "value",
 					 s->section, s->key);
+				failed++;
 				continue;
 			}
 			RSS_INFO("guard: [%s] %s back to unset", s->section, s->key);
-			if (k->provider->enact)
+			if (k->provider->enact) {
+				s->owed_enact = true;
 				add_enact(enacted, &enact_count, k->provider, was_armed);
+			}
 			rcd_stale_forget(st, s->section, s->key);
 			continue;
 		}
@@ -322,6 +411,7 @@ void rcd_guard_revert(rcd_state_t *st, const char *why)
 		if (k->provider->set(s->prev) != 0) {
 			RSS_ERROR("guard: [%s] %s could not be put back to %s", s->section, s->key,
 				  s->prev);
+			failed++;
 			continue;
 		}
 		RSS_INFO("guard: [%s] %s back to %s", s->section, s->key, s->prev);
@@ -335,8 +425,10 @@ void rcd_guard_revert(rcd_state_t *st, const char *why)
 		 */
 		rcd_stale_forget(st, s->section, s->key);
 
-		if (k->provider->enact)
+		if (k->provider->enact) {
+			s->owed_enact = true;
 			add_enact(enacted, &enact_count, k->provider, was_armed);
+		}
 	}
 
 	/*
@@ -345,13 +437,32 @@ void rcd_guard_revert(rcd_state_t *st, const char *why)
 	 * has to see the whole restored stanza rather than half of one.
 	 */
 	for (int i = 0; i < enact_count; i++) {
-		if (enacted[i]->enact() != 0)
+		if (enacted[i]->enact() != 0) {
 			RSS_ERROR("guard: the old settings are back in the file but not in force");
+			failed++;
+			continue;
+		}
+
+		/* In force, so nothing is halfway back any more -- for every
+		 * key of the store, since one call is what they share. */
+		for (int j = 0; j < st->guard_count; j++) {
+			const rcd_key_t *k = rcd_key_find(st->guard[j].section, st->guard[j].key);
+			if (k && k->provider && k->provider->enact == enacted[i]->enact)
+				st->guard[j].owed_enact = false;
+		}
+	}
+
+	/* Stores back but not in force is still a camera on settings nobody
+	 * confirmed, so it is a failed revert and not a noisy success. */
+	if (failed) {
+		guard_retry(st, failed);
+		return;
 	}
 
 	st->guard_deadline_ms = 0;
 	st->guard_window_sec = 0;
 	st->guard_count = 0;
+	st->guard_retries = 0;
 	record_clear();
 	rcd_stale_save(st);
 }
@@ -509,10 +620,16 @@ cJSON *rcd_cmd_cancel(rcd_state_t *st, const cJSON *root)
 	bool was = rcd_guard_held(st);
 	rcd_guard_revert(st, "cancelled");
 
+	/* And whether it actually went back, which is not the same question.
+	 * A revert that could not write a store leaves a retry armed behind
+	 * it, and a client told "reverted, nothing armed" would go away
+	 * believing the camera is on the old settings while it is not. */
+	bool retrying = st->guard_deadline_ms != 0;
+
 	cJSON *r = rcd_ok();
 	if (!r)
 		return NULL;
-	cJSON_AddBoolToObject(r, "reverted", was);
-	cJSON_AddBoolToObject(r, "armed", false);
+	cJSON_AddBoolToObject(r, "reverted", was && !retrying);
+	cJSON_AddBoolToObject(r, "armed", retrying);
 	return r;
 }

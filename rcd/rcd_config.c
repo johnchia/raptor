@@ -155,12 +155,20 @@ int rcd_enact_owed(const rcd_state_t *st, const rcd_key_t **out, int max)
 	return n;
 }
 
-void rcd_enact_done(rcd_state_t *st)
+void rcd_enact_done(rcd_state_t *st, const rcd_provider_t *const *done, int n)
 {
 	int kept = 0;
 	for (int i = 0; i < st->stale_count; i++) {
 		const rcd_key_t *k = rcd_key_find(st->stale[i].section, st->stale[i].key);
-		if (k && k->provider && k->provider->enact)
+
+		/* By enact, not by provider: the five keys of one interface
+		 * are separate providers sharing one call, and that call
+		 * having succeeded settles all of them. */
+		bool enacted = false;
+		for (int j = 0; k && k->provider && k->provider->enact && j < n; j++)
+			enacted = enacted || done[j]->enact == k->provider->enact;
+
+		if (enacted)
 			continue;
 		st->stale[kept++] = st->stale[i];
 	}

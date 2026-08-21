@@ -475,6 +475,21 @@ static int dns_get(char *out, size_t outsz)
 	return ret;
 }
 
+/*
+ * The stored name server and nothing else, for the guard.
+ *
+ * The fallback above is the right answer to a client's question and the wrong
+ * one to put in a snapshot: on a camera that has always used DHCP the stanza
+ * is silent, and a revert that wrote resolv.conf's answer back into it would
+ * pin this network's router as the name server for every network the camera is
+ * ever moved to. Reverting to "nothing was set" is what actually restores it,
+ * because DHCP goes on supplying the answer by itself.
+ */
+static int dns_stored(char *out, size_t outsz)
+{
+	return stanza_get("dns-nameserver", out, outsz) == 0 && out[0] ? 0 : -1;
+}
+
 static int dns_set(const char *v)
 {
 	return stanza_set("dns-nameserver", v);
@@ -482,8 +497,19 @@ static int dns_set(const char *v)
 
 /* One enact behind all five: they write one file, and it is brought into
  * force once however many of them a request carried. */
-const rcd_provider_t rcd_provider_net_dhcp = {dhcp_get, dhcp_set, net_enact, true};
-const rcd_provider_t rcd_provider_net_address = {addr_get, addr_set, net_enact, true};
-const rcd_provider_t rcd_provider_net_netmask = {mask_get, mask_set, net_enact, true};
-const rcd_provider_t rcd_provider_net_gateway = {gw_get, gw_set, net_enact, true};
-const rcd_provider_t rcd_provider_net_dns = {dns_get, dns_set, net_enact, true};
+/* Named rather than positional: the struct carries two optional function
+ * pointers now, and a list that leans on their order is one insertion away
+ * from wiring a store's reader to somebody else's enact. */
+const rcd_provider_t rcd_provider_net_dhcp = {
+	.get = dhcp_get, .set = dhcp_set, .enact = net_enact, .resettable = true};
+const rcd_provider_t rcd_provider_net_address = {
+	.get = addr_get, .set = addr_set, .enact = net_enact, .resettable = true};
+const rcd_provider_t rcd_provider_net_netmask = {
+	.get = mask_get, .set = mask_set, .enact = net_enact, .resettable = true};
+const rcd_provider_t rcd_provider_net_gateway = {
+	.get = gw_get, .set = gw_set, .enact = net_enact, .resettable = true};
+const rcd_provider_t rcd_provider_net_dns = {.get = dns_get,
+					     .set = dns_set,
+					     .enact = net_enact,
+					     .resettable = true,
+					     .stored = dns_stored};

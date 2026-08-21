@@ -84,6 +84,16 @@ typedef struct {
 	char prev[RCD_VAL_MAX];
 	bool had; /* the store held a value; otherwise there is nothing to go
 		   * back to and the new one stands */
+
+	/*
+	 * This key's store has been put back and is not yet in force. Set by
+	 * a revert that wrote it, cleared when the enact behind it succeeds --
+	 * so a revert that is retried knows which keys still owe an enact and
+	 * which merely never moved. Without it a retry either re-enacts every
+	 * guarded stanza, which is an outage the retry invented, or re-enacts
+	 * none, which is a retry that retries nothing.
+	 */
+	bool owed_enact;
 } rcd_guard_snap_t;
 
 /*

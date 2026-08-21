@@ -421,6 +421,12 @@ static void enact_system(rcd_state_t *st, cJSON *results)
 	const rcd_provider_t *done[RCD_STALE_MAX];
 	int done_count = 0;
 
+	/* The ones that actually came into force, which is a shorter list
+	 * whenever anything went wrong -- and the only one the drift record
+	 * may be cleared against. */
+	const rcd_provider_t *ok[RCD_STALE_MAX];
+	int ok_count = 0;
+
 	for (int i = 0; i < n; i++) {
 		const rcd_provider_t *p = owed[i]->provider;
 		bool seen = false;
@@ -431,7 +437,9 @@ static void enact_system(rcd_state_t *st, cJSON *results)
 		done[done_count++] = p;
 
 		int rc = p->enact();
-		if (rc != 0) {
+		if (rc == 0) {
+			ok[ok_count++] = p;
+		} else {
 			char msg[192];
 			snprintf(msg, sizeof(msg),
 				 "[%s] could not be put into force; it is stored but not in "
@@ -450,7 +458,7 @@ static void enact_system(rcd_state_t *st, cJSON *results)
 		cJSON_AddItemToArray(results, o);
 	}
 
-	rcd_enact_done(st);
+	rcd_enact_done(st, ok, ok_count);
 }
 
 static cJSON *do_restarts(rcd_state_t *st, const cJSON *root, bool default_stale)

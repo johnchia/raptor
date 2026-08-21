@@ -182,6 +182,23 @@ typedef struct rcd_provider {
 	 * whichever read site asks for it.
 	 */
 	bool resettable;
+
+	/*
+	 * The store on its own, for a `get` that answers from somewhere else
+	 * when the store is silent. Optional, and only the guard uses it.
+	 *
+	 * A `get` is free to fall back -- "what is this camera resolving
+	 * with" is a better answer than an empty box, and it is what an
+	 * operator is asking. A snapshot is not: it is written back on a
+	 * revert, so a fallback captured as `prev` becomes a setting nobody
+	 * chose, pinned in a store that had no opinion and outliving the
+	 * source it was read from. The guard needs to know the store held
+	 * nothing, so that putting it back means emptying it again.
+	 *
+	 * Providers whose `get` reads only their own store leave this NULL
+	 * and the guard uses `get`.
+	 */
+	int (*stored)(char *out, size_t outsz);
 } rcd_provider_t;
 
 typedef struct rcd_key {

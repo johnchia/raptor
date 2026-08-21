@@ -104,10 +104,17 @@ void rcd_config_report_stale(const struct rcd_state *st, cJSON *out);
  * that an interface is still running on the old address.
  *
  * `rcd_enact_owed` fills `out` with them and returns how many; `rcd_enact_done`
- * forgets them, and is called only for the ones that were actually enacted.
+ * is handed the providers whose enact returned 0 and forgets only the keys
+ * behind those.
+ *
+ * The list is the argument rather than something to be assumed, because a key
+ * whose enact failed is still owed and is the one it matters most to keep: the
+ * store says the new address, the interface is still running the old one, and
+ * a `pending` that reported nothing would make the next apply a no-op over a
+ * camera that never took the change.
  */
 int rcd_enact_owed(const struct rcd_state *st, const struct rcd_key **out, int max);
-void rcd_enact_done(struct rcd_state *st);
+void rcd_enact_done(struct rcd_state *st, const struct rcd_provider *const *done, int n);
 
 /* Whether a deferred save has fallen due, and the write itself. `flush` is
  * also called at shutdown, so a change made moments before a stop is kept. */
