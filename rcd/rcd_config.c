@@ -810,6 +810,48 @@ static cJSON *section_from_daemon(const char *section)
 	return keys;
 }
 
+/*
+ * What each section's daemon said, for the length of one request.
+ *
+ * `section` is the table's own string rather than a copy: the table outlives
+ * every request, and the entries being compared came out of it.
+ *
+ * A section whose daemon said nothing is cached as nothing, deliberately. The
+ * expensive case is a daemon that is not answering, and re-asking it once per
+ * key is exactly what this exists to stop.
+ */
+typedef struct {
+	const char *section;
+	cJSON *live; /* owned */
+} live_cache_t;
+
+static cJSON *live_for(live_cache_t *cache, int *count, const char *section)
+{
+	for (int i = 0; i < *count; i++) {
+		if (strcmp(cache[i].section, section) == 0)
+			return cache[i].live;
+	}
+
+	/*
+	 * Unreachable: the table has fewer sections than the cache has room
+	 * for, and a test asserts it. Answering without the daemon's values
+	 * rather than asking uncached, because falling back to the thing this
+	 * function exists to prevent is not a fallback.
+	 */
+	if (*count >= RCD_LIVE_MAX)
+		return NULL;
+
+	cache[*count].section = section;
+	cache[*count].live = section_from_daemon(section);
+	return cache[(*count)++].live;
+}
+
+static void live_cache_free(live_cache_t *cache, int count)
+{
+	for (int i = 0; i < count; i++)
+		cJSON_Delete(cache[i].live);
+}
+
 cJSON *rcd_cmd_get(rcd_state_t *st, const cJSON *root)
 {
 	const cJSON *sec = cJSON_GetObjectItemCaseSensitive(root, "section");
@@ -853,9 +895,33 @@ cJSON *rcd_cmd_get(rcd_state_t *st, const cJSON *root)
 		}
 	}
 
+	/*
+	 * Named keys, which is the other half of the same trip.
+	 *
+	 * The comment above section_from_daemon says one round trip per
+	 * section rather than per key, and until this cache it was true only
+	 * of the branch above: naming forty keys of one section asked rvd for
+	 * that section forty times, and nothing noticed because a healthy
+	 * daemon answers in well under a millisecond.
+	 *
+	 * A daemon that has stopped answering is where it stops being
+	 * invisible, and the cap below is the other half of that -- see
+	 * RCD_GETS_MAX.
+	 */
+	live_cache_t cache[RCD_LIVE_MAX];
+	int cached = 0;
+	int asked = 0;
+
 	const cJSON *ke = NULL;
 	cJSON_ArrayForEach(ke, keys)
 	{
+		if (++asked > RCD_GETS_MAX) {
+			live_cache_free(cache, cached);
+			cJSON_Delete(resp);
+			rss_config_free(file);
+			return rcd_err(RCD_E_TOOMANY, "too many keys in one request");
+		}
+
 		const cJSON *s = cJSON_GetObjectItemCaseSensitive(ke, "section");
 		const cJSON *n = cJSON_GetObjectItemCaseSensitive(ke, "key");
 		if (!cJSON_IsString(s) || !cJSON_IsString(n))
@@ -865,11 +931,10 @@ cJSON *rcd_cmd_get(rcd_state_t *st, const cJSON *root)
 		if (!k)
 			continue;
 
-		cJSON *live = section_from_daemon(k->section);
-		emit_value(out, k, file, live);
-		cJSON_Delete(live);
+		emit_value(out, k, file, live_for(cache, &cached, k->section));
 	}
 
+	live_cache_free(cache, cached);
 	rss_config_free(file);
 	return resp;
 }

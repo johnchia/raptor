@@ -33,6 +33,10 @@
 #include "../rcd/rcd_state.h"
 #include "../rcd/rcd_system.h"
 
+#include <poll.h>
+#include <pthread.h>
+#include <sys/un.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -1112,6 +1116,256 @@ TEST state_writes_out_the_drift_it_clears(void)
 	memset(&reloaded, 0, sizeof(reloaded));
 	rcd_stale_load(&reloaded);
 	ASSERT_EQ(0, reloaded.stale_count);
+	PASS();
+}
+
+/* ------------------------------------------------------------------ */
+/* get: one round trip per section                                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A stand-in for a daemon, which is the only way to count what `get` asks it.
+ *
+ * The property under test is how many times rcd opens rvd's control socket to
+ * answer one request, and nothing in the reply decides that -- so this accepts,
+ * counts, answers the shortest valid thing, and closes.
+ */
+typedef struct {
+	int fd;
+	int conns;
+	pthread_t tid;
+	bool stop;
+} fake_daemon_t;
+
+static void *fake_daemon_run(void *arg)
+{
+	fake_daemon_t *d = arg;
+	static const char reply[] = "{\"status\":\"ok\",\"keys\":{}}";
+
+	while (!d->stop) {
+		struct pollfd pfd = {.fd = d->fd, .events = POLLIN};
+
+		if (poll(&pfd, 1, 50) <= 0)
+			continue;
+
+		int c = accept(d->fd, NULL, NULL);
+
+		if (c < 0)
+			continue;
+		d->conns++;
+
+		/* Read the request off the wire and answer it: two bytes of
+		 * length, then the body, which is what rss_ctrl speaks. */
+		uint8_t hdr[2];
+
+		if (read(c, hdr, 2) == 2) {
+			size_t want = ((size_t)hdr[0] << 8) | hdr[1];
+			char sink[1024];
+
+			while (want > 0) {
+				ssize_t n =
+					read(c, sink, want > sizeof(sink) ? sizeof(sink) : want);
+
+				if (n <= 0)
+					break;
+				want -= (size_t)n;
+			}
+		}
+
+		size_t rlen = strlen(reply);
+		uint8_t out[2] = {(uint8_t)(rlen >> 8), (uint8_t)(rlen & 0xff)};
+
+		if (write(c, out, 2) == 2)
+			(void)!write(c, reply, rlen);
+		close(c);
+	}
+	return NULL;
+}
+
+static bool fake_daemon_start(fake_daemon_t *d, const char *name)
+{
+	char path[128];
+
+	memset(d, 0, sizeof(*d));
+	mkdir(RSS_RUN_DIR, 0755);
+	snprintf(path, sizeof(path), RSS_SOCK_FMT, name);
+	unlink(path);
+
+	d->fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (d->fd < 0)
+		return false;
+
+	struct sockaddr_un a;
+
+	memset(&a, 0, sizeof(a));
+	a.sun_family = AF_UNIX;
+	rss_strlcpy(a.sun_path, path, sizeof(a.sun_path));
+
+	if (bind(d->fd, (struct sockaddr *)&a, sizeof(a)) < 0 || listen(d->fd, 5) < 0) {
+		close(d->fd);
+		return false;
+	}
+	return pthread_create(&d->tid, NULL, fake_daemon_run, d) == 0;
+}
+
+static void fake_daemon_stop(fake_daemon_t *d, const char *name)
+{
+	char path[128];
+
+	d->stop = true;
+	pthread_join(d->tid, NULL);
+	close(d->fd);
+	snprintf(path, sizeof(path), RSS_SOCK_FMT, name);
+	unlink(path);
+}
+
+/* A `get` naming `n` copies of one key. */
+static cJSON *get_naming(const char *section, const char *key, int n)
+{
+	cJSON *root = cJSON_CreateObject();
+	cJSON *arr = cJSON_AddArrayToObject(root, "keys");
+
+	for (int i = 0; i < n; i++) {
+		cJSON *e = cJSON_CreateObject();
+
+		cJSON_AddStringToObject(e, "section", section);
+		cJSON_AddStringToObject(e, "key", key);
+		cJSON_AddItemToArray(arr, e);
+	}
+	return root;
+}
+
+/*
+ * The comment over section_from_daemon has always said one round trip per
+ * section rather than per key. It was true of a request naming a section and
+ * false of one naming keys, which asked the daemon again for every key -- and
+ * a healthy daemon answers in a fraction of a millisecond, so nothing showed
+ * it. A daemon that has stopped answering is where the difference lands, at a
+ * control-socket timeout each.
+ */
+TEST get_asks_a_daemon_once_however_many_keys_name_its_section(void)
+{
+	fake_daemon_t d;
+	rcd_state_t st;
+
+	memset(&st, 0, sizeof(st));
+	if (!fake_daemon_start(&d, "rvd"))
+		SKIPm("cannot listen on " RSS_RUN_DIR " -- run the suite under unshare -rm");
+
+	cJSON *req = get_naming("image", "brightness", 20);
+	cJSON *r = rcd_cmd_get(&st, req);
+
+	cJSON_Delete(req);
+	ASSERT(r != NULL);
+	cJSON_Delete(r);
+
+	int conns = d.conns;
+
+	fake_daemon_stop(&d, "rvd");
+	ASSERT_EQm("rvd was asked once per key", 1, conns);
+	PASS();
+}
+
+TEST get_asks_once_per_distinct_section(void)
+{
+	fake_daemon_t d;
+	rcd_state_t st;
+
+	memset(&st, 0, sizeof(st));
+	if (!fake_daemon_start(&d, "rvd"))
+		SKIPm("cannot listen on " RSS_RUN_DIR " -- run the suite under unshare -rm");
+
+	/* Two sections, both read by rvd, named five times each. Caching by
+	 * section rather than by daemon is deliberate: the request rcd sends
+	 * names the section, so two sections are two questions. */
+	cJSON *req = cJSON_CreateObject();
+	cJSON *arr = cJSON_AddArrayToObject(req, "keys");
+
+	for (int i = 0; i < 5; i++) {
+		const char *secs[] = {"image", "jpeg"};
+		const char *keys[] = {"brightness", "quality"};
+
+		for (int j = 0; j < 2; j++) {
+			cJSON *e = cJSON_CreateObject();
+
+			cJSON_AddStringToObject(e, "section", secs[j]);
+			cJSON_AddStringToObject(e, "key", keys[j]);
+			cJSON_AddItemToArray(arr, e);
+		}
+	}
+
+	cJSON *r = rcd_cmd_get(&st, req);
+
+	cJSON_Delete(req);
+	ASSERT(r != NULL);
+	cJSON_Delete(r);
+
+	int conns = d.conns;
+
+	fake_daemon_stop(&d, "rvd");
+	ASSERT_EQm("one round trip per key, not per section", 2, conns);
+	PASS();
+}
+
+/*
+ * And a cap, because the cache bounds the round trips by the number of
+ * sections but not the work: what a request asks for is work rcd's single
+ * serve loop does before it answers anybody else.
+ */
+TEST get_refuses_more_keys_than_a_request_may_carry(void)
+{
+	rcd_state_t st;
+
+	memset(&st, 0, sizeof(st));
+
+	cJSON *req = get_naming("image", "brightness", RCD_GETS_MAX + 1);
+	cJSON *r = rcd_cmd_get(&st, req);
+
+	cJSON_Delete(req);
+	ASSERT(r != NULL);
+
+	const cJSON *code = cJSON_GetObjectItemCaseSensitive(r, "code");
+
+	ASSERT(cJSON_IsString(code));
+	ASSERT_STR_EQ(RCD_E_TOOMANY, code->valuestring);
+	cJSON_Delete(r);
+
+	/* And the one below it is answered rather than refused, so the cap is
+	 * a limit and not an off-by-one. */
+	req = get_naming("image", "brightness", RCD_GETS_MAX);
+	r = rcd_cmd_get(&st, req);
+	cJSON_Delete(req);
+	ASSERT(r != NULL);
+	code = cJSON_GetObjectItemCaseSensitive(r, "code");
+	ASSERT_FALSEm("the cap refused a request at the limit", cJSON_IsString(code));
+	cJSON_Delete(r);
+	PASS();
+}
+
+/*
+ * The cache is sized past the table rather than checked at runtime, so this is
+ * what makes that safe. A section added to the table without a thought for
+ * this file fails here rather than quietly losing its live values.
+ */
+TEST the_live_cache_holds_every_section_the_table_has(void)
+{
+	const char *seen[RCD_LIVE_MAX * 4];
+	int n = 0;
+
+	for (int i = 0; rcd_key_at(i); i++) {
+		const rcd_key_t *k = rcd_key_at(i);
+		bool have = false;
+
+		for (int j = 0; j < n; j++)
+			have = have || strcmp(seen[j], k->section) == 0;
+		if (have)
+			continue;
+		ASSERT(n < (int)(sizeof(seen) / sizeof(seen[0])));
+		seen[n++] = k->section;
+	}
+
+	ASSERT(n > 0);
+	ASSERT_EQm("more sections than the get cache can hold", true, n <= RCD_LIVE_MAX);
 	PASS();
 }
 
@@ -2458,6 +2712,10 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(exposure_compensation_goes_both_ways);
 	RUN_TEST(a_knob_left_on_auto_reads_back_as_auto);
 	RUN_TEST(refuses_more_edits_than_a_request_may_carry);
+	RUN_TEST(get_asks_a_daemon_once_however_many_keys_name_its_section);
+	RUN_TEST(get_asks_once_per_distinct_section);
+	RUN_TEST(get_refuses_more_keys_than_a_request_may_carry);
+	RUN_TEST(the_live_cache_holds_every_section_the_table_has);
 
 	RUN_TEST(the_wait_budget_is_wall_time_not_a_count_of_sleeps);
 	RUN_TEST(the_wait_reports_the_time_it_measured);

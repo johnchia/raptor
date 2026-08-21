@@ -27,6 +27,29 @@ struct rcd_state;
 #define RCD_EDITS_MAX 32
 
 /*
+ * And the same for reading. `get` names keys as `set` does, and the count is
+ * capped for the same reason: what a request asks for is work rcd's single
+ * serve loop does before it answers anything else.
+ *
+ * The cost per key is a fraction of a millisecond while every daemon is
+ * answering, which is why this went unnoticed. Against one that has stopped --
+ * running, listening, not accepting -- it is a control-socket timeout each,
+ * and the request size alone would otherwise allow a couple of hundred of
+ * them in one message.
+ *
+ * Generous rather than tight: the console asks by section and never uses this
+ * form at all, so the number only has to be past what any client plausibly
+ * wants at once.
+ */
+#define RCD_GETS_MAX 64
+
+/*
+ * Sections one `get` may hold answers for. Larger than the table has, which a
+ * test asserts -- so the lookup never has to decide what to do when full.
+ */
+#define RCD_LIVE_MAX 32
+
+/*
  * How long a burst of live edits may go unsaved.
  *
  * Only the flash write is deferred, never the effect: a live key is already in
