@@ -53,6 +53,63 @@ static bool daemon_ready(const char *daemon)
 	return strcmp(daemon, "rvd") == 0 ? rvd_pipeline_up() : rcd_answers(daemon);
 }
 
+static uint64_t now_ms(void)
+{
+	return (uint64_t)(rss_timestamp_us() / 1000);
+}
+
+/*
+ * Poll until `probe` says yes or the budget is spent.
+ *
+ * Against a clock, not against a count of sleeps. The count is what this used
+ * to do -- `for (waited = 0; waited < BUDGET; waited += POLL_STEP)` -- and it
+ * charged the budget only for the sleeping, while each iteration also spent
+ * however long the probe took. A probe here is an IPC round trip with a
+ * timeout: RCD_PROBE_TIMEOUT_MS for a liveness check, RCD_CTRL_TIMEOUT_MS for
+ * rvd's status. So a daemon that was listening but not answering cost 2.2 s an
+ * iteration against a 0.2 s charge, and UP_WAIT_MS of 25 s took 125 iterations
+ * and about 275 s -- eleven times the number in the message it then printed.
+ *
+ * That is not just an inaccurate log line. rcd's serve loop is single-threaded
+ * and synchronous, so for as long as this runs the daemon answers nothing:
+ * rcd_guard_tick does not run, and an armed network guard cannot revert on
+ * time. A 90-second guard window and a four-minute wait is a camera that
+ * strands itself at the exact moment the guard exists to prevent. Bounding the
+ * wait to what it claims is what keeps the guard's promise true.
+ *
+ * `waited_ms` is the measured elapsed time, so callers report what actually
+ * happened rather than the constant they were budgeted. The budget bounds when
+ * a probe may *start*, so the real ceiling is one probe timeout beyond it --
+ * there is no way to abandon a call already in flight, and pretending
+ * otherwise is how the old arithmetic went wrong in the first place.
+ *
+ * Not static so the budget can be tested against a probe that is slow rather
+ * than instant, which is the only shape in which the bug was visible.
+ */
+bool rcd_wait_until(bool (*probe)(const char *), const char *arg, unsigned int budget_ms,
+		    unsigned int *waited_ms)
+{
+	uint64_t start = now_ms();
+	uint64_t deadline = start + budget_ms;
+	bool got = false;
+
+	for (;;) {
+		got = probe(arg);
+		if (got || now_ms() >= deadline)
+			break;
+		usleep(POLL_STEP_MS * 1000);
+	}
+
+	if (waited_ms)
+		*waited_ms = (unsigned int)(now_ms() - start);
+	return got;
+}
+
+static bool stopped_answering(const char *daemon)
+{
+	return !rcd_answers(daemon);
+}
+
 /*
  * Wait for the socket to stop answering before waiting for it to come back.
  * A daemon restarts by re-execing itself, so without this the poll below would
@@ -60,22 +117,17 @@ static bool daemon_ready(const char *daemon)
  */
 static void wait_down(const char *daemon)
 {
-	for (int waited = 0; waited < DOWN_WAIT_MS; waited += POLL_STEP_MS) {
-		if (!rcd_answers(daemon))
-			return;
-		usleep(POLL_STEP_MS * 1000);
-	}
-	RSS_WARN("apply: %s still answering after %d ms, proceeding anyway", daemon, DOWN_WAIT_MS);
+	unsigned int waited = 0;
+
+	if (rcd_wait_until(stopped_answering, daemon, DOWN_WAIT_MS, &waited))
+		return;
+
+	RSS_WARN("apply: %s still answering after %u ms, proceeding anyway", daemon, waited);
 }
 
-static bool wait_up(const char *daemon)
+static bool wait_up(const char *daemon, unsigned int *waited_ms)
 {
-	for (int waited = 0; waited < UP_WAIT_MS; waited += POLL_STEP_MS) {
-		if (daemon_ready(daemon))
-			return true;
-		usleep(POLL_STEP_MS * 1000);
-	}
-	return false;
+	return rcd_wait_until(daemon_ready, daemon, UP_WAIT_MS, waited_ms);
 }
 
 /* ------------------------------------------------------------------ */
@@ -152,8 +204,13 @@ static const char *restart_plain(rcd_state_t *st, const char *daemon, char *msg,
 	}
 
 	wait_down(daemon);
-	if (!wait_up(daemon)) {
-		snprintf(msg, msgsz, "%s did not come back within %d s", daemon, UP_WAIT_MS / 1000);
+
+	unsigned int waited = 0;
+	if (!wait_up(daemon, &waited)) {
+		/* The measured wait, not the budget: they used to be the same
+		 * number and were not the same quantity. */
+		snprintf(msg, msgsz, "%s did not come back within %u s", daemon,
+			 (waited + 999) / 1000);
 		note_error(st, msg);
 		return msg;
 	}
@@ -171,10 +228,11 @@ static const char *restart_rvd(rcd_state_t *st, char *msg, size_t msgsz)
 	quiesce_t q;
 	quiesce_rad(&q);
 
+	unsigned int waited = 0;
 	bool ok = rcd_ask_ok("rvd", "{\"cmd\":\"restart\"}");
 	if (ok) {
 		wait_down("rvd");
-		ok = wait_up("rvd");
+		ok = wait_up("rvd", &waited);
 	}
 
 	/*
@@ -187,7 +245,7 @@ static const char *restart_rvd(rcd_state_t *st, char *msg, size_t msgsz)
 	resume_rad(&q, audio_err, sizeof(audio_err));
 
 	if (!ok) {
-		snprintf(msg, msgsz, "rvd did not come back within %d s", UP_WAIT_MS / 1000);
+		snprintf(msg, msgsz, "rvd did not come back within %u s", (waited + 999) / 1000);
 		note_error(st, msg);
 	} else {
 		RSS_INFO("apply: rvd restarted");
@@ -397,6 +455,22 @@ static void enact_system(rcd_state_t *st, cJSON *results)
 
 static cJSON *do_restarts(rcd_state_t *st, const cJSON *root, bool default_stale)
 {
+	/*
+	 * Unreachable today, and kept deliberately.
+	 *
+	 * st->applying is raised and lowered inside one synchronous call, and
+	 * rcd's serve loop is what dispatches here -- so the loop is somewhere
+	 * inside this function for the whole time the flag is up, and cannot be
+	 * dispatching a second apply. The same goes for the "applying" field
+	 * `pending` publishes: every observer sees false.
+	 *
+	 * It stays because it is the guard an asynchronous apply would need,
+	 * and an asynchronous apply is the natural answer to what is left of
+	 * this: rcd_wait_until now bounds the wait to the budget it prints, but
+	 * bounded is not the same as concurrent, and the daemon still answers
+	 * nothing for up to UP_WAIT_MS per restarted daemon. Deleting this as
+	 * dead code would remove the seatbelt before the crash it is for.
+	 */
 	if (st->applying)
 		return rcd_err(RCD_E_BUSY, "an apply is already running");
 

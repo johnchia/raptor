@@ -24,6 +24,7 @@
 
 #include "greatest.h"
 #include "../rcd/rcd.h"
+#include "../rcd/rcd_apply.h"
 #include "../rcd/rcd_config.h"
 #include "../rcd/rcd_guard.h"
 #include "../rcd/rcd_network.h"
@@ -1932,6 +1933,174 @@ TEST resetting_the_network_puts_the_shipped_stanza_back(void)
 	PASS();
 }
 
+/* ================================================================
+ * Waiting for a daemon to come back
+ * ================================================================ */
+
+/*
+ * A probe that is slow rather than instant, which is the only shape in which
+ * the bug these tests exist for was visible.
+ *
+ * `wait_probe_ms` is what one call costs -- standing in for the IPC round trip
+ * a real probe makes, which blocks for RCD_PROBE_TIMEOUT_MS or, for rvd's
+ * status, RCD_CTRL_TIMEOUT_MS whenever the daemon is listening but not
+ * answering. That is the state an apply is most likely to hit, since it is what
+ * a daemon mid-restart looks like.
+ */
+static int wait_probe_ms;
+static int wait_probe_calls;
+static int wait_probe_true_after;
+
+static bool slow_probe(const char *arg)
+{
+	(void)arg;
+	if (wait_probe_ms > 0)
+		usleep((useconds_t)wait_probe_ms * 1000);
+	return ++wait_probe_calls >= wait_probe_true_after;
+}
+
+static void wait_probe_reset(int cost_ms, int true_after)
+{
+	wait_probe_ms = cost_ms;
+	wait_probe_calls = 0;
+	wait_probe_true_after = true_after;
+}
+
+static unsigned int elapsed_ms_of(void (*run)(void))
+{
+	int64_t t0 = rss_timestamp_us();
+	run();
+	return (unsigned int)((rss_timestamp_us() - t0) / 1000);
+}
+
+static bool wait_result;
+static unsigned int wait_reported;
+
+static void run_never_ready(void)
+{
+	wait_result = rcd_wait_until(slow_probe, "rvd", 300, &wait_reported);
+}
+
+/* A budget deliberately smaller than one probe, so the measured time and the
+ * budget are far apart and cannot be confused for one another. */
+static void run_probe_outlasts_budget(void)
+{
+	wait_result = rcd_wait_until(slow_probe, "rvd", 200, &wait_reported);
+}
+
+/*
+ * The budget is wall time, not a count of sleeps.
+ *
+ * It used to be the count: `for (waited = 0; waited < BUDGET; waited +=
+ * POLL_STEP)`, charging the budget for the sleeping only while each iteration
+ * also spent however long the probe took. With POLL_STEP at 200 ms and rvd's
+ * status probe blocking for 2000, a 25 s budget bought 125 iterations and ran
+ * for about 275 s -- and rcd's serve loop is synchronous, so it answered
+ * nothing for those four minutes, guard ticks included.
+ *
+ * The numbers here are that arithmetic in miniature: a 300 ms budget, a 300 ms
+ * probe and the real 200 ms step. Counting sleeps gives two iterations and
+ * about 1000 ms; against a clock it is one probe and about 300. The bound
+ * below sits between the two, well clear of either.
+ */
+TEST the_wait_budget_is_wall_time_not_a_count_of_sleeps(void)
+{
+	wait_probe_reset(300, 1000000); /* never ready */
+
+	unsigned int real = elapsed_ms_of(run_never_ready);
+
+	ASSERT_FALSE(wait_result);
+	ASSERT(real < 700);
+	/* One probe, then the deadline is already spent. Counting sleeps would
+	 * have taken two. */
+	ASSERT_EQ(1, wait_probe_calls);
+	PASS();
+}
+
+/*
+ * And the caller is told what it actually waited, not what it was budgeted.
+ *
+ * The two used to be the same number -- the failure message printed
+ * UP_WAIT_MS / 1000 whatever had happened -- which is how a 275 s wait reported
+ * itself as 25 s. They were never the same quantity.
+ */
+TEST the_wait_reports_the_time_it_measured(void)
+{
+	/*
+	 * A 500 ms probe against a 200 ms budget, which is the real shape of
+	 * this: rvd's status probe blocks for RCD_CTRL_TIMEOUT_MS, far longer
+	 * than the step the loop is paced by. One probe runs, the budget is
+	 * already spent when it returns, and the honest answer is about 500 --
+	 * a number the budget cannot produce, which is the point. Reporting the
+	 * constant would say 200.
+	 */
+	wait_probe_reset(500, 1000000);
+
+	unsigned int real = elapsed_ms_of(run_probe_outlasts_budget);
+
+	ASSERT_FALSE(wait_result);
+	ASSERT_EQ(1, wait_probe_calls);
+	ASSERT(wait_reported >= 400);
+	ASSERT(wait_reported < 900);
+
+	/*
+	 * And it also documents the ceiling: a budget bounds when a probe may
+	 * start, not when one already in flight must return, so the wait can
+	 * exceed its budget by one probe. There is no way to abandon a call
+	 * mid-flight, and the arithmetic this replaced went wrong by pretending
+	 * otherwise.
+	 */
+	ASSERT(real > 200);
+	PASS();
+}
+
+static void run_ready_second_try(void)
+{
+	wait_result = rcd_wait_until(slow_probe, "rvd", 5000, &wait_reported);
+}
+
+/*
+ * A daemon that comes back is not made to wait out the budget, and the probe
+ * runs before any sleep -- a restart that finished while the request was in
+ * flight should cost nothing at all.
+ */
+TEST a_daemon_that_answers_is_not_waited_out(void)
+{
+	wait_probe_reset(0, 1); /* ready on the first call */
+
+	unsigned int real = elapsed_ms_of(run_ready_second_try);
+
+	ASSERT(wait_result);
+	ASSERT_EQ(1, wait_probe_calls);
+	ASSERT(real < 100);
+
+	/* And one that needs a second look still returns as soon as it is
+	 * ready, having slept exactly one step in between. */
+	wait_probe_reset(0, 2);
+	real = elapsed_ms_of(run_ready_second_try);
+	ASSERT(wait_result);
+	ASSERT_EQ(2, wait_probe_calls);
+	ASSERT(real >= 150 && real < 500);
+	PASS();
+}
+
+/*
+ * A budget of zero still probes once. Waiting is an optimisation over asking;
+ * a caller that budgeted nothing still wants the answer, and a loop that
+ * checked the clock first would return false without ever looking.
+ */
+TEST a_spent_budget_still_asks_once(void)
+{
+	wait_probe_reset(0, 1);
+	ASSERT(rcd_wait_until(slow_probe, "rvd", 0, NULL));
+	ASSERT_EQ(1, wait_probe_calls);
+
+	wait_probe_reset(0, 1000000);
+	ASSERT_FALSE(rcd_wait_until(slow_probe, "rvd", 0, NULL));
+	ASSERT_EQ(1, wait_probe_calls);
+	PASS();
+}
+
 SUITE(rcd_cmd_suite)
 {
 	RUN_TEST(refuses_the_named_hazards);
@@ -2002,6 +2171,11 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(exposure_compensation_goes_both_ways);
 	RUN_TEST(a_knob_left_on_auto_reads_back_as_auto);
 	RUN_TEST(refuses_more_edits_than_a_request_may_carry);
+
+	RUN_TEST(the_wait_budget_is_wall_time_not_a_count_of_sleeps);
+	RUN_TEST(the_wait_reports_the_time_it_measured);
+	RUN_TEST(a_daemon_that_answers_is_not_waited_out);
+	RUN_TEST(a_spent_budget_still_asks_once);
 
 	RUN_TEST(every_refusal_explains_itself);
 }

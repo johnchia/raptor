@@ -26,10 +26,24 @@
 #define RCD_APPLY_H
 
 #include <cJSON.h>
+#include <stdbool.h>
 
 struct rcd_state;
 
 cJSON *rcd_cmd_apply(struct rcd_state *st, const cJSON *root);
 cJSON *rcd_cmd_restart(struct rcd_state *st, const cJSON *root);
+
+/*
+ * Poll `probe` until it answers true or `budget_ms` of wall time is spent,
+ * writing the measured elapsed time to `waited_ms` if it is not NULL.
+ *
+ * Declared here only so the budget can be tested. A probe in this daemon is an
+ * IPC round trip that can block for seconds, and the loop this replaced charged
+ * its budget for the sleeping alone -- so the bug is invisible unless the test
+ * can supply a probe that is slow rather than instant. See the comment on the
+ * definition for what that cost.
+ */
+bool rcd_wait_until(bool (*probe)(const char *), const char *arg, unsigned int budget_ms,
+		    unsigned int *waited_ms);
 
 #endif /* RCD_APPLY_H */
