@@ -450,6 +450,17 @@ static void load_sensor_from_section(rss_config_t *cfg, const char *section,
 		vin = 0;
 	sensor->vin_type = (rss_sensor_vin_t)vin;
 
+	/*
+	 * Orientation comes from [image], not from this section, because that is
+	 * where the keys have always lived and where apply_isp_settings reads
+	 * them from. It is carried here as well because a SigmaStar backend
+	 * latches it when the sensor is enabled, inside hal_init, before any op
+	 * can reach the HAL -- so this is the only route that can decide which
+	 * way up the first frame comes out. Backends that treat orientation as a
+	 * runtime attribute ignore these two and take the ops instead.
+	 */
+	sensor->hflip = rss_config_get_bool(cfg, "image", "hflip", false) ? 1 : 0;
+	sensor->vflip = rss_config_get_bool(cfg, "image", "vflip", false) ? 1 : 0;
 }
 
 /* FS channel base for a given sensor index (hardware mapping) */
