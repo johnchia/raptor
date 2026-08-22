@@ -16,6 +16,7 @@ const struct help_entry help_entries[] = {
 	{NULL, "config set <section> <key> <value>  Set config value (through rcd)"},
 	{NULL, "config apply                        Restart whatever is running behind"},
 	{NULL, "config pending                      What is saved but not yet in effect"},
+	{NULL, "config action <name> [key value]     Run one of rcd's actions"},
 	{NULL, "config save                         Save running config to disk"},
 	{NULL, "<daemon> status                     Show daemon details"},
 	{NULL, "<daemon> config                     Show running config"},

@@ -8,6 +8,7 @@
 #include "rcd_ipc.h"
 #include "rcd_proto.h"
 #include "rcd_schema.h"
+#include "rcd_wifi.h"
 
 #include <rss_common.h>
 
@@ -500,6 +501,103 @@ static const char *render(const rcd_key_t *k, const cJSON *v, rcd_edit_t *e, cha
 		return NULL;
 	}
 
+	if (k->type == V_TEXT) {
+		if (!cJSON_IsString(v) || !v->valuestring) {
+			snprintf(err, errsz, "'%s' must be a string", k->key);
+			return RCD_E_TYPE;
+		}
+		const char *s = v->valuestring;
+		size_t n = strlen(s);
+		if (n < (size_t)k->min || n > (size_t)k->max || n >= sizeof(e->rendered)) {
+			snprintf(err, errsz, "'%s' must be %d to %d characters", k->key, k->min,
+				 k->max);
+			return RCD_E_RANGE;
+		}
+		for (size_t i = 0; i < n; i++) {
+			unsigned char c = (unsigned char)s[i];
+			/*
+			 * Printable ASCII only. A control byte here would be a
+			 * newline in a line-oriented file, and the two
+			 * exclusions below would each end the quoted string
+			 * this value is rendered inside.
+			 */
+			if (c < 0x20 || c > 0x7e || c == '"' || c == '\\') {
+				snprintf(err, errsz,
+					 "'%s' may contain only printable characters, and not "
+					 "'\"' or '\\'",
+					 k->key);
+				return RCD_E_CHOICE;
+			}
+		}
+		memcpy(e->rendered, s, n);
+		e->rendered[n] = '\0';
+		return NULL;
+	}
+
+	if (k->type == V_SECRET) {
+		if (!cJSON_IsString(v) || !v->valuestring) {
+			snprintf(err, errsz, "'%s' must be a string", k->key);
+			return RCD_E_TYPE;
+		}
+		const char *s = v->valuestring;
+		size_t n = strlen(s);
+
+		/*
+		 * An open network has no passphrase, which is a configuration
+		 * and not an omission -- the same reason the gateway and the
+		 * name server accept it. The table decides whether this key
+		 * is one of those.
+		 */
+		if (!n) {
+			if (k->min != 0) {
+				snprintf(err, errsz, "'%s' needs a passphrase", k->key);
+				return RCD_E_RANGE;
+			}
+			e->rendered[0] = '\0';
+			return NULL;
+		}
+
+		/*
+		 * Exactly 64 hex digits is a pre-derived PSK rather than a
+		 * passphrase, and it is checked first because it is outside
+		 * WPA's 8-to-63 length rule rather than an instance of it.
+		 * This is the form a client sends when it has hashed the
+		 * passphrase itself, so the plaintext never crosses the
+		 * network that carried it.
+		 */
+		if (n == 64) {
+			size_t hex = 0;
+			while (hex < n && isxdigit((unsigned char)s[hex]))
+				hex++;
+			if (hex == n) {
+				memcpy(e->rendered, s, n);
+				e->rendered[n] = '\0';
+				return NULL;
+			}
+		}
+
+		if (n < 8 || n > 63) {
+			/* Not quoting the value back, for the V_CRED reason:
+			 * it is a secret and must not reach a log or a reply. */
+			snprintf(err, errsz, "'%s' must be 8 to 63 characters, or 64 hex digits",
+				 k->key);
+			return RCD_E_RANGE;
+		}
+		for (size_t i = 0; i < n; i++) {
+			unsigned char c = (unsigned char)s[i];
+			if (c < 0x20 || c > 0x7e || c == '"' || c == '\\') {
+				snprintf(err, errsz,
+					 "'%s' may contain only printable characters, and not "
+					 "'\"' or '\\'",
+					 k->key);
+				return RCD_E_CHOICE;
+			}
+		}
+		memcpy(e->rendered, s, n);
+		e->rendered[n] = '\0';
+		return NULL;
+	}
+
 	if (k->type == V_HOST) {
 		if (!cJSON_IsString(v) || !v->valuestring) {
 			snprintf(err, errsz, "'%s' must be a string", k->key);
@@ -652,11 +750,20 @@ static void probe_isp(rcd_state_t *st)
 
 bool rcd_key_available(rcd_state_t *st, const rcd_key_t *k)
 {
-	/* Only [image] is answered for, and only once rvd has said something.
-	 * Everything else is available until proven otherwise, which is the
-	 * safe direction: hiding a working control is worse than showing one
-	 * that turns out to refuse. */
-	if (!k || strcmp(k->section, "image") != 0)
+	if (!k)
+		return true;
+
+	/* A camera with no radio has no wifi settings, as opposed to having
+	 * them unset -- which is what drops the section from a console rather
+	 * than offering a form nothing can act on. */
+	if (strcmp(k->section, "wifi") == 0)
+		return rcd_wifi_present();
+
+	/* Only [image] is answered for beyond that, and only once rvd has said
+	 * something. Everything else is available until proven otherwise,
+	 * which is the safe direction: hiding a working control is worse than
+	 * showing one that turns out to refuse. */
+	if (strcmp(k->section, "image") != 0)
 		return true;
 
 	probe_isp(st);
@@ -707,7 +814,7 @@ static void emit_value(cJSON *arr, const rcd_key_t *k, rss_config_t *file, const
 	/* A credential is settable and never readable. Reporting the key with
 	 * no value is the honest rendering: the client draws the input and
 	 * knows not to expect it to fill in. */
-	if (k->type == V_CRED) {
+	if (k->type == V_CRED || k->type == V_SECRET) {
 		cJSON *o = cJSON_CreateObject();
 		if (!o)
 			return;
@@ -1010,7 +1117,8 @@ static int write_file(rcd_state_t *st, rcd_edit_t *edits, const bool *to_file, b
 		 * a password those are different things, and this file is
 		 * readable by anyone who can read the flash. */
 		bool secret =
-			edits[i].k->type == V_CRED && strcmp(edits[i].k->key, "password") == 0;
+			edits[i].k->type == V_SECRET ||
+			(edits[i].k->type == V_CRED && strcmp(edits[i].k->key, "password") == 0);
 		RSS_INFO("set: [%s] %s = %s", edits[i].k->section, edits[i].k->key,
 			 secret ? "(set)" : edits[i].rendered);
 	}
@@ -1288,7 +1396,7 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		 * daemon that owns it brings, and rcd is not the one to say. */
 		if (edits[i].reset) {
 			cJSON_AddBoolToObject(o, "reset", true);
-		} else if (edits[i].k->type != V_CRED) {
+		} else if (edits[i].k->type != V_CRED && edits[i].k->type != V_SECRET) {
 			cJSON *v = typed_value(edits[i].k, edits[i].rendered);
 			if (v)
 				cJSON_AddItemToObject(o, "value", v);
@@ -1456,6 +1564,14 @@ cJSON *rcd_action_validate(const cJSON *root, char *wire, size_t wiresz, const c
 	if (!fit)
 		return rcd_err(RCD_E_MALFORMED, "the request could not be built");
 
+	/* An action rcd performs itself has nothing to route to, and the
+	 * request built above is never sent -- it is built anyway so that one
+	 * path validates every action's arguments. */
+	if (a->local) {
+		*owner = NULL;
+		return NULL;
+	}
+
 	*owner = a->daemon;
 	if (!*owner) {
 		const cJSON *sec = cJSON_GetObjectItemCaseSensitive(root, "section");
@@ -1464,6 +1580,65 @@ cJSON *rcd_action_validate(const cJSON *root, char *wire, size_t wiresz, const c
 			return rcd_err(RCD_E_MALFORMED, "the request could not be routed");
 	}
 	return NULL;
+}
+
+/*
+ * An action rcd carries out itself.
+ *
+ * Two refusals before the handler, and neither belongs to the handler. A
+ * local action reaches a store directly, with no daemon in between to hold an
+ * opinion about whether the hardware exists or whether now is the moment --
+ * so the questions a daemon would have answered are asked here.
+ */
+static cJSON *action_local(rcd_state_t *st, const rcd_action_t *a)
+{
+	if (a->avail && !a->avail())
+		return rcd_err(RCD_E_UNSUPPORTED, "this camera has no such hardware");
+
+	/*
+	 * Not while the guard is holding a snapshot -- for an action that
+	 * costs something.
+	 *
+	 * The stores rcd writes directly are exactly the stores the guard
+	 * snapshots, so an unconfirmed change and a local action are two
+	 * writers of the same variables with a timer between them: the revert
+	 * would land afterwards and put back the very thing this was asked to
+	 * clear, and the camera would come up on a network nobody chose. It
+	 * is refused rather than silently winning or silently losing, and
+	 * both ways out -- confirm, cancel -- are one call.
+	 *
+	 * An action whose impact is none writes nothing, so there is nothing
+	 * for a revert to race and refusing it would only take a scan away
+	 * from the page that is waiting on the guard.
+	 */
+	if (a->impact != RCD_IMPACT_NONE && rcd_guard_held(st))
+		return rcd_err(RCD_E_BUSY,
+			       "a change is still waiting to be confirmed; confirm or cancel it "
+			       "first");
+
+	cJSON *resp = rcd_ok();
+	if (!resp)
+		return NULL;
+
+	char err[192] = "";
+	if (a->local(resp, err, sizeof(err)) != 0) {
+		cJSON_Delete(resp);
+		return rcd_err(RCD_E_IO, err[0] ? err : "it could not be done");
+	}
+
+	/* A read-only action is a poll: the portal asks for a scan every few
+	 * seconds, and a line each would bury everything else in the log. */
+	if (a->impact != RCD_IMPACT_NONE)
+		RSS_INFO("action: %s -> rcd", a->name);
+	else
+		RSS_DEBUG("action: %s -> rcd", a->name);
+
+	cJSON_AddStringToObject(resp, "action", a->name);
+	cJSON_AddStringToObject(resp, "owner", "rcd");
+	cJSON_AddStringToObject(resp, "impact", rcd_impact_name(a->impact));
+	if (a->note)
+		cJSON_AddStringToObject(resp, "note", a->note);
+	return resp;
 }
 
 cJSON *rcd_cmd_action(rcd_state_t *st, const cJSON *root)
@@ -1475,12 +1650,16 @@ cJSON *rcd_cmd_action(rcd_state_t *st, const cJSON *root)
 	if (refusal)
 		return refusal;
 
+	const cJSON *name = cJSON_GetObjectItemCaseSensitive(root, "action");
+	const rcd_action_t *a = rcd_action_find(cJSON_GetStringValue(name));
+
+	if (a && a->local)
+		return action_local(st, a);
+
 	char derr[192];
 	if (!rcd_ask_ok_err(daemon, wire, derr, sizeof(derr)))
 		return rcd_err(RCD_E_DAEMON, derr);
 
-	const cJSON *name = cJSON_GetObjectItemCaseSensitive(root, "action");
-	const rcd_action_t *a = rcd_action_find(cJSON_GetStringValue(name));
 	if (a && a->persists)
 		owe_save(st, rcd_daemon_by_name(daemon));
 

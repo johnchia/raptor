@@ -20,11 +20,15 @@
 
 #include <cJSON.h>
 
-/* Bounds on one rendered edit. Every value fits: the longest is a credential,
- * capped at 63 by the table entry that admits it. */
+/*
+ * Bounds on one rendered edit. Every value fits: the longest is a wifi
+ * passphrase given in its pre-derived form, which is exactly 64 hex digits
+ * and needs a 65th byte for the terminator. The next longest is a credential,
+ * capped at 63 by the table entry that admits it.
+ */
 #define RCD_SECT_MAX 24
 #define RCD_KEY_MAX  32
-#define RCD_VAL_MAX  64
+#define RCD_VAL_MAX  72
 
 /* Longest daemon request the table can produce, with room to spare. */
 #define RCD_REQ_MAX 512
@@ -92,6 +96,8 @@ typedef enum {
 	V_CRED,
 	V_HOST,
 	V_IPV4,
+	V_TEXT,
+	V_SECRET,
 } rcd_val_type_t;
 
 /*
@@ -103,6 +109,29 @@ typedef enum {
  *
  * It is not a relaxed V_CRED and must not be used for one: it is reported back
  * like any other value.
+ *
+ * V_TEXT is the one grammar that admits a space, and it exists for a wifi
+ * SSID -- a name chosen by whoever owns the network, not by this camera, and
+ * routinely containing spaces and punctuation that no other key here allows.
+ * It is printable ASCII with two exclusions: a double quote and a backslash,
+ * because the value is rendered inside a quoted string in wpa_supplicant.conf
+ * and either one would end that string early. Control bytes are refused for
+ * the same reason a newline is: the file is line-oriented.
+ *
+ * It is not a general string type. A value of this grammar still must not be
+ * a path, a format or a command, and the protection is the same as everywhere
+ * else in this table -- that no such key exists.
+ *
+ * V_SECRET is a wifi passphrase, and it differs from V_CRED in both
+ * directions. Wider, because WPA's own grammar is 8 to 63 printable
+ * characters and a passphrase nobody may choose is the V_CRED mistake again;
+ * narrower, because it also accepts exactly 64 hex digits, which is a
+ * pre-derived PSK. That second form is what lets a client hash the passphrase
+ * before sending it, so the plaintext never crosses an open setup network.
+ *
+ * Like V_CRED it is never reported back, and it is emptiable: an open network
+ * has no passphrase, and that is a configuration rather than an omission.
+ *
  *
  * V_IPV4 is narrower still: four decimal octets, no leading zeros -- which
  * every C library reads as octal and no operator ever means that way. An empty
@@ -286,17 +315,51 @@ typedef struct {
 
 /*
  * A verb that is not a config value: a momentary command, or one that takes
- * more arguments than a single value. Every action here takes effect on the
- * running camera without interrupting it -- nothing that merely stops a daemon
- * is in this table, and `apply` and `restart` are protocol commands rather
- * than entries here precisely because they do interrupt.
+ * more arguments than a single value. Almost every action here takes effect on
+ * the running camera without interrupting it -- nothing that merely stops a
+ * daemon is in this table, and `apply` and `restart` are protocol commands
+ * rather than entries here precisely because they do interrupt.
+ *
+ * `local` is the exception, and there is one of it. An action naming a handler
+ * is performed by rcd rather than forwarded: no daemon owns the store behind
+ * it, so there is nothing to route to and `daemon` stays NULL. Such an action
+ * says what it costs in `impact` -- the tier the daemons' own actions all sit
+ * in is the answer for a command that reaches a running daemon, and not for
+ * one that writes a store nothing has read yet.
  */
 typedef struct {
 	const char *name;
-	const char *daemon;   /* NULL: resolved from the section argument */
+	const char *daemon;   /* NULL: rcd's own, or resolved from `section` */
 	const char *ctrl_cmd; /* NULL: same as name */
 	const rcd_arg_t *args;
 	bool persists; /* the daemon records this in its config */
+
+	/*
+	 * Performed here. Returns 0, or -1 with `err` filled in -- the
+	 * sentence a client shows, so it says what did not happen rather
+	 * than which call returned what.
+	 *
+	 * `resp` is the reply being built, for an action that answers with
+	 * something rather than only doing something. Most add nothing to it.
+	 */
+	int (*local)(cJSON *resp, char *err, size_t errsz);
+
+	/*
+	 * Whether this camera can do it at all, asked of the hardware the way
+	 * a key's availability is. NULL means always. A client hides an
+	 * action reported unavailable, which is the same treatment as a key
+	 * the silicon has no block for.
+	 */
+	bool (*avail)(void);
+
+	/* What performing it costs, for a `local` action. Daemon actions are
+	 * the live tier by construction and leave this alone. */
+	rcd_impact_t impact;
+
+	/* When it takes effect, for an action whose answer is not "now".
+	 * Reported with the result and in the schema, so the one sentence a
+	 * client shows lives beside the entry it describes. */
+	const char *note;
 } rcd_action_t;
 
 const rcd_key_t *rcd_key_find(const char *section, const char *key);

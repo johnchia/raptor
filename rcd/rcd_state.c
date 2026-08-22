@@ -9,6 +9,7 @@
 #include "rcd_ipc.h"
 #include "rcd_proto.h"
 #include "rcd_schema.h"
+#include "rcd_wifi.h"
 
 #include <raptor_hal.h>
 #include <rss_common.h>
@@ -409,9 +410,24 @@ static void collect_system(cJSON *state)
 	char *up = rss_read_file("/proc/uptime", &len);
 	if (up) {
 		double secs = strtod(up, NULL);
+		/* At the top level, where it has always been read from. */
 		cJSON_AddNumberToObject(state, "uptime", (double)(long)secs);
 		free(up);
 	}
+
+	/*
+	 * Whether this camera still has to be told which network to join --
+	 * the fact setup mode turns on, reported rather than inferred from a
+	 * file somebody greps. See rcd_wifi.h.
+	 *
+	 * Always present, unlike every other object here, because those
+	 * describe daemons that may not be running and this describes the
+	 * camera. A client that finds it missing is talking to an older rcd,
+	 * not to a camera with nothing to say.
+	 */
+	cJSON *o = cJSON_AddObjectToObject(state, "system");
+	if (o)
+		cJSON_AddBoolToObject(o, "provisioned", rcd_wifi_provisioned());
 }
 
 cJSON *rcd_cmd_state(rcd_state_t *st, const cJSON *root)

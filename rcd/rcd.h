@@ -98,6 +98,18 @@ struct rcd_state {
 	int guard_window_sec;
 
 	/*
+	 * A wifi credential moved in the change now armed, so the guard may
+	 * confirm itself from the radio -- see RCD_GUARD_WIFI_DWELL_SEC.
+	 *
+	 * Decided when the guard is armed rather than looked up later: the
+	 * snapshot covers every guarded key whether or not it was edited, so
+	 * by the time the window is running there is nothing left to say
+	 * which of them the operator actually touched.
+	 */
+	bool guard_wifi_moved;
+	uint64_t guard_wifi_ask_ms; /* next time to ask the radio; 0 = not yet */
+
+	/*
 	 * Reverts that did not fully land. A store that could not be written
 	 * back, or an interface that would not come up on the old stanza, is
 	 * retried rather than forgotten -- so this counts the attempts and

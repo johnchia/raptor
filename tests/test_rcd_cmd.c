@@ -34,6 +34,7 @@
 #include "../rcd/rcd_schema.h"
 #include "../rcd/rcd_state.h"
 #include "../rcd/rcd_system.h"
+#include "../rcd/rcd_wifi.h"
 
 #include <poll.h>
 #include <pthread.h>
@@ -203,6 +204,196 @@ TEST refuses_near_misses(void)
 	ASSERT_ACTION_REFUSED("{\"action\":\"ircut-mode \"}");
 	ASSERT_ACTION_REFUSED("{\"action\":\"IRCUT-MODE\",\"value\":\"day\"}");
 	ASSERT_ACTION_REFUSED("{\"action\":\"osd-enable2\"}");
+	PASS();
+}
+
+/* ------------------------------------------------------------------ */
+/* Provisioning                                                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The one action rcd carries out itself, and the only one that is routed
+ * nowhere: no daemon owns the boot environment, so there is no socket to
+ * forward to and the validator has to say so rather than fall through to the
+ * section-routing arm and refuse a perfectly good request as unroutable.
+ */
+TEST forgetting_the_network_is_rcds_own_action(void)
+{
+	char wire[RCD_REQ_MAX];
+	const char *owner = "not a daemon";
+
+	ASSERT_EQ(0,
+		  validate_action("{\"action\":\"provision-reset\"}", wire, sizeof(wire), &owner));
+	ASSERT(owner == NULL);
+	PASS();
+}
+
+/* Deny by default did not stop applying to it. */
+TEST forgetting_the_network_has_no_near_misses(void)
+{
+	ASSERT_ACTION_REFUSED("{\"action\":\"provision-reset \"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"provision_reset\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"provision\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"PROVISION-RESET\"}");
+	PASS();
+}
+
+/*
+ * What a client is told before it offers the button. All three parts matter
+ * and none of them can be inferred: the owner, because this one is not a
+ * daemon; the impact, because every other action here is the live tier and
+ * this one is not; and the note, because "it takes effect at the next boot"
+ * is the whole difference between a command and a surprise.
+ */
+TEST the_schema_says_what_forgetting_the_network_costs(void)
+{
+	cJSON *out = cJSON_CreateObject();
+	rcd_schema_emit(out, NULL);
+
+	const cJSON *a = NULL, *found = NULL;
+	cJSON_ArrayForEach(a, cJSON_GetObjectItemCaseSensitive(out, "actions"))
+	{
+		const cJSON *n = cJSON_GetObjectItemCaseSensitive(a, "name");
+		if (cJSON_IsString(n) && strcmp(n->valuestring, "provision-reset") == 0)
+			found = a;
+	}
+	ASSERT(found);
+
+	const cJSON *owner = cJSON_GetObjectItemCaseSensitive(found, "owner");
+	ASSERT(cJSON_IsString(owner));
+	ASSERT_STR_EQ("rcd", owner->valuestring);
+
+	const cJSON *impact = cJSON_GetObjectItemCaseSensitive(found, "impact");
+	ASSERT(cJSON_IsString(impact));
+	ASSERT_STR_EQ("reboot", impact->valuestring);
+
+	ASSERT(cJSON_IsString(cJSON_GetObjectItemCaseSensitive(found, "note")));
+
+	/*
+	 * And it is offered only where there is a radio, marked the way an
+	 * unusable key is. Stated against the same question the emit asks so
+	 * the test holds on a host with no camera under it and on a camera.
+	 */
+	const cJSON *av = cJSON_GetObjectItemCaseSensitive(found, "available");
+	ASSERT_EQ(rcd_wifi_present(), !cJSON_IsFalse(av));
+
+	cJSON_Delete(out);
+	PASS();
+}
+
+/*
+ * Every action reaches something. An entry that names no daemon, carries no
+ * handler and takes no section argument is one the validator can only refuse
+ * -- which is a table entry that exists solely to produce an error, and the
+ * kind of thing a new action gets wrong once.
+ */
+TEST every_action_can_be_routed(void)
+{
+	cJSON *out = cJSON_CreateObject();
+	rcd_schema_emit(out, NULL);
+
+	const cJSON *a = NULL;
+	int seen = 0;
+	cJSON_ArrayForEach(a, cJSON_GetObjectItemCaseSensitive(out, "actions"))
+	{
+		const cJSON *name = cJSON_GetObjectItemCaseSensitive(a, "name");
+		bool owned = cJSON_IsString(cJSON_GetObjectItemCaseSensitive(a, "owner"));
+		bool by_section = false;
+
+		const cJSON *arg = NULL;
+		cJSON_ArrayForEach(arg, cJSON_GetObjectItemCaseSensitive(a, "args"))
+		{
+			const cJSON *t = cJSON_GetObjectItemCaseSensitive(arg, "type");
+			if (cJSON_IsString(t) && strcmp(t->valuestring, "section") == 0)
+				by_section = true;
+		}
+
+		ASSERTm(cJSON_IsString(name) ? name->valuestring : "?", owned || by_section);
+		seen++;
+	}
+	ASSERT(seen > 0);
+	cJSON_Delete(out);
+	PASS();
+}
+
+/*
+ * A scan answers with something, which is what the local handler's payload
+ * argument exists for -- and it costs nothing, which is what keeps it
+ * reachable while a credential is still waiting to be confirmed. That second
+ * property is the one the portal depends on: the page that most wants to
+ * rescan is the page whose last attempt is mid-guard.
+ */
+TEST a_scan_is_a_read_and_is_priced_as_one(void)
+{
+	cJSON *out = cJSON_CreateObject();
+	rcd_schema_emit(out, NULL);
+
+	const cJSON *a = NULL, *found = NULL;
+	cJSON_ArrayForEach(a, cJSON_GetObjectItemCaseSensitive(out, "actions"))
+	{
+		const cJSON *n = cJSON_GetObjectItemCaseSensitive(a, "name");
+		if (cJSON_IsString(n) && strcmp(n->valuestring, "wifi-scan") == 0)
+			found = a;
+	}
+	ASSERT(found);
+
+	const cJSON *owner = cJSON_GetObjectItemCaseSensitive(found, "owner");
+	ASSERT(cJSON_IsString(owner));
+	ASSERT_STR_EQ("rcd", owner->valuestring);
+
+	const cJSON *impact = cJSON_GetObjectItemCaseSensitive(found, "impact");
+	ASSERT(cJSON_IsString(impact));
+	ASSERT_STR_EQ("none", impact->valuestring);
+
+	/* Nothing takes effect later, so there is nothing to warn about. */
+	ASSERT(!cJSON_GetObjectItemCaseSensitive(found, "note"));
+
+	const cJSON *av = cJSON_GetObjectItemCaseSensitive(found, "available");
+	ASSERT_EQ(rcd_wifi_present(), !cJSON_IsFalse(av));
+
+	cJSON_Delete(out);
+	PASS();
+}
+
+/* Routed nowhere, like the other one rcd performs itself. */
+TEST a_scan_is_rcds_own_action(void)
+{
+	char wire[RCD_REQ_MAX];
+	const char *owner = "not a daemon";
+
+	ASSERT_EQ(0, validate_action("{\"action\":\"wifi-scan\"}", wire, sizeof(wire), &owner));
+	ASSERT(owner == NULL);
+
+	ASSERT_ACTION_REFUSED("{\"action\":\"wifi_scan\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"scan\"}");
+	PASS();
+}
+
+/*
+ * The fact behind setup mode, and it is always there. Every other object in
+ * `state` describes a daemon that may not be running; this one describes the
+ * camera, so a client that finds it missing has learned something about the
+ * firmware rather than about the network.
+ */
+TEST state_always_carries_the_provisioning_fact(void)
+{
+	rcd_state_t st = {0};
+
+	cJSON *resp = rcd_cmd_state(&st, NULL);
+	ASSERT(resp);
+
+	const cJSON *sys = cJSON_GetObjectItemCaseSensitive(resp, "system");
+	ASSERT(cJSON_IsObject(sys));
+
+	const cJSON *p = cJSON_GetObjectItemCaseSensitive(sys, "provisioned");
+	ASSERT(cJSON_IsBool(p));
+
+	/* A camera with no radio has nothing to provision, and saying so is
+	 * what keeps a caller from looking for an access point to raise. */
+	if (!rcd_wifi_present())
+		ASSERT(cJSON_IsTrue(p));
+
+	cJSON_Delete(resp);
 	PASS();
 }
 
@@ -2883,6 +3074,13 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(no_credential_is_ever_readable);
 	RUN_TEST(refuses_unlisted_actions);
 	RUN_TEST(refuses_near_misses);
+	RUN_TEST(forgetting_the_network_is_rcds_own_action);
+	RUN_TEST(forgetting_the_network_has_no_near_misses);
+	RUN_TEST(the_schema_says_what_forgetting_the_network_costs);
+	RUN_TEST(every_action_can_be_routed);
+	RUN_TEST(a_scan_is_a_read_and_is_priced_as_one);
+	RUN_TEST(a_scan_is_rcds_own_action);
+	RUN_TEST(state_always_carries_the_provisioning_fact);
 	RUN_TEST(refuses_malformed_payloads);
 	RUN_TEST(drops_fields_the_table_does_not_name);
 	RUN_TEST(rewrites_the_action_name);

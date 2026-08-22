@@ -152,10 +152,86 @@ static int config_set_via_rcd(const char *section, const char *key, const char *
 	return rc;
 }
 
+/*
+ * A verb that is not a value.
+ *
+ * Deliberately a thin way to name one. rcd's table decides which actions
+ * exist, what arguments each takes and what performing one costs, and a field
+ * that table does not name is dropped before it reaches anything -- so there
+ * is nothing here to keep in agreement with it, and no list to fall behind.
+ * `raptorctl rcd schema` prints what may be asked for.
+ *
+ * Arguments are key/value pairs, typed the way a `set` value is.
+ */
+static int config_action(int argc, char **argv)
+{
+	if (argc < 4) {
+		fprintf(stderr, "Usage: raptorctl config action <name> [key value ...]\n");
+		return 1;
+	}
+	if ((argc - 4) % 2 != 0) {
+		fprintf(stderr, "config action: arguments come in key/value pairs\n");
+		return 1;
+	}
+
+	cJSON *j = jcmd("action");
+	if (!j)
+		return 1;
+	jadd_s(j, "action", argv[3]);
+	for (int i = 4; i + 1 < argc; i += 2)
+		add_typed(j, argv[i], argv[i + 1]);
+
+	char req[512];
+	jstr(j, req, sizeof(req));
+	if (!req[0]) {
+		fprintf(stderr, "config action: request too large\n");
+		return 1;
+	}
+
+	char sock[64];
+	snprintf(sock, sizeof(sock), RSS_SOCK_FMT, "rcd");
+
+	char *resp = NULL;
+	if (rss_ctrl_send_command_alloc(sock, req, &resp, 30000) < 0) {
+		fprintf(stderr, "config action: rcd is not running, and actions go "
+				"through it.\n");
+		return 1;
+	}
+
+	cJSON *root = cJSON_Parse(resp);
+	free(resp);
+	if (!root) {
+		fprintf(stderr, "config action: rcd answered unusably\n");
+		return 1;
+	}
+
+	const cJSON *status = cJSON_GetObjectItemCaseSensitive(root, "status");
+	int rc = 0;
+	if (!cJSON_IsString(status) || strcmp(status->valuestring, "ok") != 0) {
+		const cJSON *why = cJSON_GetObjectItemCaseSensitive(root, "reason");
+		fprintf(stderr, "config action: %s\n",
+			cJSON_IsString(why) ? why->valuestring : "refused");
+		rc = 1;
+	} else {
+		/* The note is the half that is not obvious from having asked:
+		 * an action that takes effect at the next boot looks exactly
+		 * like one that has already happened. */
+		const cJSON *note = cJSON_GetObjectItemCaseSensitive(root, "note");
+		if (cJSON_IsString(note))
+			printf("%s: %s\n", argv[3], note->valuestring);
+		else
+			printf("%s: done\n", argv[3]);
+	}
+
+	cJSON_Delete(root);
+	return rc;
+}
+
 int handle_config(int argc, char **argv)
 {
 	if (argc < 3) {
-		fprintf(stderr, "Usage: raptorctl config <get|set|save|apply|pending> ...\n");
+		fprintf(stderr,
+			"Usage: raptorctl config <get|set|save|apply|pending|action> ...\n");
 		return 1;
 	}
 
@@ -166,6 +242,9 @@ int handle_config(int argc, char **argv)
 		return send_cmd_verb("rcd", "apply");
 	if (strcmp(argv[2], "pending") == 0)
 		return send_cmd_verb("rcd", "pending");
+
+	if (strcmp(argv[2], "action") == 0)
+		return config_action(argc, argv);
 
 	/* config save — tell all daemons to save */
 	if (strcmp(argv[2], "save") == 0) {

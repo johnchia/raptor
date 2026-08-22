@@ -72,6 +72,37 @@ struct rcd_state;
  * and wifi sections are five more. */
 #define RCD_GUARD_MAX 12
 
+/*
+ * How a wifi change confirms itself.
+ *
+ * Every other guarded key needs a human to come back and say the camera is
+ * still reachable, because reachability is the thing being risked and only
+ * the client on the other side can see it. A wifi credential is the one key
+ * where the camera can see it too, and see it completely: a wrong passphrase
+ * never completes the four-way handshake, so a radio that is associated with
+ * the network the store names *and* holding an address on it has proved the
+ * credential rather than suggested it.
+ *
+ * That is not a convenience. The client that sets these keys from a setup
+ * portal is a phone on an access point that has to go away for the change to
+ * take effect, so there is no confirming client by construction -- and the
+ * alternative is thingino's, where a typo is persisted and in force with
+ * nothing watching. Confirming from the camera's own evidence is what keeps
+ * the wrong-passphrase path recoverable when nobody is left to ask.
+ *
+ * The dwell exists because `wpa_cli reconfigure` does not take effect the
+ * instant it returns. For a few seconds after it, a radio that is about to
+ * lose its association still reports the old one -- and reading that as
+ * proof would confirm a credential that had not been tried. Comfortably
+ * longer than a disconnect-and-reassociate, comfortably shorter than the
+ * window it sits inside.
+ */
+#define RCD_GUARD_WIFI_DWELL_SEC 30
+
+/* How often to ask, once the dwell has passed. Each ask forks wpa_cli, and
+ * the answer does not change faster than this. */
+#define RCD_GUARD_WIFI_POLL_MS 5000
+
 /* What to put back, on flash: reverting has to survive the power going out. */
 #define RCD_GUARD_RECORD_NAME "rcd.guard"
 

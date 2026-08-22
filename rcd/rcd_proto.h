@@ -33,7 +33,7 @@ struct rcd_state;
 #define RCD_E_TOOMANY	  "too-many"	/* more edits than one request may carry */
 #define RCD_E_IO	  "io"		/* the config file could not be written */
 #define RCD_E_DAEMON	  "daemon"	/* the owning daemon refused or is absent */
-#define RCD_E_BUSY	  "busy"	/* an apply is already running */
+#define RCD_E_BUSY	  "busy"	/* an apply is running, or a change is unconfirmed */
 #define RCD_E_UNSUPPORTED "unsupported" /* the SoC has no such control */
 
 /* A fresh success envelope, or a refusal. Both are owned by the caller. */

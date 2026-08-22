@@ -7,6 +7,7 @@
 #include "rcd_guard.h"
 #include "rcd_network.h"
 #include "rcd_system.h"
+#include "rcd_wifi.h"
 
 #include <rss_common.h>
 
@@ -112,7 +113,7 @@ static const struct {
 	{"rtsp", RCD_D_RSD},	  {"http", RCD_D_RHD},	   {"osd", RCD_D_ROD},
 	{"ircut", RCD_D_RIC},	  {"motion", RCD_D_RMD},   {"recording", RCD_D_RMR},
 	{"timelapse", RCD_D_RMR}, {"device", RCD_D_COUNT}, {"network", RCD_D_COUNT},
-	{NULL, RCD_D_COUNT},
+	{"wifi", RCD_D_COUNT},	  {NULL, RCD_D_COUNT},
 };
 
 const char *rcd_section_reader(const char *section)
@@ -455,6 +456,27 @@ static const rcd_key_t keys[] = {
 	{"network", "dns", V_IPV4, 0, 0, NULL,
 	 GUARDED(rcd_provider_net_dns, RCD_IMPACT_NETWORK, RCD_GUARD_NET_SEC)},
 
+	/*
+	 * -- The network this camera joins, on the cameras that join one.
+	 *    Two variables of the boot environment -- see rcd_wifi.h -- and
+	 *    one enact behind both, because they are read together by the
+	 *    generator that builds the supplicant's configuration.
+	 *
+	 *    Guarded like the wired address and for a stronger reason: on a
+	 *    camera whose only interface is the radio, a wrong passphrase is
+	 *    not a degraded camera but an unreachable one, and the window is
+	 *    the only way back that does not involve a serial console.
+	 *
+	 *    The SSID caps at 32 because 802.11 does, not because the store
+	 *    does. The passphrase carries no length here at all: WPA's own
+	 *    rule is the grammar's, and what this entry says is only that an
+	 *    open network -- no passphrase -- is one of the answers. --
+	 */
+	{"wifi", "ssid", V_TEXT, 1, 32, NULL,
+	 GUARDED(rcd_provider_wifi_ssid, RCD_IMPACT_NETWORK, RCD_GUARD_WIFI_SEC)},
+	{"wifi", "psk", V_SECRET, 0, 63, NULL,
+	 GUARDED(rcd_provider_wifi_psk, RCD_IMPACT_NETWORK, RCD_GUARD_WIFI_SEC)},
+
 	{NULL, NULL, V_INT, 0, 0, NULL, SAVED},
 };
 
@@ -580,25 +602,51 @@ static const rcd_arg_t args_threshold[] = {
 };
 
 static const rcd_action_t actions[] = {
-	{"request-idr", "rvd", NULL, args_channel_opt, false},
-	{"set-qp-bounds", "rvd", NULL, args_qp_bounds, true},
-	{"set-rc-mode", "rvd", NULL, args_rc_mode, true},
+	{.name = "request-idr", .daemon = "rvd", .args = args_channel_opt},
+	{.name = "set-qp-bounds", .daemon = "rvd", .args = args_qp_bounds, .persists = true},
+	{.name = "set-rc-mode", .daemon = "rvd", .args = args_rc_mode, .persists = true},
 
 	/* -- Day/night. The LED banks are a manual override of automatic
 	 *    behaviour rather than a setting, which is why they persist
 	 *    nothing: the next auto transition takes them back. -- */
-	{"ircut-mode", "ric", "mode", args_daynight, true},
-	{"ircut-threshold", "ric", "set-threshold", args_threshold, true},
-	{"ir850", "ric", NULL, args_on_off, false},
-	{"ir940", "ric", NULL, args_on_off, false},
+	{.name = "ircut-mode",
+	 .daemon = "ric",
+	 .ctrl_cmd = "mode",
+	 .args = args_daynight,
+	 .persists = true},
+	{.name = "ircut-threshold",
+	 .daemon = "ric",
+	 .ctrl_cmd = "set-threshold",
+	 .args = args_threshold,
+	 .persists = true},
+	{.name = "ir850", .daemon = "ric", .args = args_on_off},
+	{.name = "ir940", .daemon = "ric", .args = args_on_off},
 
 	/* -- OSD. rod pauses rendering rather than writing [osd] enabled, so
 	 *    this deliberately persists nothing: a reboot restores the
 	 *    configured state, which is what rod already does. -- */
-	{"osd-enable", "rod", "enable", args_none, false},
-	{"osd-disable", "rod", "disable", args_none, false},
+	{.name = "osd-enable", .daemon = "rod", .ctrl_cmd = "enable", .args = args_none},
+	{.name = "osd-disable", .daemon = "rod", .ctrl_cmd = "disable", .args = args_none},
 
-	{NULL, NULL, NULL, NULL, false},
+	/* -- Provisioning. The only action rcd performs itself, because the
+	 *    boot environment is not a daemon's to be asked for. Reboot-tier
+	 *    rather than live: the credentials are gone from the store the
+	 *    moment this returns, and which mode the camera comes up in is a
+	 *    decision the boot path makes. See rcd_wifi.h. -- */
+	/* -- Setup. A scan is a read, so it costs nothing and is not refused
+	 *    while the guard is holding a snapshot: the page that most wants
+	 *    to rescan is the one waiting for a credential to be confirmed. -- */
+	{.name = "wifi-scan", .args = args_none, .local = rcd_wifi_scan, .avail = rcd_wifi_present},
+
+	{.name = "provision-reset",
+	 .args = args_none,
+	 .local = rcd_wifi_provision_reset,
+	 .avail = rcd_wifi_present,
+	 .impact = RCD_IMPACT_REBOOT,
+	 .note = "the network is forgotten; the camera comes back in setup mode at its "
+		 "next boot"},
+
+	{.name = NULL},
 };
 
 const rcd_action_t *rcd_action_find(const char *name)
@@ -629,6 +677,10 @@ static const char *type_name(rcd_val_type_t t)
 		return "host";
 	case V_IPV4:
 		return "ipv4";
+	case V_TEXT:
+		return "text";
+	case V_SECRET:
+		return "secret";
 	}
 	return "int";
 }
@@ -678,8 +730,14 @@ static void emit_key(cJSON *arr, const rcd_key_t *k)
 		 */
 		if (k->auto_ok)
 			cJSON_AddBoolToObject(o, "auto", true);
-	} else if (k->type == V_CRED || k->type == V_HOST) {
+	} else if (k->type == V_CRED || k->type == V_HOST || k->type == V_TEXT) {
 		cJSON_AddNumberToObject(o, "max_length", k->max);
+	} else if (k->type == V_SECRET) {
+		/* Its length rule is WPA's -- 8 to 63, or 64 hex digits -- and
+		 * belongs to the grammar rather than to this entry, so the
+		 * only thing left to say is whether an open network is one of
+		 * the answers. */
+		cJSON_AddBoolToObject(o, "optional", k->min == 0);
 	} else if (k->type == V_IPV4) {
 		/* Whether the empty string is one of its values. A form that
 		 * always submits every field needs to know which of them it
@@ -722,7 +780,8 @@ static void emit_key(cJSON *arr, const rcd_key_t *k)
 	 * not know that draws an input which always looks empty and calls it a
 	 * bug. Said plainly instead. A provider-backed key has no daemon to ask
 	 * and is read anyway -- from the store it is written to. */
-	if (k->type == V_CRED || (!k->provider && !rcd_section_reader(k->section)))
+	if (k->type == V_CRED || k->type == V_SECRET ||
+	    (!k->provider && !rcd_section_reader(k->section)))
 		cJSON_AddBoolToObject(o, "readable", false);
 
 	/* Present only where it applies, so a client that has never heard of
@@ -749,7 +808,18 @@ static void emit_action(cJSON *arr, const rcd_action_t *a)
 	if (a->daemon) {
 		cJSON_AddStringToObject(o, "owner", a->daemon);
 		cJSON_AddStringToObject(o, "impact", rcd_impact_name(RCD_IMPACT_NONE));
+	} else if (a->local) {
+		cJSON_AddStringToObject(o, "owner", "rcd");
+		cJSON_AddStringToObject(o, "impact", rcd_impact_name(a->impact));
+
+		/* Marked the way an unusable key is, and for the same reason:
+		 * a client hides it rather than offering a button whose only
+		 * outcome is the refusal. */
+		if (a->avail && !a->avail())
+			cJSON_AddBoolToObject(o, "available", false);
 	}
+	if (a->note)
+		cJSON_AddStringToObject(o, "note", a->note);
 
 	cJSON *args = cJSON_AddArrayToObject(o, "args");
 	for (int i = 0; args && a->args[i].type != A_END; i++) {

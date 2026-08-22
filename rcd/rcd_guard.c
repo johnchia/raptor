@@ -8,6 +8,7 @@
 #include "rcd_proto.h"
 #include "rcd_schema.h"
 #include "rcd_system.h"
+#include "rcd_wifi.h"
 
 #include <rss_common.h>
 
@@ -161,6 +162,52 @@ void rcd_guard_hold(rcd_state_t *st)
 	RSS_INFO("guard: holding %d key(s) against an apply", st->guard_count);
 }
 
+/*
+ * What may be said out loud about a value being put back.
+ *
+ * The revert is the one place a guarded value is written to the log, and two
+ * of the keys it covers are secrets: the wifi passphrase, and a credential if
+ * one is ever guarded. `set` and `get` have refused to report those since they
+ * existed, and this was the hole left behind -- a wifi revert printed the
+ * whole PSK to syslog, where it outlives the change that caused it.
+ *
+ * The line is kept rather than dropped: which key went back is what an
+ * operator is reading the log for, and only the value has to go.
+ */
+static const char *redacted(const rcd_key_t *k, const char *value)
+{
+	if (k->type == V_SECRET || k->type == V_CRED)
+		return "its previous value";
+	return value;
+}
+
+/*
+ * Did any wifi key move? The snapshot holds what each guarded store held
+ * before `set` wrote it, so a key whose store now reads differently is one
+ * that changed -- including a key that had no value and now has one, which is
+ * the fresh-camera case the portal is.
+ */
+static bool wifi_moved(const rcd_state_t *st)
+{
+	for (int i = 0; i < st->guard_count; i++) {
+		const rcd_guard_snap_t *s = &st->guard[i];
+
+		if (strcmp(s->section, "wifi") != 0)
+			continue;
+
+		const rcd_key_t *k = rcd_key_find(s->section, s->key);
+		if (!k || !k->provider)
+			continue;
+
+		char now[RCD_VAL_MAX] = "";
+		bool has = guard_get(k->provider, now, sizeof(now)) == 0;
+
+		if (has != s->had || (has && strcmp(now, s->prev) != 0))
+			return true;
+	}
+	return false;
+}
+
 void rcd_guard_arm(rcd_state_t *st, int window_sec)
 {
 	if (window_sec <= 0)
@@ -176,6 +223,22 @@ void rcd_guard_arm(rcd_state_t *st, int window_sec)
 	st->guard_retries = 0; /* a fresh experiment, not a stuck revert */
 	st->guard_window_sec = window_sec;
 	st->guard_deadline_ms = now_ms() + (uint64_t)window_sec * 1000;
+
+	/*
+	 * Whether a wifi credential is among what changed, which decides
+	 * whether this window can end by itself. Answered by comparing the
+	 * snapshot against the store rather than by being told: `set` has
+	 * already written the store, so the two differ exactly where
+	 * something moved, and nothing has to be threaded through apply.
+	 *
+	 * Sticky across an extension: a second guarded set inside the window
+	 * keeps the first snapshot, so it must not take away the reason the
+	 * first one could confirm itself.
+	 */
+	if (!extend)
+		st->guard_wifi_moved = false;
+	st->guard_wifi_moved |= wifi_moved(st);
+	st->guard_wifi_ask_ms = now_ms() + (uint64_t)RCD_GUARD_WIFI_DWELL_SEC * 1000;
 
 	/* The record before the deadline: rcd finding a deadline with no
 	 * snapshot beside it has armed a guard it cannot honour. */
@@ -241,6 +304,8 @@ void rcd_guard_confirm(rcd_state_t *st)
 	st->guard_window_sec = 0;
 	st->guard_count = 0;
 	st->guard_retries = 0;
+	st->guard_wifi_moved = false;
+	st->guard_wifi_ask_ms = 0;
 	record_clear();
 	RSS_INFO("guard: confirmed");
 }
@@ -410,11 +475,11 @@ void rcd_guard_revert(rcd_state_t *st, const char *why)
 
 		if (k->provider->set(s->prev) != 0) {
 			RSS_ERROR("guard: [%s] %s could not be put back to %s", s->section, s->key,
-				  s->prev);
+				  redacted(k, s->prev));
 			failed++;
 			continue;
 		}
-		RSS_INFO("guard: [%s] %s back to %s", s->section, s->key, s->prev);
+		RSS_INFO("guard: [%s] %s back to %s", s->section, s->key, redacted(k, s->prev));
 
 		/*
 		 * And it is no longer owed to an apply. The store holds what
@@ -469,7 +534,29 @@ void rcd_guard_revert(rcd_state_t *st, const char *why)
 
 void rcd_guard_tick(rcd_state_t *st, uint64_t now)
 {
-	if (!st->guard_deadline_ms || now < st->guard_deadline_ms)
+	if (!st->guard_deadline_ms)
+		return;
+
+	/*
+	 * A wifi change that has been shown to work confirms itself. See
+	 * RCD_GUARD_WIFI_DWELL_SEC for why the camera is allowed to answer
+	 * this one, and why not immediately.
+	 *
+	 * Ahead of the deadline check so that a window which has just run out
+	 * on a radio that is plainly associated ends as a confirmation rather
+	 * than as a revert of something that worked.
+	 */
+	if (st->guard_wifi_moved && st->guard_wifi_ask_ms && now >= st->guard_wifi_ask_ms) {
+		st->guard_wifi_ask_ms = now + RCD_GUARD_WIFI_POLL_MS;
+		if (rcd_wifi_settled()) {
+			RSS_INFO("guard: the radio is associated and addressed on the "
+				 "configured network; confirming");
+			rcd_guard_confirm(st);
+			return;
+		}
+	}
+
+	if (now < st->guard_deadline_ms)
 		return;
 	rcd_guard_revert(st, "nobody confirmed within the window");
 }
