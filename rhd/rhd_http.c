@@ -183,6 +183,39 @@ void http_error(rhd_client_t *c, const char *status, const char *msg)
 	http_send(c, status, "text/plain", msg, (int)strlen(msg));
 }
 
+/*
+ * A redirect, which nothing here needed until setup mode.
+ *
+ * Written out rather than routed through http_send(), which formats a fixed
+ * set of headers and has no way to carry a Location -- the same shape as
+ * http_401 below and for the same reason.
+ *
+ * 302 rather than 301: a permanent redirect is the one a browser caches, and
+ * a cached redirect to a setup page on a camera that has since been set up is
+ * a camera that looks broken to the one client that has visited it before.
+ * The body is a sentence rather than empty because a client that shows the
+ * response instead of following it should still say something useful.
+ */
+void http_302(rhd_client_t *c, const char *location)
+{
+	static const char body[] = "Redirecting to the camera setup page.\n";
+	char header[512];
+	int hlen = snprintf(header, sizeof(header),
+			    "HTTP/1.1 302 Found\r\n"
+			    "Location: %s\r\n"
+			    "Content-Type: text/plain\r\n"
+			    "Content-Length: %d\r\n"
+			    "Cache-Control: no-store\r\n"
+			    "Connection: close\r\n"
+			    "\r\n",
+			    location, (int)strlen(body));
+
+	if (hlen < 0 || hlen >= (int)sizeof(header))
+		return;
+	rhd_write(c, header, (size_t)hlen);
+	rhd_write(c, body, strlen(body));
+}
+
 void http_401(rhd_client_t *c)
 {
 	const char *body = "Unauthorized";

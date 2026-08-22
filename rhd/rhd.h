@@ -183,6 +183,13 @@ typedef struct {
 
 	bool api_enabled; /* serve POST /api/v1/rcd */
 
+	/*
+	 * Setup mode: one page, one address, no authentication. Off unless
+	 * the boot path said otherwise. See rhd_portal.h.
+	 */
+	bool portal;
+	char portal_addr[INET_ADDRSTRLEN];
+
 #ifdef RSS_HAS_TLS
 	rss_tls_ctx_t *tls;
 #endif
@@ -207,6 +214,7 @@ int http_send_async(rhd_client_t *c, int epoll_fd, const char *content_type, con
 int http_send_async_ex(rhd_client_t *c, int epoll_fd, const char *content_type, const void *body,
 		       uint32_t body_len, bool cors);
 void http_error(rhd_client_t *c, const char *status, const char *msg);
+void http_302(rhd_client_t *c, const char *location);
 void http_401(rhd_client_t *c);
 bool http_check_auth(const rhd_server_t *srv, const char *request);
 void http_send_mjpeg_header(rhd_client_t *c);

@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<!--
+  Raptor camera setup.
+
+  The page a camera shows on its own access point, before it has a network.
+  It is not a smaller console: the console renders every section rcd offers,
+  and this asks the four questions that get a camera onto a network and
+  nothing else. Everything else on an open setup network is exposure.
+
+  Two things it does that the console does not.
+
+  It derives the PSK here. The design wants the plaintext passphrase never to
+  cross an open access point, and rcd's wifi.psk accepts a pre-derived 64-hex
+  value for exactly that. crypto.subtle would be the obvious way to do it and
+  is unavailable: it is defined only in a secure context, and this page is
+  http:// on a bare address -- not HTTPS, not localhost. HTTPS is not the
+  answer either, because the connectivity probes that open the setup sheet are
+  plain HTTP by definition. So PBKDF2-HMAC-SHA1 is written out below, which is
+  a few tens of milliseconds on any phone.
+
+  And it does not wait for the apply. Putting the credentials into force is
+  what takes the camera off this access point, so the reply to that request
+  usually never arrives -- by design, not by failure. The page sends it and
+  stops talking.
+
+  Self-contained: no font host, no CDN, no external anything. A camera in
+  setup mode has no route off its own link.
+-->
+<meta charset="utf-8">
+<title>Camera setup</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{
+  --ground:#0d1012; --panel:#161a1d; --raise:#1e2428; --sink:#0a0d0e;
+  --line:#2a3135;
+  --ink:#dde4e7; --ink-dim:#8d9aa1; --ink-faint:#5f6d74;
+  --accent:#35b7c2; --accent-dim:#1d6b72;
+  --red:#e2574c; --amber:#dfa33c; --ok:#5aa87f;
+  --ui:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace;
+  --r:4px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--ui);
+     font-size:16px;line-height:1.5;-webkit-text-size-adjust:100%}
+button,input,select{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+.wrap{max-width:30rem;margin:0 auto;padding:1.5rem 1.25rem 3rem}
+header{padding:.5rem 0 1.5rem}
+h1{margin:0;font-size:1.4rem;letter-spacing:.01em;font-weight:600}
+.lede{margin:.4rem 0 0;color:var(--ink-dim);font-size:.95rem}
+
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+      padding:1.1rem 1rem}
+.field{margin:0 0 1.1rem}
+.field:last-child{margin-bottom:0}
+label{display:block;font-size:.85rem;color:var(--ink-dim);margin:0 0 .35rem;
+      text-transform:uppercase;letter-spacing:.06em}
+input,select{width:100%;background:var(--sink);border:1px solid var(--line);
+             border-radius:var(--r);padding:.6rem .7rem;color:var(--ink)}
+input::placeholder{color:var(--ink-faint)}
+select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--ink-dim) 50%),
+       linear-gradient(135deg,var(--ink-dim) 50%,transparent 50%);
+       background-position:right 1rem center,right .75rem center;
+       background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:2rem}
+.hint{margin:.35rem 0 0;font-size:.8rem;color:var(--ink-faint)}
+.hint.warn{color:var(--amber)}
+
+.pw{position:relative}
+.pw input{padding-right:4.2rem}
+.pw button{position:absolute;right:.35rem;top:.35rem;bottom:.35rem;padding:0 .6rem;
+           background:var(--raise);border:1px solid var(--line);border-radius:var(--r);
+           color:var(--ink-dim);font-size:.78rem;letter-spacing:.04em;cursor:pointer}
+
+.go{width:100%;margin-top:1.25rem;padding:.85rem;background:var(--accent-dim);
+    border:1px solid var(--accent);border-radius:var(--r);color:#eafcfd;
+    font-size:1rem;font-weight:600;cursor:pointer}
+.go:disabled{opacity:.5;cursor:default}
+
+.msg{margin:1rem 0 0;padding:.7rem .8rem;border-radius:var(--r);font-size:.9rem;
+     border:1px solid var(--line);background:var(--raise)}
+.msg.bad{border-color:var(--red);color:#f6c8c3}
+
+.done h2{margin:0 0 .6rem;font-size:1.1rem;font-weight:600}
+.done p{margin:0 0 .8rem;color:var(--ink-dim);font-size:.95rem}
+.done p:last-child{margin-bottom:0}
+.done strong{color:var(--ink);font-weight:600}
+.name{font-family:var(--mono);color:var(--accent)}
+
+.hidden{display:none}
+.rows{display:flex;align-items:baseline;justify-content:space-between;gap:.5rem}
+.rescan{background:none;border:0;padding:0;color:var(--accent);font-size:.8rem;
+        cursor:pointer;text-transform:uppercase;letter-spacing:.06em}
+.rescan:disabled{color:var(--ink-faint);cursor:default}
+</style>
+
+<div class="wrap">
+<header>
+  <h1>Set up this camera</h1>
+  <p class="lede">Choose the network the camera should join. It will leave this
+     setup network as soon as you do.</p>
+</header>
+
+<form id="form" class="card" autocomplete="off">
+  <div class="field">
+    <div class="rows">
+      <label for="ssid">Network</label>
+      <button type="button" id="rescan" class="rescan">Scan again</button>
+    </div>
+    <select id="ssid">
+      <option value="">Scanning…</option>
+    </select>
+    <p class="hint" id="scanhint">Looking for networks nearby.</p>
+  </div>
+
+  <div class="field hidden" id="otherwrap">
+    <label for="other">Network name</label>
+    <input id="other" type="text" maxlength="32" placeholder="Exactly as it appears">
+    <p class="hint">Case and spacing have to match.</p>
+  </div>
+
+  <div class="field">
+    <label for="psk">Passphrase</label>
+    <div class="pw">
+      <input id="psk" type="password" maxlength="63" placeholder="8 characters or more">
+      <button type="button" id="reveal">Show</button>
+    </div>
+    <p class="hint" id="pskhint">Scrambled on this device before it is sent.</p>
+  </div>
+
+  <div class="field">
+    <label for="name">Camera name</label>
+    <input id="name" type="text" maxlength="63" placeholder="front-door">
+    <p class="hint">How the camera announces itself on your network.</p>
+  </div>
+
+  <div class="field">
+    <label for="tz">Time zone</label>
+    <select id="tz"><option value="">Leave unchanged</option></select>
+    <p class="hint">Used for timestamps on the picture and in recordings.</p>
+  </div>
+
+  <button type="submit" class="go" id="go">Join network</button>
+  <div class="msg bad hidden" id="err"></div>
+</form>
+
+<div class="card done hidden" id="done">
+  <h2>Joining <span class="name" id="donessid"></span></h2>
+  <p>This setup network is going away. Reconnect your phone to
+     <strong id="donessid2"></strong> and look for the camera there.</p>
+  <p>It answers on port 8080 — try
+     <strong><span class="name" id="donename"></span></strong> or find it in
+     your router's list of connected devices.</p>
+  <p>If the passphrase was wrong, the camera puts back what it had before and
+     this setup network comes back. Nothing is lost by trying again.</p>
+</div>
+</div>
+
+<script>
+"use strict";
+
+/* ═══ transport ══════════════════════════════════════════════════════════
+   One route. rhd forwards the body to rcd and forwards the answer back; it
+   reads neither, so every rule about what may be set lives in rcd's table
+   and this page holds no second copy of it. */
+const API = "/api/v1/rcd";
+
+async function api(req) {
+  const res = await fetch(API, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(req)
+  });
+  if (!res.ok) throw new Error("the camera answered HTTP " + res.status);
+  const body = await res.json();
+  if (body.status !== "ok") {
+    const e = new Error(body.reason || "refused");
+    e.code = body.code;
+    throw e;
+  }
+  return body;
+}
+
+/* ═══ PBKDF2-HMAC-SHA1 ═══════════════════════════════════════════════════
+   WPA-PSK: 4096 iterations, the SSID as salt, 32 bytes out. Written here
+   because crypto.subtle does not exist outside a secure context and this
+   page is deliberately not one -- see the comment at the top.
+
+   Byte arrays throughout, and both inputs are encoded as UTF-8 first: a
+   passphrase or an SSID with a non-ASCII character has to hash to what the
+   access point hashed it to, and JavaScript strings are UTF-16. */
+
+function sha1(bytes) {
+  const ml = bytes.length;
+  const withPad = new Uint8Array((((ml + 8) >> 6) + 1) << 6);
+  withPad.set(bytes);
+  withPad[ml] = 0x80;
+  const bits = ml * 8;
+  const dv = new DataView(withPad.buffer);
+  dv.setUint32(withPad.length - 4, bits >>> 0, false);
+  dv.setUint32(withPad.length - 8, Math.floor(bits / 4294967296), false);
+
+  let h0 = 0x67452301, h1 = 0xEFCDAB89, h2 = 0x98BADCFE, h3 = 0x10325476, h4 = 0xC3D2E1F0;
+  const w = new Int32Array(80);
+
+  for (let i = 0; i < withPad.length; i += 64) {
+    for (let j = 0; j < 16; j++) w[j] = dv.getInt32(i + j * 4, false);
+    for (let j = 16; j < 80; j++) {
+      const n = w[j - 3] ^ w[j - 8] ^ w[j - 14] ^ w[j - 16];
+      w[j] = (n << 1) | (n >>> 31);
+    }
+    let a = h0, b = h1, c = h2, d = h3, e = h4;
+    for (let j = 0; j < 80; j++) {
+      let f, k;
+      if (j < 20)      { f = (b & c) | (~b & d);            k = 0x5A827999; }
+      else if (j < 40) { f = b ^ c ^ d;                     k = 0x6ED9EBA1; }
+      else if (j < 60) { f = (b & c) | (b & d) | (c & d);   k = 0x8F1BBCDC; }
+      else             { f = b ^ c ^ d;                     k = 0xCA62C1D6; }
+      const t = (((a << 5) | (a >>> 27)) + f + e + k + w[j]) | 0;
+      e = d; d = c; c = (b << 30) | (b >>> 2); b = a; a = t;
+    }
+    h0 = (h0 + a) | 0; h1 = (h1 + b) | 0; h2 = (h2 + c) | 0;
+    h3 = (h3 + d) | 0; h4 = (h4 + e) | 0;
+  }
+
+  const out = new Uint8Array(20);
+  const odv = new DataView(out.buffer);
+  odv.setInt32(0, h0, false); odv.setInt32(4, h1, false); odv.setInt32(8, h2, false);
+  odv.setInt32(12, h3, false); odv.setInt32(16, h4, false);
+  return out;
+}
+
+/* HMAC-SHA1. The key is a passphrase of at most 63 bytes, so the
+   longer-than-block-size case cannot arise here -- but hashing it down is
+   two lines and leaves nothing to be wrong about if it ever does. */
+function hmacSha1(key, msg) {
+  if (key.length > 64) key = sha1(key);
+  const pad = new Uint8Array(64);
+  pad.set(key);
+  const inner = new Uint8Array(64 + msg.length);
+  const outer = new Uint8Array(64 + 20);
+  for (let i = 0; i < 64; i++) {
+    inner[i] = pad[i] ^ 0x36;
+    outer[i] = pad[i] ^ 0x5c;
+  }
+  inner.set(msg, 64);
+  outer.set(sha1(inner), 64);
+  return sha1(outer);
+}
+
+function pbkdf2Sha1(pass, salt, iters, dklen) {
+  const out = new Uint8Array(dklen);
+  let done = 0;
+  for (let block = 1; done < dklen; block++) {
+    const first = new Uint8Array(salt.length + 4);
+    first.set(salt);
+    first[salt.length] = block >>> 24;
+    first[salt.length + 1] = (block >>> 16) & 0xff;
+    first[salt.length + 2] = (block >>> 8) & 0xff;
+    first[salt.length + 3] = block & 0xff;
+
+    let u = hmacSha1(pass, first);
+    const acc = u.slice();
+    for (let i = 1; i < iters; i++) {
+      u = hmacSha1(pass, u);
+      for (let j = 0; j < 20; j++) acc[j] ^= u[j];
+    }
+    const take = Math.min(20, dklen - done);
+    out.set(acc.subarray(0, take), done);
+    done += take;
+  }
+  return out;
+}
+
+const utf8 = (s) => new TextEncoder().encode(s);
+const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+
+/* The stored form of a passphrase for a given network. WPA derives the key
+   from both, so the same passphrase on two networks is two different keys --
+   which is also why this cannot be done before the network is chosen. */
+function derive(passphrase, ssid) {
+  return hex(pbkdf2Sha1(utf8(passphrase), utf8(ssid), 4096, 32));
+}
+
+/* ═══ the form ═══════════════════════════════════════════════════════════ */
+
+const $ = (id) => document.getElementById(id);
+/* The sentinel for "not in the list". Written as an escape rather than a
+   literal: a NUL is the one byte an SSID cannot contain -- the camera's own
+   grammar is printable ASCII -- so it cannot collide with the name of a real
+   network, and the page has no control bytes in it. */
+const OTHER = "\u0000other";
+
+function chosenSsid() {
+  return $("ssid").value === OTHER ? $("other").value.trim() : $("ssid").value;
+}
+
+function chosenSecure() {
+  const o = $("ssid").selectedOptions[0];
+  /* An unlisted network is assumed to want a passphrase: asking for one that
+     turns out to be unnecessary is a worse guess in only one direction. */
+  return !o || o.value === OTHER || o.dataset.secure !== "0";
+}
+
+function syncOther() {
+  $("otherwrap").classList.toggle("hidden", $("ssid").value !== OTHER);
+  $("pskhint").textContent = chosenSecure()
+    ? "Scrambled on this device before it is sent."
+    : "This network is open — leave the passphrase empty.";
+}
+
+$("ssid").addEventListener("change", syncOther);
+
+$("reveal").addEventListener("click", () => {
+  const f = $("psk");
+  const shown = f.type === "text";
+  f.type = shown ? "password" : "text";
+  $("reveal").textContent = shown ? "Show" : "Hide";
+});
+
+/* ── scanning ──
+   rcd triggers a scan and answers with the results it already has, rather
+   than blocking its single serve loop for the seconds a scan takes. So this
+   asks repeatedly and the list fills in, which is what scanning looks like
+   anyway. */
+let scanTries = 0;
+let scanTimer = 0;
+
+function renderNetworks(list) {
+  const sel = $("ssid");
+  const keep = sel.value;
+  sel.innerHTML = "";
+
+  if (!list.length) {
+    sel.appendChild(new Option("No networks found yet", ""));
+  }
+  for (const n of list) {
+    const bars = n.signal >= -55 ? "●●●" : n.signal >= -70 ? "●●" : "●";
+    const o = new Option(n.ssid + "  " + bars + (n.secure ? "" : "  open"), n.ssid);
+    o.dataset.secure = n.secure ? "1" : "0";
+    sel.appendChild(o);
+  }
+  sel.appendChild(new Option("Network not listed…", OTHER));
+
+  if (keep && [...sel.options].some((o) => o.value === keep)) sel.value = keep;
+  syncOther();
+}
+
+async function scan() {
+  $("rescan").disabled = true;
+  try {
+    const r = await api({cmd: "action", action: "wifi-scan"});
+    const list = r.networks || [];
+    renderNetworks(list);
+    $("scanhint").textContent = list.length
+      ? list.length + " network" + (list.length === 1 ? "" : "s") + " nearby."
+      : "Still looking…";
+    $("scanhint").classList.remove("warn");
+    /* Keep asking while the first scan is still coming back, then stop:
+       a page left open should not poll the radio forever. */
+    if (++scanTries < 6) scanTimer = setTimeout(scan, 2500);
+  } catch (e) {
+    $("scanhint").textContent = "Could not scan (" + e.message + "). " +
+      "Type the network name instead.";
+    $("scanhint").classList.add("warn");
+    renderNetworks([]);
+    $("ssid").value = OTHER;
+    syncOther();
+  } finally {
+    $("rescan").disabled = false;
+  }
+}
+
+$("rescan").addEventListener("click", () => {
+  clearTimeout(scanTimer);
+  scanTries = 0;
+  $("scanhint").textContent = "Looking for networks nearby.";
+  $("scanhint").classList.remove("warn");
+  scan();
+});
+
+/* ── the two optional fields ──
+   Both are asked of rcd rather than hardcoded: the zone list is rcd's, and
+   the name shown is the one the camera already has, so a person who does not
+   care can leave it and change nothing. */
+async function loadExtras() {
+  try {
+    const s = await api({cmd: "get", section: "system", key: "hostname"});
+    if (s.value) $("name").placeholder = s.value;
+  } catch (e) { /* a camera that will not say is one to leave alone */ }
+
+  try {
+    const sch = await api({cmd: "schema", section: "system"});
+    const tz = (sch.keys || []).find((k) => k.key === "timezone");
+    if (!tz || !tz.choices) return;
+    const sel = $("tz");
+    for (const z of tz.choices) sel.appendChild(new Option(z, z));
+  } catch (e) { /* the field simply stays on "leave unchanged" */ }
+}
+
+/* ── submitting ── */
+
+function fail(msg) {
+  $("err").textContent = msg;
+  $("err").classList.remove("hidden");
+  $("go").disabled = false;
+  $("go").textContent = "Join network";
+}
+
+$("form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  $("err").classList.add("hidden");
+
+  const ssid = chosenSsid();
+  if (!ssid) return fail("Choose a network, or type its name.");
+
+  const pass = $("psk").value;
+  const secure = chosenSecure();
+  if (secure && (pass.length < 8 || pass.length > 63))
+    return fail("A passphrase is 8 to 63 characters.");
+
+  $("go").disabled = true;
+  $("go").textContent = "Working…";
+
+  /* Derived here, so the passphrase itself never crosses this network. The
+     camera accepts either form; what it stores is the same 64 hex digits
+     either way. */
+  let psk = "";
+  if (secure) {
+    await new Promise((r) => setTimeout(r, 0)); /* let "Working…" paint */
+    try {
+      psk = derive(pass, ssid);
+    } catch (e) {
+      return fail("Could not prepare the passphrase (" + e.message + ").");
+    }
+  }
+
+  const edits = [
+    {section: "wifi", key: "ssid", value: ssid},
+    {section: "wifi", key: "psk", value: psk}
+  ];
+  const name = $("name").value.trim();
+  if (name) edits.push({section: "system", key: "hostname", value: name});
+  const tz = $("tz").value;
+  if (tz) edits.push({section: "system", key: "timezone", value: tz});
+
+  /*
+   * Stored first, and this is the request whose answer matters: it is where
+   * a value the camera will not accept is refused, while the setup network
+   * is still up to carry the refusal back.
+   */
+  try {
+    await api({cmd: "set", edits: edits});
+  } catch (e) {
+    return fail(e.message);
+  }
+
+  /*
+   * Then put it into force, and do not wait. Enacting is what takes the
+   * radio off this access point, so the reply usually has nowhere to go --
+   * that is the request succeeding, not failing, and treating a lost answer
+   * as an error would tell the operator the opposite of what happened.
+   */
+  api({cmd: "apply"}).catch(() => {});
+
+  $("donessid").textContent = ssid;
+  $("donessid2").textContent = ssid;
+  $("donename").textContent = (name || $("name").placeholder || "raptor") + ".local:8080";
+  $("form").classList.add("hidden");
+  $("done").classList.remove("hidden");
+  window.scrollTo(0, 0);
+});
+
+scan();
+loadExtras();
+</script>

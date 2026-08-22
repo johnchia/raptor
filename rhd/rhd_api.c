@@ -369,26 +369,43 @@ bool rhd_api_handle(rhd_server_t *srv, rhd_client_t *c, const char *method, cons
 	/*
 	 * After the enabled check, so a camera with the api switched off says
 	 * so rather than asking for credentials it will refuse anyway.
+	 *
+	 * Setup mode does not authenticate at all, and that is the same
+	 * decision as binding one address rather than a wildcard rather than
+	 * a second one. The credential this route wants is the system
+	 * account, and a camera being set up for the first time is precisely
+	 * the camera whose owner has not been given one -- so asking would
+	 * refuse everybody, including the person holding the device. What
+	 * bounds the exposure is the network: the listener answers only on
+	 * the access point the camera raised, and that access point exists
+	 * only while the camera has no network of its own. See rhd_portal.h.
+	 *
+	 * Nothing narrows *what* may be set here, deliberately. rcd's table
+	 * is the policy, and an allow-list in this file would be a second
+	 * copy of it -- the thing this whole route exists not to have.
 	 */
-	char host[64];
-	int retry_sec = 1;
+	if (!srv->portal) {
+		char host[64];
+		int retry_sec = 1;
 
-	client_addr_str(&c->addr, host, sizeof(host));
+		client_addr_str(&c->addr, host, sizeof(host));
 
-	switch (api_authenticate(c->recv_buf, host, &retry_sec)) {
-	case API_AUTH_OK:
-		break;
-	case API_AUTH_THROTTLED:
-		api_429(c, retry_sec);
-		return true;
-	case API_AUTH_NONE:
-	case API_AUTH_BAD:
-		/* Unlogged here. A request carrying no credentials is what
-		 * every browser sends first, and a line for each of those
-		 * buries the ones that mean something; the wrong-password case
-		 * has already logged itself, with the name that was tried. */
-		api_401(c);
-		return true;
+		switch (api_authenticate(c->recv_buf, host, &retry_sec)) {
+		case API_AUTH_OK:
+			break;
+		case API_AUTH_THROTTLED:
+			api_429(c, retry_sec);
+			return true;
+		case API_AUTH_NONE:
+		case API_AUTH_BAD:
+			/* Unlogged here. A request carrying no credentials is
+			 * what every browser sends first, and a line for each
+			 * of those buries the ones that mean something; the
+			 * wrong-password case has already logged itself, with
+			 * the name that was tried. */
+			api_401(c);
+			return true;
+		}
 	}
 
 	/*

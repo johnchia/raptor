@@ -27,6 +27,7 @@
 
 #include "rhd.h"
 #include "rhd_api.h"
+#include "rhd_portal.h"
 
 /* Index page — loaded from file on first request, cached */
 static char *index_html;
@@ -552,6 +553,14 @@ static void handle_request(rhd_server_t *srv, rhd_client_t *c)
 	if (rhd_api_handle(srv, c, method, path))
 		return;
 
+	/*
+	 * Setup mode, which answers everything that is left. Below the
+	 * configuration route because the portal page needs it, and above the
+	 * media gate because it replaces the whole of it -- see rhd_portal.h.
+	 */
+	if (rhd_portal_route(srv, c, method, path))
+		return;
+
 	if (!http_check_auth(srv, c->recv_buf)) {
 		http_401(c);
 		return;
@@ -715,9 +724,11 @@ static int rhd_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 
 static int server_init(rhd_server_t *srv)
 {
-	srv->listen_fd = rss_listen_tcp(srv->port, 8);
+	/* Setup mode binds one address; everything else takes the wildcard. */
+	srv->listen_fd = rss_listen_tcp_addr(srv->portal ? srv->portal_addr : NULL, srv->port, 8);
 	if (srv->listen_fd < 0) {
-		RSS_FATAL("listen on port %d: %s", srv->port, strerror(errno));
+		RSS_FATAL("listen on %s port %d: %s", srv->portal ? srv->portal_addr : "*",
+			  srv->port, strerror(errno));
 		return -1;
 	}
 
@@ -738,7 +749,10 @@ static int server_init(rhd_server_t *srv)
 		}
 	}
 
-	RSS_INFO("HTTP server listening on port %d (dual-stack)", srv->port);
+	if (srv->portal)
+		RSS_INFO("HTTP server listening on %s port %d", srv->portal_addr, srv->port);
+	else
+		RSS_INFO("HTTP server listening on port %d (dual-stack)", srv->port);
 	return 0;
 }
 
@@ -1215,6 +1229,14 @@ int main(int argc, char **argv)
 	 * only a more confusing one. */
 	srv.api_enabled = rss_config_get_bool(ctx.cfg, "http", "api_enabled", true);
 
+	/*
+	 * Setup mode, before anything that depends on the port or on who may
+	 * configure the camera -- it decides both. The config file has no say:
+	 * this is a decision the boot path made about a camera that cannot yet
+	 * be reached to be configured.
+	 */
+	rhd_portal_init(&srv);
+
 	/* Basic auth — enabled when both username and password are set */
 	const char *http_user = rss_config_get_str(ctx.cfg, "http", "username", "");
 	const char *http_pass = rss_config_get_str(ctx.cfg, "http", "password", "");
@@ -1262,6 +1284,7 @@ int main(int argc, char **argv)
 
 cleanup:
 	free(index_html);
+	rhd_portal_free();
 #ifdef RSS_HAS_TLS
 	rss_tls_free(srv.tls);
 #endif

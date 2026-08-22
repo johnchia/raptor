@@ -71,7 +71,7 @@ tests: $(TEST_SRCS) $(LIB_SRCS) $(CTRL_SRCS) $(IPC_SRCS) $(RCD_SRCS) $(SDP_SRC) 
 test_slow_rtsp: test_slow_rtsp.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-test: tests console
+test: tests console portal
 	./tests
 
 # The console is JavaScript in one HTML file and nothing else here can run it.
@@ -86,7 +86,18 @@ console:
 		echo "console_smoke: node not found, skipped"; \
 	fi
 
+# The setup page carries its own PBKDF2-HMAC-SHA1, because the portal is served
+# over plain HTTP by design and crypto.subtle does not exist there. A wrong
+# derivation looks exactly like a mistyped passphrase from the camera's side,
+# so it is checked against known vectors rather than by reading it.
+portal:
+	@if command -v node > /dev/null 2>&1; then \
+		node portal_smoke.js; \
+	else \
+		echo "portal_smoke: node not found, skipped"; \
+	fi
+
 clean:
 	rm -f tests test_slow_rtsp sdp_parse.c
 
-.PHONY: test console clean
+.PHONY: test console portal clean
