@@ -47,6 +47,14 @@
 #endif
 
 /*
+ * The last scan the radio managed, kept by setup-mode when it raised the
+ * access point. See the comment on the fallback in rcd_wifi_scan.
+ */
+#ifndef RCD_WIFI_SCAN_CACHE
+#define RCD_WIFI_SCAN_CACHE "/run/wifi-scan.cache"
+#endif
+
+/*
  * How long to wait for the radio to associate before asking for a lease.
  *
  * Short, because rcd serves on one loop and nothing else is answered while
@@ -503,32 +511,14 @@ static bool scan_line(char *line, const char **ssid, int *signal, bool *secure)
 	return true;
 }
 
-int rcd_wifi_scan(cJSON *resp, char *err, size_t errsz)
+/*
+ * Turn `wpa_cli scan_results` output into the networks array. Destroys the
+ * buffer it is given -- strtok_r and scan_line both write into it -- so the
+ * caller passes a copy it does not need afterwards. Returns how many networks
+ * were added.
+ */
+static int scan_collect(char *out, cJSON *arr)
 {
-	if (!rcd_wifi_present()) {
-		snprintf(err, errsz, "this camera has no radio");
-		return -1;
-	}
-
-	/*
-	 * Ask for a fresh scan and then read what is already there. The
-	 * request is deliberately not waited on -- see rcd_wifi.h. It fails
-	 * while one is already running, which is not a failure of this call.
-	 */
-	(void)wpa_cli("scan", NULL, 0);
-
-	char out[WIFI_SCAN_OUT_MAX];
-	if (wpa_cli("scan_results", out, sizeof(out)) != 0) {
-		snprintf(err, errsz, "the radio is not running a supplicant to scan with");
-		return -1;
-	}
-
-	cJSON *arr = cJSON_AddArrayToObject(resp, "networks");
-	if (!arr) {
-		snprintf(err, errsz, "out of memory");
-		return -1;
-	}
-
 	char *save = NULL;
 	int kept = 0;
 
@@ -577,6 +567,69 @@ int rcd_wifi_scan(cJSON *resp, char *err, size_t errsz)
 	/* wpa_supplicant already returns them strongest first, so there is
 	 * nothing to sort -- and re-sorting would only be a second opinion
 	 * about numbers this daemon did not measure. */
+	return kept;
+}
+
+int rcd_wifi_scan(cJSON *resp, char *err, size_t errsz)
+{
+	if (!rcd_wifi_present()) {
+		snprintf(err, errsz, "this camera has no radio");
+		return -1;
+	}
+
+	/*
+	 * Ask for a fresh scan and then read what is already there. The
+	 * request is deliberately not waited on -- see rcd_wifi.h. It fails
+	 * while one is already running, which is not a failure of this call.
+	 *
+	 * Not asked at all when the radio is an access point, because it
+	 * cannot be answered: a beaconing radio will not leave its channel,
+	 * so the request is accepted and no results ever arrive. Skipping it
+	 * also leaves the results of the supplicant's own start-up scan alone
+	 * for as long as cfg80211 keeps them.
+	 */
+	char st[512];
+	bool is_ap = wpa_cli("status", st, sizeof(st)) == 0 && strstr(st, "\nmode=AP") != NULL;
+
+	if (!is_ap)
+		(void)wpa_cli("scan", NULL, 0);
+
+	char out[WIFI_SCAN_OUT_MAX];
+	if (wpa_cli("scan_results", out, sizeof(out)) != 0) {
+		snprintf(err, errsz, "the radio is not running a supplicant to scan with");
+		return -1;
+	}
+
+	cJSON *arr = cJSON_AddArrayToObject(resp, "networks");
+	if (!arr) {
+		snprintf(err, errsz, "out of memory");
+		return -1;
+	}
+
+	if (scan_collect(out, arr) > 0)
+		return 0;
+
+	/*
+	 * Nothing live, so fall back to the snapshot setup-mode kept when it
+	 * raised the access point.
+	 *
+	 * This is the ordinary case in setup mode rather than an edge of it.
+	 * The supplicant scans once while starting the access point and never
+	 * again -- the driver will not leave the channel to do it -- and
+	 * cfg80211 drops those entries about two minutes later. A camera
+	 * waiting for somebody to walk over with a phone is always past that,
+	 * so without this the setup page offers an empty list every time.
+	 *
+	 * Only when the live answer was empty, so a working client radio is
+	 * never served a stale list.
+	 */
+	int len = 0;
+	char *cached = rss_read_file(RCD_WIFI_SCAN_CACHE, &len);
+	if (!cached)
+		return 0;
+
+	(void)scan_collect(cached, arr);
+	free(cached);
 	return 0;
 }
 
