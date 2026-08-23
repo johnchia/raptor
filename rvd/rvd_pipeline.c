@@ -1093,6 +1093,41 @@ int rvd_pipeline_init(rvd_state_t *st)
 		}
 	}
 
+	/*
+	 * Say so when a main stream asks the encoder for more than the part is
+	 * rated to deliver. Main streams only, and not a sum: the vendor rates
+	 * the main path ("3M@20", "5M@30") and leaves separate headroom for a
+	 * substream that the figure does not describe, so adding the sub in
+	 * would fail parts that are inside their spec.
+	 *
+	 * Deliberately a warning and nothing more. The one part measured so far
+	 * beats its own rating comfortably, so clamping here would take working
+	 * frame rate off a board that sustains it. The line earns its place on
+	 * the other side: when a board *is* dropping frames or wedging, it names
+	 * the envelope that was left, which is otherwise only in a datasheet.
+	 */
+	if (caps && caps->max_enc_pixel_rate > 0) {
+		for (int i = 0; i < st->stream_count; i++) {
+			/* Sub streams sit on the sensor's second fs channel. */
+			if (st->streams[i].fs_chn != fs_base_channel(st->streams[i].sensor_idx))
+				continue;
+			uint64_t want = (uint64_t)st->streams[i].enc_cfg.width *
+					st->streams[i].enc_cfg.height *
+					st->streams[i].enc_cfg.fps_num;
+			if (want > caps->max_enc_pixel_rate)
+				/* Kept short: syslog truncates, and a warning whose
+				 * advice is the part that gets cut is no warning. */
+				RSS_WARN("%s: %ux%u at %u fps is %llu Mpixel/s, over this part's "
+					 "rated %u for a main stream -- lower it first if the "
+					 "encoder misbehaves",
+					 st->streams[i].cfg_sect, st->streams[i].enc_cfg.width,
+					 st->streams[i].enc_cfg.height,
+					 st->streams[i].enc_cfg.fps_num,
+					 (unsigned long long)(want / 1000000),
+					 caps->max_enc_pixel_rate / 1000000u);
+		}
+	}
+
 	/* IVDC encoder group reorder: SDK requires IVDC channels in
 	 * groups 0..N-1. Reassign groups so IVDC mains come first. */
 	{
@@ -1137,7 +1172,33 @@ int rvd_pipeline_init(rvd_state_t *st)
 				continue;
 			}
 			const char *sect = st->streams[v].cfg_sect;
-			if (!rss_config_get_bool(cfg, sect, "jpeg", true))
+
+			/*
+			 * Past the SoC's JPEG ceiling a snapshot channel is worse
+			 * than none: it takes a full width*height ring off the MMA
+			 * heap, never produces a frame, and every /snap.jpg then
+			 * spends the client's timeout before answering 503. Default
+			 * it off rather than ship a path that cannot work, and say
+			 * why -- the failure is otherwise a silent 503 with a
+			 * healthy-looking channel sitting behind it.
+			 *
+			 * Only the default moves. A config that asks for the
+			 * channel still gets it; the ceiling is marginal at the
+			 * boundary rather than absolute, so this is not ours to
+			 * refuse outright.
+			 */
+			bool jpeg_def = true;
+			if (caps && caps->max_jpeg_pixels > 0 &&
+			    (uint64_t)st->streams[v].enc_cfg.width *
+					    st->streams[v].enc_cfg.height >
+				    (uint64_t)caps->max_jpeg_pixels) {
+				jpeg_def = false;
+				RSS_INFO("%s: %ux%u is past this part's JPEG ceiling of %u "
+					 "pixels, so no snapshot channel unless asked for",
+					 sect, st->streams[v].enc_cfg.width,
+					 st->streams[v].enc_cfg.height, caps->max_jpeg_pixels);
+			}
+			if (!rss_config_get_bool(cfg, sect, "jpeg", jpeg_def))
 				continue;
 
 			int quality = rss_config_get_int(cfg, sect, "jpeg_quality", def_quality);

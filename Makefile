@@ -44,6 +44,18 @@ CFLAGS := -Wall -Wextra -Werror
 CFLAGS += -std=gnu11 -D_GNU_SOURCE
 CFLAGS += -ffunction-sections -fdata-sections
 CFLAGS += -DPLATFORM_$(PLATFORM)
+# SOC_MODEL is the part; PLATFORM is only its family, and some facts do not
+# survive that generalisation -- ssc333, ssc335 and ssc337 are all
+# INFINITY6B0 and are rated 3M@20, 3M@30 and 5M@20 respectively. The part is
+# not readable at runtime (the chip ID is family-wide: ipctool reports
+# SSC33X for all three), so it has to arrive from the build.
+#
+# Optional. A build that names no model gets no -DSOC_MODEL_*, and the caps
+# tables leave the per-part fields at 0, which reads as "unmeasured" and
+# clamps nothing.
+ifneq ($(SOC_MODEL),)
+CFLAGS += -DSOC_MODEL_$(shell echo $(SOC_MODEL) | tr '[:lower:]' '[:upper:]')
+endif
 CFLAGS += -I$(CURDIR)/$(HAL_DIR)/include
 CFLAGS += -I$(CURDIR)/$(IPC_DIR)/include
 CFLAGS += -I$(CURDIR)/$(COMMON_DIR)/include
@@ -333,6 +345,7 @@ ifneq ($(wildcard $(HAL_DIR)/Makefile),)
 build-raptor-hal:
 	@echo "  BUILD   raptor-hal"
 	$(Q)$(MAKE) -C $(HAL_DIR) PLATFORM=$(PLATFORM) CROSS_COMPILE=$(CROSS_COMPILE) \
+		$(if $(SOC_MODEL),SOC_MODEL=$(SOC_MODEL),) \
 		$(if $(DEBUG),DEBUG=1,) \
 		$(if $(filter 1,$(V4L2_OPENIMP)),V4L2_OPENIMP=1,)
 

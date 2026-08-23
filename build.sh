@@ -15,25 +15,56 @@ if [ $# -ge 2 ]; then
     shift 2
 fi
 
-case "$platform" in
-    t10|T10) PLATFORM=T10 ;;
-    t20|T20) PLATFORM=T20 ;;
-    t21|T21) PLATFORM=T21 ;;
-    t23|T23) PLATFORM=T23 ;;
-    t30|T30) PLATFORM=T30 ;;
-    t31|T31) PLATFORM=T31 ;;
-    t32|T32) PLATFORM=T32 ;;
-    t33|T33) PLATFORM=T33 ;;
-    t40|T40) PLATFORM=T40 ;;
-    t41|T41) PLATFORM=T41 ;;
-    a1|A1)   PLATFORM=A1 ;;
-    infinity6e|INFINITY6E|ssc30kq|SSC30KQ) PLATFORM=INFINITY6E ;;
-    infinity6b0|INFINITY6B0|ssc333|SSC333|ssc335|SSC335|ssc337|SSC337) PLATFORM=INFINITY6B0 ;;
-    infinity6c|INFINITY6C|ssc377|SSC377|ssc377de|SSC377DE|ssc378|SSC378|ssc379|SSC379)
-        PLATFORM=INFINITY6C ;;
+# Folded to lower case once rather than spelling every arm twice: the
+# SigmaStar list is twenty part numbers, and SSC337DE/ssc337DE/ssc337de are
+# the same part however someone types it.
+platform_lc=$(echo "$platform" | tr '[:upper:]' '[:lower:]')
+
+case "$platform_lc" in
+    t10) PLATFORM=T10 ;;
+    t20) PLATFORM=T20 ;;
+    t21) PLATFORM=T21 ;;
+    t23) PLATFORM=T23 ;;
+    t30) PLATFORM=T30 ;;
+    t31) PLATFORM=T31 ;;
+    t32) PLATFORM=T32 ;;
+    t33) PLATFORM=T33 ;;
+    t40) PLATFORM=T40 ;;
+    t41) PLATFORM=T41 ;;
+    a1)  PLATFORM=A1 ;;
+    # Naming a family builds for the family and leaves the per-part caps
+    # fields unmeasured; naming a part fills them in. The two are separate
+    # arms because the part is not readable at runtime -- the chip ID is
+    # family-wide, and ipctool reports SSC33X for ssc333/335/337 alike --
+    # so this argument is the only place the part can come from.
+    #
+    # The part lists are the vendor's, and the spellings are the ones
+    # OpenIPC's defconfigs already use for BR2_OPENIPC_SOC_MODEL, so a board
+    # can pass its own value straight through. Variants that differ only in
+    # package or DRAM still appear: they are separate parts to name, and
+    # src/caps_sigmastar.inc is where they get grouped by encoder rate.
+    infinity6b0) PLATFORM=INFINITY6B0 ;;
+    ssc333|ssc333de|ssc335|ssc335de|ssc337|ssc337de)
+        PLATFORM=INFINITY6B0; SOC_MODEL=$platform_lc ;;
+    infinity6e) PLATFORM=INFINITY6E ;;
+    ssc336d|ssc336q|ssc30kd|ssc30kq|ssc338d|ssc338q|ssc338g|ssc339g)
+        PLATFORM=INFINITY6E; SOC_MODEL=$platform_lc ;;
+    infinity6c) PLATFORM=INFINITY6C ;;
+    ssc377|ssc377d|ssc377de|ssc377qe|ssc378de|ssc378qe)
+        PLATFORM=INFINITY6C; SOC_MODEL=$platform_lc ;;
     *)
         echo "Usage: $0 <platform> <br_output> [target...]"
-        echo "Platforms: t10 t20 t21 t23 t30 t31 t32 t33 t40 t41 a1 infinity6e infinity6b0 infinity6c"
+        echo ""
+        echo "Families: t10 t20 t21 t23 t30 t31 t32 t33 t40 t41 a1"
+        echo "          infinity6b0 infinity6e infinity6c"
+        echo ""
+        echo "Parts. Naming one of these instead of its family fills in the"
+        echo "per-part encoder ceilings, which a family build leaves unset:"
+        echo "  infinity6b0  ssc333 ssc333de ssc335 ssc335de ssc337 ssc337de"
+        echo "  infinity6e   ssc336d ssc336q ssc30kd ssc30kq"
+        echo "               ssc338d ssc338q ssc338g ssc339g"
+        echo "  infinity6c   ssc377 ssc377d ssc377de ssc377qe"
+        echo "               ssc378de ssc378qe"
         echo ""
         echo "  <br_output> is the buildroot output directory containing"
         echo "  host/ with the cross-compiler and sysroot."
@@ -166,6 +197,7 @@ fi
 export PATH="$TOOLCHAIN:$PATH"
 
 MAKE_ARGS="PLATFORM=$PLATFORM CROSS_COMPILE=$CROSS_COMPILE SYSROOT=$SYSROOT AAC=1 OPUS=1 MP3=1"
+[ -n "${SOC_MODEL:-}" ] && MAKE_ARGS="$MAKE_ARGS SOC_MODEL=$SOC_MODEL"
 
 # Auto-detect TLS support
 if [ -f "$SYSROOT/usr/lib/libmbedtls.so" ] || [ -f "$SYSROOT/lib/libmbedtls.so" ]; then
