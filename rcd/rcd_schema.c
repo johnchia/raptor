@@ -364,6 +364,29 @@ static const rcd_key_t keys[] = {
 	{"ircut", "gpio_ircut2", V_INT, -1, 127, NULL, SAVED},
 	{"ircut", "gpio_irled", V_INT, -1, 127, NULL, SAVED},
 	{"ircut", "gpio_irled2", V_INT, -1, 127, NULL, SAVED},
+	/*
+	 * ...and which way each one is wired. A pin number says which line to
+	 * drive and nothing about the sense of it, so a pin is only half an
+	 * answer: boards exist for either polarity, and ric has honoured these
+	 * flags all along -- they were simply unreachable from here, which left
+	 * an inverted board with no route but hand-editing raptor.conf.
+	 *
+	 * false is the plain form: the IR-cut pin is driven high for day, and
+	 * an LED bank lights on 1.
+	 *
+	 * There is no gpio_ircut2_active_low, and that is not an omission. A
+	 * two-pin filter is a motor across an H-bridge, where the polarity IS
+	 * the order of the two pins; ric consults the flag below only on the
+	 * single-pin path. Setting it on an H-bridge board changes nothing --
+	 * swap the pins instead.
+	 *
+	 * /etc/thingino.json carries the same information, as {"pin": N,
+	 * "active_low": true}, and is absent on an OpenIPC base for the same
+	 * reason the pins above are here.
+	 */
+	{"ircut", "gpio_ircut_active_low", V_BOOL, 0, 0, NULL, SAVED},
+	{"ircut", "gpio_irled_active_low", V_BOOL, 0, 0, NULL, SAVED},
+	{"ircut", "gpio_irled2_active_low", V_BOOL, 0, 0, NULL, SAVED},
 	/* trigger = adc: a photoresistor on an ADC channel, 12-bit. */
 	{"ircut", "adc_channel", V_INT, 0, 7, NULL, SAVED},
 	{"ircut", "adc_night", V_INT, 0, 4095, NULL, SAVED},

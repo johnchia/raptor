@@ -588,6 +588,25 @@ Confirm the filter is actuating at all first, though. A purple cast from an
 inverted H-bridge and one from a filter that never moves look identical from
 outside, and the second has its own causes — pins left unset, for one.
 
+A single-pin filter is the other wiring, and it is configured by *leaving
+`gpio_ircut2` at -1*: one line, held rather than pulsed, driven high for day and
+low for night. `pulse_ms` does not apply. If a board wants the opposite sense,
+that is `gpio_ircut_active_low = true` rather than a second pin — and it is the
+only thing that key does, since across an H-bridge the polarity is the pin order
+and ric never consults the flag on that path.
+
+The two failure modes look nothing alike, which is the useful part. A swapped
+H-bridge gives the purple daylight cast above. An inverted single pin gives day
+and night the wrong way round: colour in the dark and monochrome in daylight,
+with the filter fighting the ISP's own mode rather than the light.
+
+`gpio_irled_active_low` and `gpio_irled2_active_low` say the same thing about
+the two LED banks, which light on 0 when set. That one is worth checking
+deliberately on a new board, because it does not show in the picture: the
+daylight image looks correct while the illuminator runs all day and the scene
+goes dark at night. 850nm is only faintly visible, so the first symptom is
+usually heat.
+
 Both LED pins are listed; only the 850nm one is switched, since ir940 defaults
 off. That unit has no photoresistor and the kernel config has `CONFIG_MS_SAR`
 off, so `trigger = adc` had no device to open on it either — again a property of
