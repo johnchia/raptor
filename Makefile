@@ -76,7 +76,7 @@ RSS_BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 RSS_BUILD_OBJ := $(CURDIR)/rss_build_info.o
 $(shell printf 'const char *rss_build_hash = "%s";\nconst char *rss_build_time = "%s";\nconst char *rss_build_platform = "%s";\n' \
 	'$(RSS_BUILD_HASH)' '$(RSS_BUILD_TIME)' '$(PLATFORM)' > $(CURDIR)/rss_build_info.c)
-$(RSS_BUILD_OBJ): $(CURDIR)/rss_build_info.c
+$(RSS_BUILD_OBJ): $(CURDIR)/rss_build_info.c $(CONFIG_STAMP)
 	@echo "  CC      rss_build_info.c"
 	$(Q)$(CC) $(CFLAGS) -c $< -o $@
 
@@ -150,7 +150,39 @@ endif
 # available is a property of how that library was built, not of TLS above.
 LDFLAGS_MOSQUITTO ?= -lmosquitto
 
+# Which platform a compiled object was built for is invisible to Make: PLATFORM
+# and SOC_MODEL reach the compiler only as -D flags. Switching platform in a
+# tree that has already been built therefore leaves every .o looking up to date
+# while it is wrong. Record the settings that select code, hand the record down
+# to the sub-makes, and rewrite it only when it differs -- a same-platform
+# rebuild stays incremental, a switch rebuilds what depends on it. The rule that
+# maintains the file is below `all', so that it cannot become the default goal.
+BUILD_CONFIG := PLATFORM=$(PLATFORM) SOC_MODEL=$(SOC_MODEL) DEBUG=$(DEBUG) \
+                TLS=$(TLS) CC=$(CC)
+CONFIG_STAMP := $(CURDIR)/.build-config
+
 # Library file paths (for Make dependencies and build triggers)
+#
+# These are prerequisites of the daemon targets below, but those targets are
+# .PHONY, so all a rebuilt library does here is re-enter the sub-make. The
+# sub-make is the one that decides whether to link, and it only ever compared
+# the binary against its own objects -- so a library that changed under an
+# unchanged daemon left the daemon alone, and the stale binary kept whatever
+# the archive held when it was last linked.
+#
+# That is a silent wrong answer rather than a slow build. The HAL archive is
+# per-platform: everything it knows about which SoC it is compiled for arrives
+# as -DPLATFORM_* and -DSOC_MODEL_* at compile time. Build the HAL for one
+# family and link a daemon that was last built against another, and the daemon
+# runs a board with the wrong chip's port ceilings and the wrong part's encoder
+# ratings, reporting the platform it thinks it is the whole time. On an SSC333
+# that produced /snap.jpg frames stitched out of VPE strips -- port 2 accepting
+# a 2304-wide clone its scaler tops out at 1920 short of -- for a HAL that had
+# last been compiled as INFINITY6E.
+#
+# So each daemon Makefile puts the file-valued half of its $(LIBS) on the
+# prerequisite line (LIB_DEPS), which is what makes the link depend on what it
+# actually links.
 LIB_HAL_VIDEO_FILE ?= $(CURDIR)/$(HAL_DIR)/libraptor_hal_video.a
 LIB_HAL_AUDIO_FILE ?= $(CURDIR)/$(HAL_DIR)/libraptor_hal_audio.a
 LIB_IPC_FILE    ?= $(CURDIR)/$(IPC_DIR)/librss_ipc.so
@@ -174,7 +206,7 @@ RSS_TLS_SRC := $(firstword $(wildcard $(CURDIR)/$(COMMON_DIR)/src/rss_tls.c) \
 RSS_TLS_OBJ := $(CURDIR)/rss_tls.o
 RSS_TLS_CFLAGS := -DRSS_HAS_TLS
 ifneq ($(RSS_TLS_SRC),)
-$(RSS_TLS_OBJ): $(RSS_TLS_SRC)
+$(RSS_TLS_OBJ): $(RSS_TLS_SRC) $(CONFIG_STAMP)
 	@echo "  CC      rss_tls.c"
 	$(Q)$(CC) $(CFLAGS) -c $< -o $@
 endif
@@ -309,9 +341,18 @@ LIVE555_LIBS ?= $(LIVE555_SYSROOT)/usr/lib/libliveMedia.a \
 DAEMONS := rvd rsd rad rhd rod ric rmr rmd rwd rwc rfs rsp rsr rsd-555 rmq rcd
 TOOLS   := raptorctl ringdump rac rlatency rverify mdnsprobe
 
-.PHONY: all clean libs $(DAEMONS) $(TOOLS) install
+.PHONY: all clean libs $(DAEMONS) $(TOOLS) install FORCE
 
 all: libs $(DAEMONS) $(TOOLS)
+
+$(CONFIG_STAMP): FORCE
+	$(Q)if [ ! -f $@ ] || [ "`cat $@`" != "$(BUILD_CONFIG)" ]; then \
+		echo "  CONFIG  $(BUILD_CONFIG)"; \
+		printf '%s' "$(BUILD_CONFIG)" > $@; \
+	fi
+
+FORCE:
+
 
 # Phase 1 quick target
 phase1: libs rvd ringdump raptorctl
@@ -375,29 +416,29 @@ endif
 
 # -- Daemons --
 
-rvd: $(LIB_HAL_VIDEO_FILE) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+rvd: $(CONFIG_STAMP) $(LIB_HAL_VIDEO_FILE) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rvd"
-	$(Q)$(MAKE) -C rvd CC="$(CC)" CFLAGS="$(CFLAGS)" \
+	$(Q)$(MAKE) -C rvd CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS)" \
 		LIBS="$(LIB_HAL_VIDEO) $(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS_HAL)" Q="$(Q)"
 
-rsd: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(LIB_COMPY_FILE) $(RSS_BUILD_OBJ)
+rsd: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(LIB_COMPY_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rsd"
-	$(Q)$(MAKE) -C rsd CC="$(CC)" CFLAGS="$(CFLAGS) $(COMPY_CFLAGS)" \
+	$(Q)$(MAKE) -C rsd CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS) $(COMPY_CFLAGS)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(LIB_COMPY) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS) $(LDFLAGS_TLS) $(LDFLAGS_OPUS) $(LDFLAGS_AAC_DEC)" Q="$(Q)"
 
-rsd-555: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+rsd-555: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rsd-555"
-	$(Q)$(MAKE) -C rsd-555 CC="$(CC)" CXX="$(CROSS_COMPILE)g++" CFLAGS="$(CFLAGS)" \
+	$(Q)$(MAKE) -C rsd-555 CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CXX="$(CROSS_COMPILE)g++" CFLAGS="$(CFLAGS)" \
 		LIVE555_INC="$(LIVE555_INC)" \
 		LIVE555_LIBS="$(LIVE555_LIBS)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS)" LINK_STDCXX="$(LINK_STDCXX)" Q="$(Q)"
 
-rad: $(LIB_HAL_AUDIO_FILE) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+rad: $(CONFIG_STAMP) $(LIB_HAL_AUDIO_FILE) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rad"
-	$(Q)$(MAKE) -C rad CC="$(CC)" CFLAGS="$(CFLAGS)" \
+	$(Q)$(MAKE) -C rad CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS)" \
 		LIBS="$(LIB_HAL_AUDIO) $(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS_HAL) $(LDFLAGS_AAC_ENC) $(LDFLAGS_OPUS)" Q="$(Q)"
 
@@ -408,55 +449,55 @@ rad: $(LIB_HAL_AUDIO_FILE) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 # board and not the other, from the same source. Naming it unconditionally is
 # safe on both: a musl sysroot ships libcrypt.a as an empty archive precisely so
 # that -lcrypt keeps working.
-rhd: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_TLS_OBJ) $(RSS_BUILD_OBJ)
+rhd: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_TLS_OBJ) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rhd"
-	$(Q)$(MAKE) -C rhd CC="$(CC)" CFLAGS="$(CFLAGS) $(RSS_TLS_CFLAGS)" \
+	$(Q)$(MAKE) -C rhd CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS) $(RSS_TLS_CFLAGS)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_TLS_OBJ) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS) $(LDFLAGS_TLS) -lcrypt" Q="$(Q)"
 
 # -lm must follow -lschrift: libschrift's rasteriser calls floor, ceil and
 # nextafter, and nothing else in rod pulls in libm.
-rod: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+rod: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rod"
-	$(Q)$(MAKE) -C rod CC="$(CC)" CFLAGS="$(CFLAGS)" \
+	$(Q)$(MAKE) -C rod CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) -lschrift -lm $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS)" Q="$(Q)"
 
-ric: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+ric: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   ric"
-	$(Q)$(MAKE) -C ric CC="$(CC)" CFLAGS="$(CFLAGS)" \
+	$(Q)$(MAKE) -C ric CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS) -ldl" Q="$(Q)"
 
-rmr: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+rmr: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rmr"
-	$(Q)$(MAKE) -C rmr CC="$(CC)" CFLAGS="$(CFLAGS)" \
+	$(Q)$(MAKE) -C rmr CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS)" Q="$(Q)"
 
-rmd: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+rmd: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rmd"
-	$(Q)$(MAKE) -C rmd CC="$(CC)" CFLAGS="$(CFLAGS)" \
+	$(Q)$(MAKE) -C rmd CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS)" Q="$(Q)"
 
-rwd: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(LIB_COMPY_FILE) $(RSS_TLS_OBJ) $(RSS_BUILD_OBJ)
+rwd: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(LIB_COMPY_FILE) $(RSS_TLS_OBJ) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rwd"
-	$(Q)$(MAKE) -C rwd CC="$(CC)" CFLAGS="$(CFLAGS) $(COMPY_CFLAGS) -DMBEDTLS_ALLOW_PRIVATE_ACCESS -DRSS_HAS_TLS" \
+	$(Q)$(MAKE) -C rwd CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS) $(COMPY_CFLAGS) -DMBEDTLS_ALLOW_PRIVATE_ACCESS -DRSS_HAS_TLS" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(LIB_COMPY) $(RSS_TLS_OBJ) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS) $(LDFLAGS_TLS) $(LDFLAGS_OPUS) $(LDFLAGS_AAC_DEC)" WEBTORRENT=$(WEBTORRENT) Q="$(Q)"
 
-rwc: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+rwc: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rwc"
-	$(Q)$(MAKE) -C rwc CC="$(CC)" CFLAGS="$(CFLAGS)" \
+	$(Q)$(MAKE) -C rwc CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS)" Q="$(Q)"
 
 LIBMOV_DIR := $(CURDIR)/.deps/media-server/libmov
 
-rfs: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+rfs: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rfs"
-	$(Q)$(MAKE) -C rfs CC="$(CC)" \
+	$(Q)$(MAKE) -C rfs CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" \
 		CFLAGS="$(CFLAGS) -I$(CURDIR)/rad -I$(LIBMOV_DIR)/include -I$(LIBMOV_DIR)/source" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS) $(LDFLAGS_AAC_ENC) $(LDFLAGS_OPUS) $(LDFLAGS_MP3) $(LDFLAGS_AAC_DEC)" \
@@ -473,9 +514,9 @@ RSP_CFLAGS += -DRAPTOR_OPUS
 RSP_LDFLAGS += $(LDFLAGS_OPUS)
 endif
 
-rsp: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(LIB_COMPY_FILE) $(RSS_TLS_OBJ) $(RSS_BUILD_OBJ)
+rsp: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(LIB_COMPY_FILE) $(RSS_TLS_OBJ) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rsp"
-	$(Q)$(MAKE) -C rsp CC="$(CC)" CFLAGS="$(CFLAGS) $(RSP_CFLAGS) $(COMPY_CFLAGS) -I$(CURDIR)/rmr" \
+	$(Q)$(MAKE) -C rsp CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS) $(RSP_CFLAGS) $(COMPY_CFLAGS) -I$(CURDIR)/rmr" \
 		RMR_DIR="$(CURDIR)/rmr" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(LIB_COMPY) $(RSS_TLS_OBJ) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS) $(LDFLAGS_TLS) $(RSP_LDFLAGS)" Q="$(Q)"
@@ -483,57 +524,57 @@ rsp: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(LIB_COMPY_FILE) $(RSS_TLS_OBJ) $(RSS_B
 LDFLAGS_SRT ?= -lsrt $(LINK_STDCXX) -latomic $(LDFLAGS_TLS)
 CFLAGS_SRT  ?= $(if $(SYSROOT),-I$(SYSROOT)/usr/include)
 
-rsr: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+rsr: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rsr"
-	$(Q)$(MAKE) -C rsr CC="$(CC)" CFLAGS="$(CFLAGS) $(CFLAGS_SRT)" \
+	$(Q)$(MAKE) -C rsr CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS) $(CFLAGS_SRT)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS) $(LDFLAGS_SRT)" Q="$(Q)"
 
-rcd: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+rcd: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rcd"
-	$(Q)$(MAKE) -C rcd CC="$(CC)" CFLAGS="$(CFLAGS)" \
+	$(Q)$(MAKE) -C rcd CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS)" Q="$(Q)"
 
-rmq: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+rmq: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rmq"
-	$(Q)$(MAKE) -C rmq CC="$(CC)" CFLAGS="$(CFLAGS) $(CFLAGS_MDNS)" \
+	$(Q)$(MAKE) -C rmq CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS) $(CFLAGS_MDNS)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS) $(LDFLAGS_MOSQUITTO) $(LDFLAGS_MDNS)" Q="$(Q)"
 
 # -- Tools --
 
-raptorctl: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+raptorctl: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   raptorctl"
-	$(Q)$(MAKE) -C raptorctl CC="$(CC)" CFLAGS="$(CFLAGS)" \
+	$(Q)$(MAKE) -C raptorctl CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS)" Q="$(Q)"
 
-ringdump: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+ringdump: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   ringdump"
-	$(Q)$(MAKE) -C ringdump CC="$(CC)" CFLAGS="$(CFLAGS)" \
+	$(Q)$(MAKE) -C ringdump CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS)" Q="$(Q)"
 
-rac: $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
+rac: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rac"
-	$(Q)$(MAKE) -C rac CC="$(CC)" CFLAGS="$(CFLAGS)" \
+	$(Q)$(MAKE) -C rac CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS) $(LDFLAGS_MP3) $(LDFLAGS_AAC_DEC) $(LDFLAGS_OPUS)" Q="$(Q)"
 
-rlatency:
+rlatency: $(CONFIG_STAMP)
 	@echo "  BUILD   rlatency"
-	$(Q)$(MAKE) -C rlatency CC="$(CC)" CFLAGS="$(CFLAGS)" \
+	$(Q)$(MAKE) -C rlatency CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS)" \
 		LDFLAGS="$(LDFLAGS)" Q="$(Q)"
 
-rverify: $(LIB_COMMON_FILE)
+rverify: $(CONFIG_STAMP) $(LIB_COMMON_FILE)
 	@echo "  BUILD   rverify"
-	$(Q)$(MAKE) -C rverify CC="$(CC)" CFLAGS="$(CFLAGS)" \
+	$(Q)$(MAKE) -C rverify CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS)" \
 		LIBS="$(LIB_COMMON)" LDFLAGS="$(LDFLAGS)" Q="$(Q)"
 
-mdnsprobe: $(LIB_COMMON_FILE)
+mdnsprobe: $(CONFIG_STAMP) $(LIB_COMMON_FILE)
 	@echo "  BUILD   mdnsprobe"
-	$(Q)$(MAKE) -C mdnsprobe CC="$(CC)" CFLAGS="$(CFLAGS) $(CFLAGS_MDNS)" \
+	$(Q)$(MAKE) -C mdnsprobe CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS) $(CFLAGS_MDNS)" \
 		LIBS="$(LIB_COMMON)" \
 		LDFLAGS="$(LDFLAGS) $(LDFLAGS_MDNS)" Q="$(Q)"
 
