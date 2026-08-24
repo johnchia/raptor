@@ -216,8 +216,9 @@ select{background:var(--sink);border:1px solid var(--line);border-radius:var(--r
 .matrix thead th .res{font-family:var(--mono);font-size:10.5px;letter-spacing:0;
                       text-transform:none;display:block;margin-top:2px}
 .matrix tbody tr:last-child td{border-bottom:0}
-.matrix td.k{width:230px}
+.matrix td.k{width:250px}
 .matrix td.k .id{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint)}
+.matrix td.k .help{margin:5px 0 0;font-size:11.5px;color:var(--ink-dim);line-height:1.4}
 .matrix td.cell.dirty{background:rgba(223,163,60,.05);box-shadow:inset 3px 0 0 var(--amber)}
 .matrix td.cell.resetting{background:rgba(53,183,194,.05);box-shadow:inset 3px 0 0 var(--accent-dim)}
 .matrix td.cell.resetting .cellbox>*:first-child{opacity:.4;pointer-events:none}
@@ -395,7 +396,9 @@ const L = {
  "image.vflip":["Flip vertically"],
  "stream0.width":["Width","px"],"stream0.height":["Height","px"],
  "stream0.codec":["Video codec","","H.265 halves the bitrate for the same picture; some clients cannot decode it."],
- "stream0.profile":["H.264 profile"],"stream0.bitrate":["Bitrate","bps"],
+ "stream0.profile":["H.264 profile"],
+ "stream0.rc_mode":["Rate control","","How the encoder spends its bitrate. cbr holds the rate steady, vbr and the capped modes let it fall on a still scene, fixqp holds the picture quality instead and lets the rate go where it will. A mode this part does not have is substituted, and logged."],
+ "stream0.bitrate":["Bitrate","bps"],
  "stream0.gop":["Keyframe interval","frames","Frames between keyframes. Lower joins faster and costs bandwidth."],
  "stream0.fps":["Frame rate","fps"],"stream0.osd_enabled":["Burn in the overlay"],
  "stream0.jpeg":["JPEG snapshots from this stream"],"stream1.enabled":["Second stream"],
@@ -440,7 +443,7 @@ const L = {
  "timelapse.enabled":["Time-lapse"],"timelapse.interval":["Capture every","s"],
  "timelapse.playback_fps":["Playback rate","fps"],"timelapse.max_mb":["Storage cap","MB"]
 };
-["width","height","codec","profile","bitrate","gop","fps","osd_enabled","jpeg"]
+["width","height","codec","profile","rc_mode","bitrate","gop","fps","osd_enabled","jpeg"]
   .forEach(k => { if (L["stream0." + k]) L["stream1." + k] = L["stream0." + k]; });
 
 const pretty = s => s.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
@@ -831,6 +834,22 @@ function syncControl(el, k, val) {
   if (nm && num !== undefined) nm.value = num;
   const tx = el.querySelector(".txt");
   if (tx && document.activeElement !== tx) tx.value = val === undefined || val === null ? "" : val;
+
+  /* A named value rather than a magnitude, drawn as a select or a segmented
+     control. Both are put back from the same display form buildControl drew
+     them with -- without this a live command the camera refused leaves the
+     control showing the choice that was refused, which is the one thing it
+     must never do. */
+  const name = k.type === "enum" ? val : (k.labels ? labelOf(k, val) : undefined);
+  if (name === undefined || name === null) return;
+  const sel = el.querySelector("select");
+  if (sel) {
+    sel.value = name;
+    sel.querySelectorAll("option").forEach(o => { o.selected = o.value === name; });
+  }
+  const sg = el.querySelector(".seg");
+  if (sg) sg.querySelectorAll("button").forEach(
+    b => b.setAttribute("aria-pressed", String(b.textContent === name)));
 }
 
 /* ═══ controls ═══════════════════════════════════════════════════════════ */
@@ -1095,7 +1114,13 @@ function buildMatrix(sections) {
     const anyId = sections.map(s => s + "." + key).find(i => byId[i]);
     const nm = document.createElement("div"); nm.textContent = label(anyId);
     const il = document.createElement("div"); il.className = "id"; il.textContent = "*." + key;
-    kd.append(nm, il); tr.append(kd);
+    kd.append(nm, il);
+    /* The label is the only place a matrix key can be explained: a cell holds
+       one control per stream and has no room beside it. */
+    const kh = help(anyId);
+    if (kh) { const p = document.createElement("p"); p.className = "help"; p.textContent = kh;
+      kd.append(p); }
+    tr.append(kd);
     sections.forEach(s => {
       const id = s + "." + key, td = document.createElement("td"); td.className = "cell";
       if (!byId[id]) { const u = document.createElement("span"); u.className = "unit";

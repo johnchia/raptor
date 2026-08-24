@@ -727,6 +727,27 @@ TEST channelled_keys_carry_their_own_channel(void)
 }
 
 /*
+ * The field a live command expects is the daemon's, not this table's. Almost
+ * every one calls it `value` and rc_mode does not: rvd's set-rc-mode carries a
+ * bitrate as well, so its mode argument is named. Sending `value` there is
+ * refused by rvd with "need channel and mode" -- an error on a key the schema
+ * still advertises as live, which is the failure this pins down.
+ */
+TEST a_live_command_is_sent_the_field_it_asks_for(void)
+{
+	const rcd_key_t *k = rcd_key_find("stream0", "rc_mode");
+	ASSERT(k);
+	ASSERT_STR_EQ("set-rc-mode", k->live_cmd);
+	ASSERT_STR_EQ("mode", k->live_arg);
+	ASSERT_EQ(0, k->live_chn);
+	ASSERT_EQ(1, rcd_key_find("stream1", "rc_mode")->live_chn);
+
+	/* And the ordinary case still spells it `value`. */
+	ASSERT_STR_EQ("value", rcd_key_find("stream0", "bitrate")->live_arg);
+	PASS();
+}
+
+/*
  * Every writable key has an owner that can be restarted, or an edit would be
  * saved with nothing able to pick it up. Walked over the whole table so a key
  * added to a new section cannot quietly land in that state.
@@ -3102,6 +3123,7 @@ SUITE(rcd_cmd_suite)
 
 	RUN_TEST(the_table_decides_the_tier);
 	RUN_TEST(channelled_keys_carry_their_own_channel);
+	RUN_TEST(a_live_command_is_sent_the_field_it_asks_for);
 	RUN_TEST(every_writable_key_has_an_owner);
 	RUN_TEST(impact_separates_the_pipeline_from_the_stream);
 	RUN_TEST(the_zone_table_is_two_arrays_of_one_length);

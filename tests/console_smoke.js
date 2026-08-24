@@ -134,6 +134,8 @@ const ids = [...html.matchAll(/getElementById\("([a-zA-Z0-9_]+)"\)/g)].map(m => 
 
 let served = 0;
 const sent = [];          /* every request body, so a test can read the last one */
+/* The value the camera insists on for the next `set`, or null to take it. */
+let refuseNext = null;
 function reply(body) {
 	served++;
 	sent.push(body);
@@ -156,6 +158,12 @@ function reply(body) {
 	 * the one in force. */
 	if (cmd === "set") {
 		const e = (body.edits || [])[0] || {};
+		/* A live command the daemon would not take: rcd writes the file
+		 * instead and reports the value still in force. */
+		if (refuseNext !== null)
+			return {api: 1, status: "ok",
+				results: [{section: e.section, key: e.key, value: refuseNext,
+					   applied: "saved", note: "refused while running"}]};
 		return {api: 1, status: "ok",
 			results: [{section: e.section, key: e.key, value: e.value,
 				   applied: "live"}]};
@@ -284,6 +292,7 @@ try {
 	if (!p.getKeys().length) fail("the page kept no keys from the schema it was served");
 
 	const sheet = nodes.sheet;
+	const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setTimeout(r, 1)); };
 	let drawn = 0, undos = 0;
 	p.TABS.forEach(t => {
 		p.setActive(t.id);
@@ -355,6 +364,50 @@ try {
 		     p.ACT_STATE["ircut-mode"] + ")");
 
 	/*
+	 * Rate control: the first named value on the live tier, and it sits in
+	 * the encoder matrix, whose cells carry no row id to find it by. Both
+	 * halves are worth pinning -- that the mode reaches rcd as this
+	 * section's own key, with no channel of the page's invention, and that
+	 * a refusal puts the control back. A select that keeps showing the mode
+	 * the camera would not take is a control that lies about the camera.
+	 */
+	p.setActive("streams");
+	p.render();
+	const rcRow = sheet.querySelectorAll("tr").find(
+		r => r.querySelectorAll(".id").some(i => i.textContent === "*.rc_mode"));
+	if (!rcRow) fail("the encoder matrix drew no rate-control row");
+	const rcCells = rcRow.querySelectorAll(".cell");
+	const rcSel = rcCells.map(c => c.querySelector("select"));
+	if (rcSel.length !== 2 || !rcSel[0] || !rcSel[1])
+		fail("rate control was not drawn for both encoders");
+	if (!rcSel[0].querySelectorAll("option").some(o => o.value === "capped_vbr"))
+		fail("the rate-control choices did not come from the schema");
+	/* Six mode names mean nothing on their own, and a matrix cell has no
+	   room to say what they are: the row label is the only place left. */
+	if (!rcRow.querySelectorAll(".help").length)
+		fail("the rate-control row drew six bare mode names and no explanation");
+
+	rcSel[0].value = "vbr";
+	rcSel[0].handlers.change[0]();
+	await settle();
+	let rc = sent[sent.length - 1];
+	if (rc.cmd !== "set" || rc.edits[0].section !== "stream0" ||
+	    rc.edits[0].key !== "rc_mode" || rc.edits[0].value !== "vbr")
+		fail("choosing a rate control sent " + JSON.stringify(rc));
+	if (rc.edits[0].channel !== undefined)
+		fail("the page invented a channel; the section is what carries it");
+
+	/* And the refusal. rcd answers with the value in force, which after a
+	 * refused live command is the one the camera still has. */
+	refuseNext = "cbr";
+	rcSel[0].value = "fixqp";
+	rcSel[0].handlers.change[0]();
+	await settle();
+	refuseNext = null;
+	if (rcSel[0].value !== "cbr")
+		fail("a refused mode left the control showing " + rcSel[0].value);
+
+	/*
 	 * The image knobs, which have no fixed scale to draw from. Their range
 	 * is the hardware's and arrives in `state`; the schema's bounds are the
 	 * widest any platform accepts and are wrong for every one of them here.
@@ -405,8 +458,6 @@ try {
 	if (Number(sliderIn(rowFor("brightness")).value) !== 50)
 		fail("a knob on auto drew " + sliderIn(rowFor("brightness")).value +
 		     " instead of the value the camera reports");
-
-	const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setTimeout(r, 1)); };
 
 	autoBtn("contrast").handlers.click[0]();
 	await settle();

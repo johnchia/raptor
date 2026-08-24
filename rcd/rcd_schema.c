@@ -193,10 +193,16 @@ static const char *const choices_threshold[] = {
  * because -Werror=missing-field-initializers means the whole of it has to be
  * spelled out either way.
  */
-#define LIVE(cmd)	 cmd, "value", -1, NULL, RCD_IMPACT_NONE, 0, false
-#define LIVE_CH(c, n)	 c, "value", n, NULL, RCD_IMPACT_NONE, 0, false
-#define SAVED		 NULL, NULL, -1, NULL, RCD_IMPACT_NONE, 0, false
-#define PROVIDED(p, imp) NULL, NULL, -1, &(p), (imp), 0, false
+#define LIVE(cmd)     cmd, "value", -1, NULL, RCD_IMPACT_NONE, 0, false
+#define LIVE_CH(c, n) c, "value", n, NULL, RCD_IMPACT_NONE, 0, false
+
+/* A live command whose value is not called `value`. rvd's set-rc-mode names
+ * its argument `mode` because the command carries a bitrate as well, and a
+ * key is applied by the command the daemon already has rather than by one
+ * added to spell the field the way this table would prefer. */
+#define LIVE_CH_ARG(c, a, n) c, a, n, NULL, RCD_IMPACT_NONE, 0, false
+#define SAVED		     NULL, NULL, -1, NULL, RCD_IMPACT_NONE, 0, false
+#define PROVIDED(p, imp)     NULL, NULL, -1, &(p), (imp), 0, false
 
 /* An ISP knob: live like the rest, and it takes the word "auto" as well as a
  * number. See rcd_key_t::auto_ok -- the word says "follow the tuning's own
@@ -214,14 +220,16 @@ static const rcd_key_t keys[] = {
 
 	/*
 	 * -- Video. Resolution is the reason the restart tier exists at all:
-	 *    an encoder is created at its size and cannot be resized. Rate and
-	 *    GOP are the opposite -- the encoder takes them while it runs, so
-	 *    they carry the channel their command needs.
+	 *    an encoder is created at its size and cannot be resized. Rate,
+	 *    rate control and GOP are the opposite -- the encoder takes them
+	 *    while it runs, so they carry the channel their command needs.
 	 */
 	{"stream0", "width", V_INT, 160, 4096, NULL, SAVED},
 	{"stream0", "height", V_INT, 120, 4096, NULL, SAVED},
 	{"stream0", "codec", V_ENUM, 0, 0, choices_vcodec, SAVED},
 	{"stream0", "profile", V_INT, 0, 2, labels_profile, SAVED},
+	{"stream0", "rc_mode", V_ENUM, 0, 0, choices_rc_mode,
+	 LIVE_CH_ARG("set-rc-mode", "mode", 0)},
 	{"stream0", "bitrate", V_INT, 32000, 50000000, NULL, LIVE_CH("set-bitrate", 0)},
 	{"stream0", "gop", V_INT, 1, 300, NULL, LIVE_CH("set-gop", 0)},
 	{"stream0", "fps", V_INT, 1, 120, NULL, LIVE_CH("set-fps", 0)},
@@ -232,6 +240,8 @@ static const rcd_key_t keys[] = {
 	{"stream1", "height", V_INT, 120, 4096, NULL, SAVED},
 	{"stream1", "codec", V_ENUM, 0, 0, choices_vcodec, SAVED},
 	{"stream1", "profile", V_INT, 0, 2, labels_profile, SAVED},
+	{"stream1", "rc_mode", V_ENUM, 0, 0, choices_rc_mode,
+	 LIVE_CH_ARG("set-rc-mode", "mode", 1)},
 	{"stream1", "bitrate", V_INT, 32000, 50000000, NULL, LIVE_CH("set-bitrate", 1)},
 	{"stream1", "gop", V_INT, 1, 300, NULL, LIVE_CH("set-gop", 1)},
 	{"stream1", "fps", V_INT, 1, 120, NULL, LIVE_CH("set-fps", 1)},
