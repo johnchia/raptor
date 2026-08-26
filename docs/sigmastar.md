@@ -552,7 +552,8 @@ black. Note that **`ae_luma` is a post-AE measurement**: holding it near target
 is the AE's whole job, so it sits around 45 in a lit room and a dim one alike and
 only falls once the AE has spent its shutter and gain. Both values are readable
 live via `raptorctl ric status`, or on the picture — the `%ae_luma%` and
-`%total_gain%` tokens documented above `[osd.uptime]` in `config/raptor.conf`.
+`%total_gain%` tokens documented above the `[osd.*]` sections in
+`config/raptor.conf`.
 
 ### IR-cut pins are board wiring, and nothing here can supply them
 

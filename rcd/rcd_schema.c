@@ -98,22 +98,58 @@ static const struct {
 	const char *section;
 	const char *daemon;
 } readable[] = {
-	{"sensor", "rvd"},    {"image", "rvd"}, {"stream0", "rvd"}, {"stream1", "rvd"},
-	{"jpeg", "rvd"},      {"ring", "rvd"},	{"log", "rvd"},	    {"audio", "rad"},
-	{"osd", "rod"},	      {"ircut", "ric"}, {"motion", "rmd"},  {"recording", "rmr"},
-	{"timelapse", "rmr"}, {"rtsp", "rsd"},	{"http", "rhd"},    {NULL, NULL},
+	{"sensor", "rvd"},
+	{"image", "rvd"},
+	{"stream0", "rvd"},
+	{"stream1", "rvd"},
+	{"jpeg", "rvd"},
+	{"ring", "rvd"},
+	{"log", "rvd"},
+	{"audio", "rad"},
+	{"osd", "rod"},
+	{"ircut", "ric"},
+	{"motion", "rmd"},
+	{"recording", "rmr"},
+	{"timelapse", "rmr"},
+	{"rtsp", "rsd"},
+	{"http", "rhd"},
+	/* One per place on the picture; see the [osd.*] keys below. */
+	{"osd.top_left", "rod"},
+	{"osd.top_center", "rod"},
+	{"osd.top_right", "rod"},
+	{"osd.bottom_left", "rod"},
+	{"osd.bottom_center", "rod"},
+	{"osd.bottom_right", "rod"},
+	{NULL, NULL},
 };
 
 static const struct {
 	const char *section;
 	rcd_daemon_t owner;
 } writable[] = {
-	{"sensor", RCD_D_RVD},	  {"stream0", RCD_D_RVD},  {"stream1", RCD_D_RVD},
-	{"image", RCD_D_RVD},	  {"jpeg", RCD_D_RVD},	   {"audio", RCD_D_RAD},
-	{"rtsp", RCD_D_RSD},	  {"http", RCD_D_RHD},	   {"osd", RCD_D_ROD},
-	{"ircut", RCD_D_RIC},	  {"motion", RCD_D_RMD},   {"recording", RCD_D_RMR},
-	{"timelapse", RCD_D_RMR}, {"device", RCD_D_COUNT}, {"network", RCD_D_COUNT},
-	{"wifi", RCD_D_COUNT},	  {NULL, RCD_D_COUNT},
+	{"sensor", RCD_D_RVD},
+	{"stream0", RCD_D_RVD},
+	{"stream1", RCD_D_RVD},
+	{"image", RCD_D_RVD},
+	{"jpeg", RCD_D_RVD},
+	{"audio", RCD_D_RAD},
+	{"rtsp", RCD_D_RSD},
+	{"http", RCD_D_RHD},
+	{"osd", RCD_D_ROD},
+	{"ircut", RCD_D_RIC},
+	{"motion", RCD_D_RMD},
+	{"recording", RCD_D_RMR},
+	{"timelapse", RCD_D_RMR},
+	{"device", RCD_D_COUNT},
+	{"network", RCD_D_COUNT},
+	{"wifi", RCD_D_COUNT},
+	{"osd.top_left", RCD_D_ROD},
+	{"osd.top_center", RCD_D_ROD},
+	{"osd.top_right", RCD_D_ROD},
+	{"osd.bottom_left", RCD_D_ROD},
+	{"osd.bottom_center", RCD_D_ROD},
+	{"osd.bottom_right", RCD_D_ROD},
+	{NULL, RCD_D_COUNT},
 };
 
 const char *rcd_section_reader(const char *section)
@@ -145,6 +181,7 @@ static const char *const choices_acodec[] = {"pcmu", "pcma", "l16", "aac", "opus
 static const char *const choices_ainput[] = {"amic", "dmic", NULL};
 static const char *const choices_arate[] = {"8000", "16000", "32000", "48000", NULL};
 static const char *const choices_trigger[] = {"luma", "gain", "adc", "photo", NULL};
+static const char *const choices_align[] = {"left", "center", "right", NULL};
 static const char *const choices_algorithm[] = {"move", "base_move", "persondet", "yolo", NULL};
 static const char *const choices_recmode[] = {"continuous", "motion", "both", NULL};
 
@@ -357,6 +394,61 @@ static const rcd_key_t keys[] = {
 	{"osd", "enabled", V_BOOL, 0, 0, NULL, SAVED},
 	{"osd", "font_size", V_INT, 8, 96, NULL, SAVED},
 	{"osd", "font_stroke", V_INT, 0, 5, NULL, SAVED},
+
+	/*
+	 * -- The six places on the picture. --
+	 *
+	 * rod's overlay is a list of elements, each named by whoever wrote the
+	 * config and placed by a `position` line -- which is the right model
+	 * for what it can draw and the wrong one for a table of keys fixed at
+	 * compile time, because nothing here can name a section a person has
+	 * not written yet. So rod also reads a section named for a place as
+	 * being in that place, and these are those six names. An element named
+	 * anything else is untouched by this and simply not reachable from
+	 * here; it is not overwritten, hidden, or moved.
+	 *
+	 * `position` is deliberately absent. It is the section name, and a key
+	 * that could disagree with it would let a slot be dragged out of the
+	 * slot it is.
+	 *
+	 * A template is the one value in this table that a person composes
+	 * rather than chooses, so it is the widest grammar here -- V_TEXT, the
+	 * type the wifi SSID uses. It is not a path, a format or a command:
+	 * rod expands its own %var% names into a bitmap and passes it to
+	 * nothing. The 71 is what one value in this protocol holds, and rod's
+	 * own limit is longer -- a template past it is still settable by hand
+	 * and through rod's `set-element`.
+	 *
+	 * Spelled out six times rather than expanded from a macro, because a
+	 * macro here formats badly enough to be worth avoiding and the six are
+	 * meant to be greppable by section name. What keeps them identical is
+	 * a test that walks them, which a macro could not have caught anyway:
+	 * the drift that matters is one slot gaining a key the others lack.
+	 *
+	 * What a corner is, and not how it is drawn: the type is the overlay's
+	 * and is set once in [osd]. rod reads a per-element `font_size` and
+	 * `max_chars` and honours both, and they stay hand-edited -- six copies
+	 * of a size that is meant to match is a way to end up with six sizes
+	 * that do not.
+	 */
+	{"osd.top_left", "template", V_TEXT, 0, 71, NULL, SAVED},
+	{"osd.top_left", "visible", V_BOOL, 0, 0, NULL, SAVED},
+	{"osd.top_left", "align", V_ENUM, 0, 0, choices_align, SAVED},
+	{"osd.top_center", "template", V_TEXT, 0, 71, NULL, SAVED},
+	{"osd.top_center", "visible", V_BOOL, 0, 0, NULL, SAVED},
+	{"osd.top_center", "align", V_ENUM, 0, 0, choices_align, SAVED},
+	{"osd.top_right", "template", V_TEXT, 0, 71, NULL, SAVED},
+	{"osd.top_right", "visible", V_BOOL, 0, 0, NULL, SAVED},
+	{"osd.top_right", "align", V_ENUM, 0, 0, choices_align, SAVED},
+	{"osd.bottom_left", "template", V_TEXT, 0, 71, NULL, SAVED},
+	{"osd.bottom_left", "visible", V_BOOL, 0, 0, NULL, SAVED},
+	{"osd.bottom_left", "align", V_ENUM, 0, 0, choices_align, SAVED},
+	{"osd.bottom_center", "template", V_TEXT, 0, 71, NULL, SAVED},
+	{"osd.bottom_center", "visible", V_BOOL, 0, 0, NULL, SAVED},
+	{"osd.bottom_center", "align", V_ENUM, 0, 0, choices_align, SAVED},
+	{"osd.bottom_right", "template", V_TEXT, 0, 71, NULL, SAVED},
+	{"osd.bottom_right", "visible", V_BOOL, 0, 0, NULL, SAVED},
+	{"osd.bottom_right", "align", V_ENUM, 0, 0, choices_align, SAVED},
 
 	/* -- Day/night: how the board is wired, and what nightfall is. -- */
 	{"ircut", "enabled", V_BOOL, 0, 0, NULL, SAVED},

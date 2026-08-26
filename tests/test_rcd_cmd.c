@@ -822,6 +822,60 @@ TEST every_daynight_threshold_is_a_live_key(void)
 }
 
 /*
+ * The six places on the picture differ in nothing but where they are.
+ *
+ * They are spelled out one section at a time rather than expanded from a
+ * macro, so this is what holds them equal: a slot that gained a key, lost one,
+ * or bounded one differently would render as a corner that behaves unlike the
+ * other five for no reason anybody could find.
+ */
+TEST the_six_places_carry_the_same_keys(void)
+{
+	static const char *const places[] = {"osd.top_left",
+					     "osd.top_center",
+					     "osd.top_right",
+					     "osd.bottom_left",
+					     "osd.bottom_center",
+					     "osd.bottom_right",
+					     NULL};
+	static const char *const expect[] = {"template", "visible", "align", NULL};
+
+	for (int p = 0; places[p]; p++) {
+		int n = 0;
+		for (int i = 0;; i++) {
+			const rcd_key_t *k = rcd_key_at(i);
+			if (!k)
+				break;
+			if (strcmp(k->section, places[p]) != 0)
+				continue;
+			n++;
+
+			/*
+			 * `position` is the section name. A key that could
+			 * disagree with it would let a slot be moved out of
+			 * the slot it is.
+			 */
+			ASSERT(strcmp(k->key, "position") != 0);
+
+			const rcd_key_t *first = rcd_key_find(places[0], k->key);
+			ASSERT(first);
+			ASSERT_EQ(first->type, k->type);
+			ASSERT_EQ(first->min, k->min);
+			ASSERT_EQ(first->max, k->max);
+		}
+		ASSERT_EQ(3, n);
+
+		for (int e = 0; expect[e]; e++)
+			ASSERT(rcd_key_find(places[p], expect[e]));
+
+		/* rod owns them, and answers for them when asked. */
+		ASSERT_EQ(RCD_D_ROD, rcd_section_owner(places[p]));
+		ASSERT_STR_EQ("rod", rcd_section_reader(places[p]));
+	}
+	PASS();
+}
+
+/*
  * Every writable key has an owner that can be restarted, or an edit would be
  * saved with nothing able to pick it up. Walked over the whole table so a key
  * added to a new section cannot quietly land in that state.
@@ -3200,6 +3254,7 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(a_live_command_is_sent_the_field_it_asks_for);
 	RUN_TEST(a_selector_names_the_key_that_carries_it);
 	RUN_TEST(every_daynight_threshold_is_a_live_key);
+	RUN_TEST(the_six_places_carry_the_same_keys);
 	RUN_TEST(every_writable_key_has_an_owner);
 	RUN_TEST(impact_separates_the_pipeline_from_the_stream);
 	RUN_TEST(the_zone_table_is_two_arrays_of_one_length);

@@ -418,7 +418,7 @@ const L = {
  "rtsp.username":["Username"],"rtsp.password":["Password"],
  "http.enabled":["Snapshot and MJPEG server"],"http.port":["Port"],
  "http.max_clients":["Maximum viewers"],"http.username":["Username"],"http.password":["Password"],
- "osd.enabled":["Overlay"],"osd.font_size":["Font size","px"],"osd.font_stroke":["Outline width","px"],
+ "osd.enabled":["Draw the overlay"],"osd.font_size":["Font size","px"],"osd.font_stroke":["Outline width","px"],
  "ircut.enabled":["Day/night switching"],
  "ircut.trigger":["Decide from","","What the camera watches to call nightfall."],
  "ircut.pulse_ms":["Filter pulse","ms","How long the IR-cut solenoid is driven. Too short and it does not latch."],
@@ -453,8 +453,24 @@ const L = {
 ["width","height","codec","profile","rc_mode","bitrate","gop","fps","osd_enabled","jpeg"]
   .forEach(k => { if (L["stream0." + k]) L["stream1." + k] = L["stream0." + k]; });
 
+/* The six places on the picture take the same three keys, so they take the same
+   three labels. Written once for the same reason the schema pins them equal. */
+const SLOTS = [["top_left","Top left"],       ["top_center","Top centre"],
+               ["top_right","Top right"],     ["bottom_left","Bottom left"],
+               ["bottom_center","Bottom centre"], ["bottom_right","Bottom right"]];
+SLOTS.forEach(([p]) => {
+  L["osd." + p + ".template"] =
+    ["Text","","Empty leaves the corner clear."];
+  L["osd." + p + ".visible"] = ["Show","","Keeps the text but stops drawing it."];
+  L["osd." + p + ".align"] = ["Align","","Which way the text grows as it gets longer."];
+});
+
 const pretty = s => s.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
-const label = id => (L[id] && L[id][0]) || pretty(id.split(".").slice(1).join("."));
+/* A section name may hold a dot ([osd.top_left]) and a key name never does,
+   so an id splits at its last one. */
+const sect_of = id => id.slice(0, id.lastIndexOf("."));
+const key_of  = id => id.slice(id.lastIndexOf(".") + 1);
+const label = id => (L[id] && L[id][0]) || pretty(key_of(id));
 const unit  = id => (L[id] && L[id][1]) || "";
 const help  = id => (L[id] && L[id][2]) || "";
 
@@ -486,9 +502,19 @@ const TABS = [
                                             {title:"Wi-Fi", section:"wifi",
                                              note:"Applied together, and put back after three minutes unless you confirm — though a radio that joins the network and takes an address confirms itself. Absent on a camera with no radio."}]},
  {id:"services",name:"Services",    groups:[{title:"RTSP", section:"rtsp"},
-                                            {title:"Snapshots & MJPEG", section:"http"},
-                                            {title:"Overlay", section:"osd"},
-                                            {title:"Overlay actions", actions:["osd-enable","osd-disable"]}]}
+                                            {title:"Snapshots & MJPEG", section:"http"}]},
+ /*
+  * The overlay is its own page: what it draws is six independent corners plus
+  * the type they share, which is more than fits beside the servers it used to
+  * sit with. The six groups are built rather than written out -- they differ
+  * in nothing but which corner they are, and the schema pins them equal.
+  */
+ {id:"overlay", name:"Overlay",
+  groups:[{title:"Overlay", section:"osd",
+           note:"One typeface and one size for every corner. Any corner's text may hold %time%, %uptime%, %hostname%, %ip%, %ae_luma%, %total_gain% or %soc_temp%, each replaced as it is drawn; long text is cut off at the width the corner reserves."}]
+          .concat(SLOTS.map(([p, name]) => ({title:name, section:"osd." + p})))
+          .concat([{title:"Actions", actions:["osd-enable","osd-disable"],
+                    note:"Stops and resumes drawing. Persists nothing — a reboot restores what is configured here."}])}
 ];
 const ACTION_UI = {
  "request-idr":{label:"Force a keyframe"},
@@ -650,7 +676,11 @@ function isIdentifier(k) { return IDENTIFIER.test(k.key); }
 function widgetFor(k) {
   if (k.type === "bool") return "switch";
   if (k.type === "credential") return "cred";
-  if (k.type === "host" || k.type === "ipv4") return "text";
+  /* Everything with a length rather than a range. A V_TEXT carries max_length
+     and no bounds at all, so without this it falls past every span test below
+     and lands on the number widget -- which is what the wifi SSID had been
+     getting. */
+  if (k.type === "host" || k.type === "ipv4" || k.type === "text") return "text";
   if (k.type === "enum") return (k.choices || []).length <= 4 ? "seg" : "select";
   if (k.labels) return k.labels.length <= 4 ? "seg" : "select";
   const b = bounds(k);
@@ -1322,7 +1352,7 @@ function paintTabs() {
   document.querySelectorAll(".tab").forEach(el => {
     const t = TABS.find(x => x.id === el.dataset.id);
     const secs = tabSections(t);
-    el.classList.toggle("has-dirty", [...dirty].some(d => secs.includes(d.split(".")[0])));
+    el.classList.toggle("has-dirty", [...dirty].some(d => secs.includes(sect_of(d))));
     el.setAttribute("aria-selected", String(el.dataset.id === active));
   });
 }

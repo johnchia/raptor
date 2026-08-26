@@ -118,9 +118,15 @@ typedef enum {
  * and either one would end that string early. Control bytes are refused for
  * the same reason a newline is: the file is line-oriented.
  *
+ * The overlay templates are the second use, and they fit the same grammar for
+ * the same reason: text a person composes, going into a line of a file this
+ * daemon writes.
+ *
  * It is not a general string type. A value of this grammar still must not be
  * a path, a format or a command, and the protection is the same as everywhere
- * else in this table -- that no such key exists.
+ * else in this table -- that no such key exists. A template is not the
+ * exception it looks like: rod expands its own %var% names into a bitmap and
+ * hands the result to nothing.
  *
  * V_SECRET is a wifi passphrase, and it differs from V_CRED in both
  * directions. Wider, because WPA's own grammar is 8 to 63 printable

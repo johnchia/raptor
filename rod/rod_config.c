@@ -23,6 +23,36 @@ static int parse_align(const char *s)
 	return 0;
 }
 
+/*
+ * The places on the picture, and how text sitting in each one reads.
+ *
+ * An element whose section is named for one of these sits there, and aligns
+ * itself out from that edge, without being told either. [osd.top_right] is a
+ * complete element with a template and nothing else.
+ *
+ * That is what lets the six be offered as fixed slots -- a client can write
+ * [osd.bottom_left] template = ... and have it appear where the name says,
+ * rather than having to invent a name for the element and then place it. A
+ * section named anything else is unaffected and still defaults to top left,
+ * and a `position` or `align` line always wins over the name.
+ */
+static const struct {
+	const char *name;
+	int align; /* 0 left, 1 center, 2 right -- as parse_align returns */
+} slots[] = {
+	{"top_left", 0},      {"top_center", 1},   {"top_right", 2}, {"bottom_left", 0},
+	{"bottom_center", 1}, {"bottom_right", 2}, {"center", 1},
+};
+
+static int slot_of(const char *name)
+{
+	for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); i++) {
+		if (strcmp(name, slots[i].name) == 0)
+			return (int)i;
+	}
+	return -1;
+}
+
 void load_config(rod_state_t *st)
 {
 	rss_config_t *cfg = st->cfg;
@@ -95,9 +125,11 @@ static void load_osd_section(const char *section, void *userdata)
 	if (!name[0] || strlen(name) >= ROD_ELEM_NAME_LEN)
 		return;
 
+	int slot = slot_of(name);
 	const char *type_str = rss_config_get_str(cfg, section, "type", "text");
 	const char *tmpl = rss_config_get_str(cfg, section, "template", "");
-	const char *position = rss_config_get_str(cfg, section, "position", "top_left");
+	const char *position =
+		rss_config_get_str(cfg, section, "position", slot >= 0 ? name : "top_left");
 	const char *align_str = rss_config_get_str(cfg, section, "align", "");
 	int font_size = rss_config_get_int(cfg, section, "font_size", 0);
 	int max_chars = rss_config_get_int(cfg, section, "max_chars", 20);
@@ -113,7 +145,9 @@ static void load_osd_section(const char *section, void *userdata)
 	else if (strcmp(type_str, "receipt") == 0)
 		type = ROD_ELEM_RECEIPT;
 
-	int align = parse_align(align_str);
+	/* An explicit align wins; a named slot supplies one; anything else is
+	 * left, which is what parse_align answers for the empty string. */
+	int align = align_str[0] || slot < 0 ? parse_align(align_str) : slots[slot].align;
 	rod_update_mode_t update = ROD_UPDATE_TICK;
 	if (strcmp(update_str, "change") == 0)
 		update = ROD_UPDATE_CHANGE;
