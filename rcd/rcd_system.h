@@ -40,4 +40,14 @@ extern const rcd_provider_t rcd_provider_timezone;
 extern const rcd_provider_t rcd_provider_ntp_server;
 extern const rcd_provider_t rcd_provider_hostname;
 
+/*
+ * Restart the camera, through init rather than the syscall.
+ *
+ * Returns as soon as the restart is arranged, so the client is told what is
+ * about to happen while there is still something to tell it. See the comment
+ * on the implementation for why it goes out through /sbin/reboot and why the
+ * delay is not zero.
+ */
+int rcd_system_reboot(cJSON *resp, char *err, size_t errsz);
+
 #endif /* RCD_SYSTEM_H */

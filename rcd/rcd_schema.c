@@ -822,6 +822,16 @@ static const rcd_action_t actions[] = {
 	 .note = "the network is forgotten; the camera comes back in setup mode at its "
 		 "next boot"},
 
+	/* -- Restarting. rcd's own, like provisioning, and for the same reason:
+	 *    no daemon owns it. Last in the table because it is the one entry
+	 *    here that ends the conversation. -- */
+	{.name = "reboot",
+	 .args = args_none,
+	 .local = rcd_system_reboot,
+	 .impact = RCD_IMPACT_REBOOT,
+	 .note = "the camera restarts, and every connection to it is dropped until it is "
+		 "back"},
+
 	{.name = NULL},
 };
 

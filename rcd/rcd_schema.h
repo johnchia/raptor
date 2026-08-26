@@ -339,6 +339,13 @@ typedef struct {
  * daemon is in this table, and `apply` and `restart` are protocol commands
  * rather than entries here precisely because they do interrupt.
  *
+ * `reboot` is the exception and is not a hole in that rule. What is kept out
+ * above is stopping part of the camera on a caller's say-so, which leaves it
+ * running and broken with nothing saying so; restarting all of it is a whole
+ * operation that ends in a working camera, and it is one an operator asks for
+ * on purpose. It says what it costs in `impact` like any other local action,
+ * so no client has to know which of the two it is.
+ *
  * `local` is the exception, and there is one of it. An action naming a handler
  * is performed by rcd rather than forwarded: no daemon owns the store behind
  * it, so there is nothing to route to and `daemon` stays NULL. Such an action

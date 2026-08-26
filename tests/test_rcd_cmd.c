@@ -193,9 +193,35 @@ TEST no_credential_is_ever_readable(void)
 TEST refuses_unlisted_actions(void)
 {
 	ASSERT_ACTION_REFUSED("{\"action\":\"set-brightness\",\"value\":10}");
-	ASSERT_ACTION_REFUSED("{\"action\":\"reboot\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"poweroff\"}");
 	ASSERT_ACTION_REFUSED("{\"action\":\"\"}");
 	ASSERT_ACTION_REFUSED("{}");
+	PASS();
+}
+
+/*
+ * Restarting is rcd's own, and priced as what it is.
+ *
+ * The one action in the table that interrupts. It reaches no daemon -- there
+ * is nothing to route a reboot to -- so it must carry a handler, and it must
+ * carry an impact, because the tier every daemon action sits in by
+ * construction is exactly the wrong answer for this one. A reboot reported as
+ * costing nothing is a button a client would offer without a second thought.
+ */
+TEST restarting_is_rcds_own_and_says_what_it_costs(void)
+{
+	const rcd_action_t *a = rcd_action_find("reboot");
+	ASSERT(a);
+	ASSERT(a->local);
+	ASSERT_EQ(NULL, a->daemon);
+	ASSERT_EQ(RCD_IMPACT_REBOOT, a->impact);
+	ASSERT_EQ(A_END, a->args[0].type); /* nothing to get wrong */
+	ASSERT(a->note && a->note[0]);	   /* and it says so */
+
+	/* Powering off is not the same favour: a camera that goes down on a
+	 * command has no command that brings it back. */
+	ASSERT_EQ(NULL, rcd_action_find("poweroff"));
+	ASSERT_EQ(NULL, rcd_action_find("shutdown"));
 	PASS();
 }
 
@@ -3223,6 +3249,7 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(no_credential_is_ever_readable);
 	RUN_TEST(refuses_unlisted_actions);
 	RUN_TEST(refuses_near_misses);
+	RUN_TEST(restarting_is_rcds_own_and_says_what_it_costs);
 	RUN_TEST(forgetting_the_network_is_rcds_own_action);
 	RUN_TEST(forgetting_the_network_has_no_near_misses);
 	RUN_TEST(the_schema_says_what_forgetting_the_network_costs);

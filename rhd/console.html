@@ -227,6 +227,9 @@ select{background:var(--sink);border:1px solid var(--line);border-radius:var(--r
 .cellfoot{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
 
 .acts{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:14px 18px}
+/* An action that says when it takes effect says it on a line of its own, under
+   the buttons rather than beside them. */
+.acts .help{flex:1 0 100%;margin:0;font-size:12px;color:var(--ink-dim);max-width:52ch;line-height:1.45}
 .btn{background:var(--raise);border:1px solid var(--line);border-radius:var(--r);padding:7px 14px;
      font-size:12.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-dim);
      cursor:pointer}
@@ -500,7 +503,8 @@ const TABS = [
                                             {title:"Network", section:"network",
                                              note:"Applied together, and put back after 90 seconds unless you confirm — so a wrong address costs a wait, not a trip to the camera."},
                                             {title:"Wi-Fi", section:"wifi",
-                                             note:"Applied together, and put back after three minutes unless you confirm — though a radio that joins the network and takes an address confirms itself. Absent on a camera with no radio."}]},
+                                             note:"Applied together, and put back after three minutes unless you confirm — though a radio that joins the network and takes an address confirms itself. Absent on a camera with no radio."},
+                                            {title:"Power", actions:["reboot"]}]},
  {id:"services",name:"Services",    groups:[{title:"RTSP", section:"rtsp"},
                                             {title:"Snapshots & MJPEG", section:"http"}]},
  /*
@@ -522,8 +526,19 @@ const ACTION_UI = {
  "ir850":{label:"850 nm LEDs", arg:"value", toggle:true},
  "ir940":{label:"940 nm LEDs", arg:"value", toggle:true},
  "osd-enable":{label:"Show overlay"},
- "osd-disable":{label:"Hide overlay"}
+ "osd-disable":{label:"Hide overlay"},
+ /*
+  * The only button on this page that costs the connection it was clicked
+  * over, so it is the only one that asks twice. `confirm` is the second
+  * label; see buildActions.
+  */
+ "reboot":{label:"Restart the camera", confirm:"Click again to restart"}
 };
+
+/* How long an armed button stays armed. Long enough to read the second label
+   and mean it, short enough that a click and a walk away is not a restart an
+   hour later. */
+const CONFIRM_MS = 5000;
 
 /* ═══ live model ═════════════════════════════════════════════════════════ */
 let KEYS = [];            /* the schema, as served */
@@ -1203,6 +1218,11 @@ function buildActions(names) {
     if (!meta) return;                      /* the daemon does not offer it */
     const ui = ACTION_UI[n] || {label: pretty(n)};
     const arg = (meta.args || []).find(a => a.type === "enum");
+    /* Said by the schema, not by this file: an action whose answer is not
+       "now" carries the one sentence that explains it. */
+    const note = () => { if (!meta.note) return;
+      const p = document.createElement("p"); p.className = "help";
+      p.textContent = meta.note; box.append(p); };
     if (arg && arg.choices && !ui.toggle) {
       const lab = document.createElement("span"); lab.className = "unit"; lab.textContent = ui.label;
       const seg = document.createElement("div"); seg.className = "seg";
@@ -1218,7 +1238,7 @@ function buildActions(names) {
         seg.append(b);
       });
       segShow(n, ACT_STATE[n]);
-      box.append(lab, seg);
+      box.append(lab, seg); note();
     } else if (ui.toggle && arg) {
       const b = document.createElement("button"); b.className = "btn"; b.textContent = ui.label;
       let on = false;
@@ -1226,11 +1246,33 @@ function buildActions(names) {
         on = !on; b.classList.toggle("on", on);
         fire(n, {[arg.key]: on ? "on" : "off"});
       });
-      box.append(b);
+      box.append(b); note();
+    } else if (ui.confirm) {
+      /*
+       * Two clicks, because the first one is how you find out what the button
+       * does. The armed state disarms itself: a button left saying "click
+       * again" is a trap for whoever walks up to the page next.
+       */
+      const b = document.createElement("button"); b.className = "btn"; b.textContent = ui.label;
+      /* Armed is its own flag rather than the timer's id: a timer id is only
+         required to be unique, not to be truthy. */
+      let armed = false, timer = null;
+      const disarm = () => {
+        armed = false;
+        if (timer !== null) { clearTimeout(timer); timer = null; }
+        b.classList.remove("danger"); b.textContent = ui.label;
+      };
+      b.addEventListener("click", () => {
+        if (armed) { disarm(); fire(n, null); return; }
+        armed = true;
+        b.classList.add("danger"); b.textContent = ui.confirm;
+        timer = setTimeout(disarm, CONFIRM_MS);
+      });
+      box.append(b); note();
     } else {
       const b = document.createElement("button"); b.className = "btn"; b.textContent = ui.label;
       b.addEventListener("click", () => fire(n, null));
-      box.append(b);
+      box.append(b); note();
     }
   });
   return box;
@@ -1314,7 +1356,14 @@ function render() {
   sheet.textContent = "";
   const tab = TABS.find(t => t.id === active);
 
-  tab.groups.forEach(g => {
+  /*
+   * What can be done now sits above what can be configured. A stable sort, so
+   * the groups keep the order they are written in within each half -- this
+   * decides which half, and nothing else.
+   */
+  const groups = tab.groups.slice().sort((a, b) => (b.actions ? 1 : 0) - (a.actions ? 1 : 0));
+
+  groups.forEach(g => {
     /* Filtered once, so what the group's reset button puts back is exactly
        what it drew -- a trigger's keys are not staged from a page that is not
        showing them. */

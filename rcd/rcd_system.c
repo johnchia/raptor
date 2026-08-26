@@ -1129,3 +1129,55 @@ static int hostname_enact(void)
 
 const rcd_provider_t rcd_provider_hostname = {
 	.get = hostname_get, .set = hostname_set, .enact = hostname_enact};
+
+/* ------------------------------------------------------------------ */
+/* Restarting the camera                                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Through /sbin/reboot rather than reboot(2).
+ *
+ * The syscall restarts the SoC and nothing else. These cameras keep /etc on
+ * an overlay over NOR, so a write that has reached the page cache and not the
+ * flash is lost by it -- including the one this reboot may have been asked
+ * for. init's own path runs the shutdown scripts first, which stop the
+ * daemons and unmount the overlay, and that is the difference between a
+ * restart and a restart that forgets the last thing it was told.
+ *
+ * Arranged in a child so this returns at once. rcd is answering a client that
+ * is about to lose the connection, and a reply written after init has begun
+ * killing daemons is a reply nobody receives -- the camera would simply go
+ * quiet, which is indistinguishable from the command having failed. The child
+ * outlives its parent deliberately: init reaps it, and rcd is not going to be
+ * around to.
+ *
+ * The delay is what the reply is written in. A second is far more than a unix
+ * socket needs and costs nothing against a boot.
+ */
+int rcd_system_reboot(cJSON *resp, char *err, size_t errsz)
+{
+	(void)resp; /* it does something; it does not answer with anything */
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		snprintf(err, errsz, "the restart could not be started: %s", strerror(errno));
+		return -1;
+	}
+
+	if (pid == 0) {
+		/* Nothing here may touch the parent's state: it is answering a
+		 * client on the other side of this fork. */
+		sleep(1);
+		sync();
+		execl("/sbin/reboot", "reboot", (char *)NULL);
+		/* No path to init. The camera stays up and the operator sees a
+		 * camera that did not restart, which is the honest outcome --
+		 * far better than the syscall as a fallback, which is the one
+		 * thing this function exists to avoid. */
+		RSS_ERROR("system: /sbin/reboot could not be run: %s", strerror(errno));
+		_exit(127);
+	}
+
+	RSS_INFO("system: restarting");
+	return 0;
+}
