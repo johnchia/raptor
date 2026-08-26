@@ -748,6 +748,80 @@ TEST a_live_command_is_sent_the_field_it_asks_for(void)
 }
 
 /*
+ * A key whose live command answers for a family of settings names which one it
+ * is, and the name is the key's own. Nothing downstream can catch a selector
+ * that says something else: the command is well formed, ric accepts it, and
+ * the value lands on a different threshold than the one that was moved.
+ *
+ * Walked over the whole table rather than asserted on the three that have one
+ * today, because the trap is a copy-paste in a fourth.
+ */
+TEST a_selector_names_the_key_that_carries_it(void)
+{
+	int seen = 0;
+	for (int i = 0;; i++) {
+		const rcd_key_t *k = rcd_key_at(i);
+		if (!k)
+			break;
+		if (!k->live_sel)
+			continue;
+		ASSERT(k->live_cmd);
+		ASSERT_STR_EQ(k->key, k->live_sel);
+		seen++;
+	}
+	ASSERT(seen > 0);
+
+	/* And ric is the daemon that takes them, by the section they sit in. */
+	const rcd_key_t *nl = rcd_key_find("ircut", "night_luma");
+	ASSERT(nl);
+	ASSERT_STR_EQ("set-threshold", nl->live_cmd);
+	ASSERT_STR_EQ("value", nl->live_arg);
+	ASSERT_EQ(-1, nl->live_chn);
+	ASSERT_EQ(RCD_D_RIC, rcd_section_owner(nl->section));
+
+	/* A key without one sends no selector at all. */
+	ASSERT_EQ(NULL, rcd_key_find("image", "brightness")->live_sel);
+	PASS();
+}
+
+/*
+ * Every threshold `ircut-threshold` offers is also a key, and a live one --
+ * the action and the key reach the same handler, so a threshold reachable
+ * through one and not the other is a control that silently needs an apply.
+ *
+ * Driven off the action's own choice list rather than a second copy of it, so
+ * a threshold added to ric and wired to the action cannot arrive without one.
+ */
+TEST every_daynight_threshold_is_a_live_key(void)
+{
+	const rcd_action_t *a = rcd_action_find("ircut-threshold");
+	ASSERT(a);
+
+	const char *const *names = NULL;
+	for (int i = 0; a->args[i].type != A_END; i++) {
+		if (strcmp(a->args[i].key, "key") == 0)
+			names = a->args[i].choices;
+	}
+	ASSERT(names);
+
+	for (int i = 0; names[i]; i++) {
+		const rcd_key_t *k = rcd_key_find("ircut", names[i]);
+		ASSERT(k);
+		ASSERT_EQ(V_INT, k->type);
+		ASSERT_STR_EQ("set-threshold", k->live_cmd);
+		ASSERT_STR_EQ(names[i], k->live_sel);
+	}
+
+	/* The ranges are ric's, and a value outside one never reaches it. */
+	ASSERT_EQ(255, rcd_key_find("ircut", "night_luma")->max);
+	ASSERT_EQ(1, rcd_key_find("ircut", "day_gain_pct")->min);
+	ASSERT_EQ(100, rcd_key_find("ircut", "day_gain_pct")->max);
+	ASSERT_EQ(300, rcd_key_find("ircut", "hysteresis_sec")->max);
+	ASSERT_EQ(50, rcd_key_find("ircut", "poll_interval_ms")->min);
+	PASS();
+}
+
+/*
  * Every writable key has an owner that can be restarted, or an edit would be
  * saved with nothing able to pick it up. Walked over the whole table so a key
  * added to a new section cannot quietly land in that state.
@@ -3124,6 +3198,8 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(the_table_decides_the_tier);
 	RUN_TEST(channelled_keys_carry_their_own_channel);
 	RUN_TEST(a_live_command_is_sent_the_field_it_asks_for);
+	RUN_TEST(a_selector_names_the_key_that_carries_it);
+	RUN_TEST(every_daynight_threshold_is_a_live_key);
 	RUN_TEST(every_writable_key_has_an_owner);
 	RUN_TEST(impact_separates_the_pipeline_from_the_stream);
 	RUN_TEST(the_zone_table_is_two_arrays_of_one_length);

@@ -193,25 +193,30 @@ static const char *const choices_threshold[] = {
  * because -Werror=missing-field-initializers means the whole of it has to be
  * spelled out either way.
  */
-#define LIVE(cmd)     cmd, "value", -1, NULL, RCD_IMPACT_NONE, 0, false
-#define LIVE_CH(c, n) c, "value", n, NULL, RCD_IMPACT_NONE, 0, false
+#define LIVE(cmd)     cmd, "value", -1, NULL, NULL, RCD_IMPACT_NONE, 0, false
+#define LIVE_CH(c, n) c, "value", n, NULL, NULL, RCD_IMPACT_NONE, 0, false
 
 /* A live command whose value is not called `value`. rvd's set-rc-mode names
  * its argument `mode` because the command carries a bitrate as well, and a
  * key is applied by the command the daemon already has rather than by one
  * added to spell the field the way this table would prefer. */
-#define LIVE_CH_ARG(c, a, n) c, a, n, NULL, RCD_IMPACT_NONE, 0, false
-#define SAVED		     NULL, NULL, -1, NULL, RCD_IMPACT_NONE, 0, false
-#define PROVIDED(p, imp)     NULL, NULL, -1, &(p), (imp), 0, false
+#define LIVE_CH_ARG(c, a, n) c, a, n, NULL, NULL, RCD_IMPACT_NONE, 0, false
+
+/* A live command that answers for a family of settings and is told which one
+ * by name. See rcd_key_t::live_sel. */
+#define LIVE_SEL(cmd, sel) cmd, "value", -1, sel, NULL, RCD_IMPACT_NONE, 0, false
+
+#define SAVED		   NULL, NULL, -1, NULL, NULL, RCD_IMPACT_NONE, 0, false
+#define PROVIDED(p, imp)   NULL, NULL, -1, NULL, &(p), (imp), 0, false
 
 /* An ISP knob: live like the rest, and it takes the word "auto" as well as a
  * number. See rcd_key_t::auto_ok -- the word says "follow the tuning's own
  * curve", which no number on the scale can say. */
-#define LIVE_ISP(cmd) cmd, "value", -1, NULL, RCD_IMPACT_NONE, 0, true
+#define LIVE_ISP(cmd) cmd, "value", -1, NULL, NULL, RCD_IMPACT_NONE, 0, true
 
 /* A provider whose value can cost the client its way back in: written like
  * any other, and put back if nobody confirms within `sec`. */
-#define GUARDED(p, imp, sec) NULL, NULL, -1, &(p), (imp), (sec), false
+#define GUARDED(p, imp, sec) NULL, NULL, -1, NULL, &(p), (imp), (sec), false
 
 static const rcd_key_t keys[] = {
 	/* -- Sensor -- */
@@ -353,13 +358,46 @@ static const rcd_key_t keys[] = {
 	{"osd", "font_size", V_INT, 8, 96, NULL, SAVED},
 	{"osd", "font_stroke", V_INT, 0, 5, NULL, SAVED},
 
-	/* -- Day/night. The luma and gain thresholds are an action rather than
-	 *    keys; what is here is everything ric reads only at startup -- how
-	 *    the board is wired, and how the two triggers that are not luma
-	 *    are calibrated. -- */
+	/* -- Day/night: how the board is wired, and what nightfall is. -- */
 	{"ircut", "enabled", V_BOOL, 0, 0, NULL, SAVED},
 	{"ircut", "trigger", V_ENUM, 0, 0, choices_trigger, SAVED},
 	{"ircut", "pulse_ms", V_INT, 1, 1000, NULL, SAVED},
+	/*
+	 * What the default trigger calls night, and what it calls morning.
+	 *
+	 * Live, because ric takes each one through `set-threshold` and records
+	 * it in its own config -- the same route `ircut-threshold` takes, and
+	 * the reason these carry a selector rather than a command of their
+	 * own. Tuning them is a feedback loop: the value is judged by whether
+	 * the camera switches at the right moment, which a restart between
+	 * attempts makes slow to see.
+	 *
+	 * The ranges are ric's own, from its set-threshold handler. All three
+	 * belong to this trigger and no other: the day-verify latch that
+	 * re-reads `night_luma` is armed only on a luma day transition, and
+	 * the other triggers reach their own verdict from their own readings.
+	 *
+	 * `night_luma` is a level in 0-255 the platform's AE reports, and what
+	 * counts as dark differs by how the AE derives it: Ingenic Gen3 reads
+	 * a linear histogram and lands far below Gen1/2's for the same scene.
+	 * Calibrate against the camera in hand, never against another model's
+	 * number.
+	 */
+	{"ircut", "night_luma", V_INT, 0, 255, NULL, LIVE_SEL("set-threshold", "night_luma")},
+	{"ircut", "night_gain", V_INT, 0, 1000000, NULL, LIVE_SEL("set-threshold", "night_gain")},
+	{"ircut", "day_gain_pct", V_INT, 1, 100, NULL, LIVE_SEL("set-threshold", "day_gain_pct")},
+	/*
+	 * The same question for the legacy gain trigger, which asks it in
+	 * absolute gain both ways instead of a ratio one way. Absolute means
+	 * sensor-specific: these have to be read off the camera in hand, and
+	 * they have to be read again if the night sensor rate changes, because
+	 * a lower rate raises the exposure ceiling and the AE answers with
+	 * less gain for the same scene.
+	 */
+	{"ircut", "night_threshold", V_INT, 0, 1000000, NULL,
+	 LIVE_SEL("set-threshold", "night_threshold")},
+	{"ircut", "day_threshold", V_INT, 0, 1000000, NULL,
+	 LIVE_SEL("set-threshold", "day_threshold")},
 	/*
 	 * GPIO pin assignments. These describe the board rather than any
 	 * behaviour, and are normally read from /etc/thingino.json -- but that
@@ -409,6 +447,19 @@ static const rcd_key_t keys[] = {
 	 * sensor, so the range starts there rather than at 1x (1024). */
 	{"ircut", "photo_rgain_rec", V_INT, 0, 8192, NULL, SAVED},
 	{"ircut", "photo_bgain_rec", V_INT, 0, 8192, NULL, SAVED},
+	/*
+	 * How often the light is looked at, and how long a verdict has to hold
+	 * before it is acted on. Neither belongs to a trigger -- every one of
+	 * them is sampled on this interval and debounced by this count.
+	 *
+	 * Live for the same reason the thresholds are: a camera that flips at
+	 * dusk is diagnosed by widening the hold and watching, which wants the
+	 * next poll rather than the next start.
+	 */
+	{"ircut", "hysteresis_sec", V_INT, 1, 300, NULL,
+	 LIVE_SEL("set-threshold", "hysteresis_sec")},
+	{"ircut", "poll_interval_ms", V_INT, 50, 10000, NULL,
+	 LIVE_SEL("set-threshold", "poll_interval_ms")},
 
 	/* -- Motion -- */
 	{"motion", "enabled", V_BOOL, 0, 0, NULL, SAVED},

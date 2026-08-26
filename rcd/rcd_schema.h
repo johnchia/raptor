@@ -241,6 +241,19 @@ typedef struct rcd_key {
 	const char *live_arg;	    /* field name the live command expects */
 	int live_chn;		    /* channel the command needs, or -1 */
 
+	/*
+	 * A selector the live command needs alongside the value, sent as its
+	 * `key` field. The string analogue of `live_chn`: one command answers
+	 * for a family of settings and is told which of them this is.
+	 *
+	 * A command taking a second *value* belongs in the action table, not
+	 * here -- that is why set-rc-mode's bitrate and set-qp-bounds are
+	 * actions. A selector is different in kind: it is constant for the
+	 * key that names it, so binding it here leaves a command that takes
+	 * one value, which is what this tier is.
+	 */
+	const char *live_sel; /* NULL: the command needs no selector */
+
 	/* Where the value is kept, for a key that is not in raptor.conf. */
 	const rcd_provider_t *provider;
 

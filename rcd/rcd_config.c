@@ -1060,6 +1060,10 @@ static bool live_request(const rcd_edit_t *e, char *out, size_t outsz)
 	cJSON_AddStringToObject(req, "cmd", e->k->live_cmd);
 	if (e->k->live_chn >= 0)
 		cJSON_AddNumberToObject(req, "channel", e->k->live_chn);
+	/* Which of the settings this command answers for. Constant per key,
+	 * so it is bound in the table rather than asked of the caller. */
+	if (e->k->live_sel)
+		cJSON_AddStringToObject(req, "key", e->k->live_sel);
 	if (e->is_num)
 		cJSON_AddNumberToObject(req, e->k->live_arg, e->num);
 	else

@@ -422,6 +422,13 @@ const L = {
  "ircut.enabled":["Day/night switching"],
  "ircut.trigger":["Decide from","","What the camera watches to call nightfall."],
  "ircut.pulse_ms":["Filter pulse","ms","How long the IR-cut solenoid is driven. Too short and it does not latch."],
+ "ircut.night_luma":["Night below luma","","Nightfall is called when the AE's luma reading falls under this. What the AE reports for a given scene differs between SoC generations, so set it by watching this camera rather than by copying another's number."],
+ "ircut.night_gain":["Night above gain","","Total sensor gain that means night whatever the luma reads — a backstop for a scene the luma metric cannot call."],
+ "ircut.day_gain_pct":["Day below","% of night gain","Morning is called when gain falls to this fraction of the level it settled at overnight. A ratio, so it needs no calibration per sensor."],
+ "ircut.night_threshold":["Night above","total gain","Gain that means night. Absolute rather than a ratio, so it has to be read off this camera — and read again if the night frame rate changes, since a lower rate lets the AE reach the same picture on less gain."],
+ "ircut.day_threshold":["Day below","total gain","Gain that means day. Leave a wide gap between the two or the filter clicks back and forth through dusk."],
+ "ircut.hysteresis_sec":["Hold before switching","s","How long a verdict has to survive before it is acted on. Raise it where headlights or a passing cloud make the camera flip."],
+ "ircut.poll_interval_ms":["Check the light every","ms","How often the exposure is sampled. The hold above is counted in these samples, so shortening one shortens the other."],
  "ircut.gpio_ircut":["IR-cut GPIO A"],"ircut.gpio_ircut2":["IR-cut GPIO B"],
  "ircut.gpio_irled":["IR LED GPIO (850 nm)"],"ircut.gpio_irled2":["IR LED GPIO (940 nm)"],
  "ircut.gpio_ircut_active_low":["IR-cut GPIO inverted","","For a single-pin filter. Off drives the pin high for day. An H-bridge pair takes its polarity from the order of the two pins instead."],
@@ -463,6 +470,11 @@ const TABS = [
                                             {title:"Actions", actions:["request-idr"]}]},
  {id:"audio",   name:"Audio",       groups:[{title:"Audio", section:"audio"}]},
  {id:"night",   name:"Day & night", groups:[{title:"Switching", section:"ircut"},
+                                            {title:"Wiring", section:"ircut",
+                                             keys:["gpio_ircut","gpio_ircut2","gpio_ircut_active_low","pulse_ms",
+                                                   "gpio_irled","gpio_irled_active_low",
+                                                   "gpio_irled2","gpio_irled2_active_low"],
+                                             note:"Describes the board, not the behaviour. Read from /etc/thingino.json where there is one; these are what a camera without it has instead."},
                                             {title:"Manual override", actions:["ircut-mode","ir850","ir940"],
                                              note:"Persists nothing — the next automatic transition takes it back."}]},
  {id:"record",  name:"Recording",   groups:[{title:"Motion", section:"motion"},
@@ -679,22 +691,20 @@ function toggleReset(id, on) {
   }
 }
 
-/* A whole section at once. Only the keys that have something to put back --
-   most of a section is already at its default, and staging those would ask
-   for a restart to change nothing. */
-function resetSection(sections) {
-  const ids = KEYS.filter(k => sections.includes(k.section)).map(id_of)
-                  .filter(id => canReset(id) && !DEFAULTED.has(id));
-  if (!ids.length) { wlog("sys", "nothing to put back in " + sections.join(", ")); return; }
+/* A whole group at once. The caller passes only the keys that have something
+   to put back -- most of a group is already at its default, and staging those
+   would ask for a restart to change nothing. */
+function resetKeys(ids) {
+  if (!ids.length) { wlog("sys", "nothing here to put back"); return; }
   ids.forEach(id => toggleReset(id, true));
   refreshBar(); render();
   wlog("sys", "staged " + ids.length + " key" + (ids.length === 1 ? "" : "s") +
               " for reset — Apply puts them back");
 }
 
-/* Two buttons, not one taking either kind of argument: a key id and a section
-   name are both strings, and telling them apart by how many were passed is a
-   guess that was wrong for every group holding exactly one section. */
+/* Two buttons, not one taking either kind of argument: one key id and a list
+   of them are told apart only by how many were passed, which is a guess that
+   was wrong for every group holding exactly one key. */
 function undoButton(label, title, onClick) {
   const b = document.createElement("button");
   b.className = "undo"; b.type = "button";
@@ -712,9 +722,12 @@ function keyUndoButton(id) {
     () => { toggleReset(id); refreshBar(); render(); });
 }
 
-function sectionUndoButton(sections) {
-  return undoButton("reset section", "Put every key in this section back to its default",
-                    () => resetSection(sections));
+/* Scoped to the rows the group draws rather than to its section: a section
+   split across two groups has a reset button on each, and neither may reach
+   into the other. */
+function groupUndoButton(ids) {
+  return undoButton("reset group", "Put every key in this group back to its default",
+                    () => resetKeys(ids));
 }
 
 /* ═══ committing ═════════════════════════════════════════════════════════
@@ -1215,11 +1228,55 @@ function claimedSections() {
 function tabSections(t) {
   return t.groups.flatMap(g => g.matrix ? g.matrix : (g.section ? [g.section] : []));
 }
+/*
+ * Key names a sibling group on this page has claimed by name.
+ *
+ * A group that names its keys renders exactly those, and the group that takes
+ * the whole section renders what is left -- so a key added to the schema turns
+ * up without this file being told about it, the same way a section no tab
+ * claims still gets a page.
+ */
+function claimedKeys(tab, section) {
+  const s = new Set();
+  tab.groups.forEach(g => { if (g.section === section && g.keys) g.keys.forEach(k => s.add(k)); });
+  return s;
+}
+function groupRows(tab, g) {
+  if (!g.section) return [];
+  const all = KEYS.filter(k => k.section === g.section);
+  if (!g.keys) {
+    const claimed = claimedKeys(tab, g.section);
+    return all.filter(k => !claimed.has(k.key));
+  }
+  /* Named order, and a name this build has no key for is simply absent. */
+  return g.keys.map(n => all.find(k => k.key === n)).filter(Boolean);
+}
+
+/*
+ * Which trigger consults a key, for the keys only one of them does.
+ *
+ * Each trigger reaches its verdict from its own readings and reads only its
+ * own thresholds -- the luma pair is not a fallback the others share. Drawing
+ * one the running trigger ignores invites it to be tuned and wondered about.
+ *
+ * A prefix carries the adc and photo sets; the rest are named, because
+ * `night_gain` and `night_threshold` are the same question asked by different
+ * triggers and nothing in the spelling says which.
+ */
+const IRCUT_TRIGGER_ONLY = {
+  night_luma: "luma",
+  night_gain: "luma",
+  day_gain_pct: "luma",
+  night_threshold: "gain",
+  day_threshold: "gain",
+};
 function ircutVisible(key) {
   const t = V["ircut.trigger"];
   if (key.startsWith("adc_")) return t === "adc";
   if (key.startsWith("photo_")) return t === "photo";
-  return true;
+  /* The photo trigger runs its own state machine and never debounces. */
+  if (key === "hysteresis_sec") return t !== "photo";
+  return !IRCUT_TRIGGER_ONLY[key] || IRCUT_TRIGGER_ONLY[key] === t;
 }
 
 function render() {
@@ -1228,17 +1285,20 @@ function render() {
   const tab = TABS.find(t => t.id === active);
 
   tab.groups.forEach(g => {
-    const rows = g.section ? KEYS.filter(k => k.section === g.section) : [];
+    /* Filtered once, so what the group's reset button puts back is exactly
+       what it drew -- a trigger's keys are not staged from a page that is not
+       showing them. */
+    const rows = groupRows(tab, g)
+                   .filter(k => k.section !== "ircut" || ircutVisible(k.key));
     if (g.section && !rows.length) return;      /* section the build left out */
     const sec = document.createElement("section"); sec.className = "group";
     const h = document.createElement("h3");
     h.append(document.createTextNode(g.title));
     if (g.note) { const n = document.createElement("span"); n.className = "note";
       n.textContent = g.note; h.append(n); }
-    const secs = g.matrix ? g.matrix : (g.section ? [g.section] : []);
-    if (secs.length && KEYS.some(k => secs.includes(k.section) && canReset(id_of(k)) &&
-                                      !DEFAULTED.has(id_of(k))))
-      h.append(sectionUndoButton(secs));
+    const resettable = (g.matrix ? KEYS.filter(k => g.matrix.includes(k.section)) : rows)
+                         .map(id_of).filter(id => canReset(id) && !DEFAULTED.has(id));
+    if (resettable.length) h.append(groupUndoButton(resettable));
     const own = document.createElement("span"); own.className = "owner";
     own.textContent = g.matrix ? (byId[g.matrix[0] + ".width"] || {}).owner || ""
                    : (rows[0] ? rows[0].owner : "");
@@ -1246,10 +1306,7 @@ function render() {
 
     if (g.matrix) sec.append(buildMatrix(g.matrix));
     else if (g.actions) sec.append(buildActions(g.actions));
-    else rows.forEach(k => {
-      if (k.section === "ircut" && !ircutVisible(k.key)) return;
-      sec.append(buildRow(id_of(k)));
-    });
+    else rows.forEach(k => sec.append(buildRow(id_of(k))));
     sheet.append(sec);
   });
 
