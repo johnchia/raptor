@@ -14,12 +14,40 @@
 #include <H265VideoRTPSink.hh>
 #include <MPEG4GenericRTPSink.hh>
 #include <SimpleRTPSink.hh>
+#include <GroupsockHelper.hh>
 
 #include <rss_aac.h>
 
 /* ================================================================
  * H.264 video
  * ================================================================ */
+
+/* b=AS for a video subsession: the stream's configured target, the same
+ * defaults rvd applies (main 3 Mbps, sub 1 Mbps). The old hardcoded 2000
+ * was under the main default, so any busy scene read as an overshoot of
+ * a promise nobody made. Capped modes bound at 4/3 of target, inside the
+ * 35% a bandwidth estimate is conventionally read with. */
+static unsigned rsd555_video_est_kbps(rsd555_video_ctx_t *ctx)
+{
+	const char *sect = ctx->idx == 0 ? "stream0" : "stream1";
+	int def = ctx->idx == 0 ? 3000000 : 1000000;
+	int bps = rss_config_get_int(ctx->state->cfg, sect, "bitrate", def);
+	if (bps <= 0)
+		bps = def;
+	return (unsigned)(bps / 1000);
+}
+
+/* live555 sends UDP fire-and-forget from whatever SO_SNDBUF the OS
+ * hands out; a keyframe fanned out to several receivers can overflow
+ * it and the tail packets are silently dropped (device SndbufErrors).
+ * Ask for enough to hold a worst-case burst -- the kernel caps the
+ * request at net.core.wmem_max, so the sysctl has to allow it too. */
+static void rsd555_widen_sndbuf(UsageEnvironment &env, Groupsock *gs, rsd555_video_ctx_t *ctx)
+{
+	int want = rss_config_get_int(ctx->state->cfg, "rtsp", "send_buffer_size", 512 * 1024);
+	if (want > 0 && gs)
+		increaseSendBufferTo(env, gs->socketNum(), (unsigned)want);
+}
 
 RingH264Subsession *RingH264Subsession::createNew(UsageEnvironment &env, rsd555_video_ctx_t *ctx,
 						  Boolean reuseSource)
@@ -40,7 +68,7 @@ RingH264Subsession::~RingH264Subsession()
 FramedSource *RingH264Subsession::createNewStreamSource(unsigned /*clientSessionId*/,
 							unsigned &estBitrate)
 {
-	estBitrate = 2000; /* kbps estimate for SDP b= line */
+	estBitrate = rsd555_video_est_kbps(fCtx); /* SDP b=AS */
 	RingVideoSource *src = RingVideoSource::createNew(envir(), fCtx);
 	if (!src)
 		return NULL;
@@ -55,6 +83,7 @@ RTPSink *RingH264Subsession::createNewRTPSink(Groupsock *rtpGroupsock,
 	uint16_t sps_len = __atomic_load_n(&fCtx->sps_len, __ATOMIC_ACQUIRE);
 	uint16_t pps_len = __atomic_load_n(&fCtx->pps_len, __ATOMIC_ACQUIRE);
 
+	rsd555_widen_sndbuf(envir(), rtpGroupsock, fCtx);
 	return H264VideoRTPSink::createNew(envir(), rtpGroupsock, rtpPayloadTypeIfDynamic,
 					   sps_len > 0 ? fCtx->sps : NULL, sps_len,
 					   pps_len > 0 ? fCtx->pps : NULL, pps_len);
@@ -83,7 +112,7 @@ RingH265Subsession::~RingH265Subsession()
 FramedSource *RingH265Subsession::createNewStreamSource(unsigned /*clientSessionId*/,
 							unsigned &estBitrate)
 {
-	estBitrate = 2000;
+	estBitrate = rsd555_video_est_kbps(fCtx); /* SDP b=AS */
 	RingVideoSource *src = RingVideoSource::createNew(envir(), fCtx);
 	if (!src)
 		return NULL;
@@ -98,6 +127,7 @@ RTPSink *RingH265Subsession::createNewRTPSink(Groupsock *rtpGroupsock,
 	uint16_t sps_len = __atomic_load_n(&fCtx->sps_len, __ATOMIC_ACQUIRE);
 	uint16_t pps_len = __atomic_load_n(&fCtx->pps_len, __ATOMIC_ACQUIRE);
 
+	rsd555_widen_sndbuf(envir(), rtpGroupsock, fCtx);
 	return H265VideoRTPSink::createNew(envir(), rtpGroupsock, rtpPayloadTypeIfDynamic,
 					   vps_len > 0 ? fCtx->vps : NULL, vps_len,
 					   sps_len > 0 ? fCtx->sps : NULL, sps_len,

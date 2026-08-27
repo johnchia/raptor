@@ -212,15 +212,10 @@ void create_elem_shm(rod_state_t *st, rod_element_t *e, int s)
 	}
 
 	/*
-	 * A region larger than the frame cannot be composited, and nothing
-	 * above this point bounded one. Text and receipt sizes are
-	 * max_chars/max_lines times the font metrics, and neither of those
-	 * counts knows the frame size: at font_size 48 the advance is ~29px,
-	 * so the max_chars ceiling of 128 asks for ~3712px on a 1920-wide
-	 * stream. Sub-streams are not the risk -- rod_main.c scales their font
-	 * by the height ratio -- it is the character count that is unbounded.
-	 * Clipped text is the mild failure; handing the HAL a region bigger
-	 * than the canvas is the one that is hard to read back from a log.
+	 * Text and receipt sizes are a character count times the font metrics,
+	 * and neither count knows the frame size, so the sizes above are
+	 * unbounded. Clip: text that runs off the region is visible, a region
+	 * larger than the canvas is not.
 	 */
 	if (st->stream_w[s] > 0 && w > (uint32_t)st->stream_w[s])
 		w = (uint32_t)st->stream_w[s];

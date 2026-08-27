@@ -861,8 +861,13 @@ static void server_run(rhd_server_t *srv)
 					jpeg_ring_drop(srv, j);
 					continue;
 				}
-				if (ret == RSS_EOVERFLOW && srv->jpeg_read_seqs[j] > 0) {
-					srv->jpeg_read_seqs[j]--;
+				if (ret == RSS_EOVERFLOW) {
+					/* Fell behind: the overflow return parked
+					 * read_seq at the newest complete frame,
+					 * which is safe to read directly. Stepping
+					 * back one instead handed cold clients a
+					 * stale frame whose arena bytes the new
+					 * session was already overwriting. */
 					ret = rss_ring_read(srv->jpeg_rings[j],
 							    &srv->jpeg_read_seqs[j], srv->frame_buf,
 							    srv->frame_buf_size, &len, &meta);
@@ -1122,6 +1127,29 @@ static void server_run(rhd_server_t *srv)
 		if (++jpeg_reconnect_tick >= 20) {
 			jpeg_reconnect_tick = 0;
 			for (int j = 0; j < RHD_MAX_JPEG; j++) {
+				/*
+				 * A restarted producer unlinks the name and creates a
+				 * new file, leaving this handle on an orphan whose
+				 * write_seq and incarnation are both frozen -- so
+				 * neither a read nor the idle counter below can tell
+				 * it from a ring that is merely quiet, and only the
+				 * file's identity can. Closing here falls into the
+				 * reopen below, in this same pass.
+				 */
+				if (srv->jpeg_rings[j] && rss_ring_stale(srv->jpeg_rings[j])) {
+					RSS_DEBUG("jpeg ring replaced by a new producer, "
+						  "reopening (%s)",
+						  jpeg_ring_names[j]);
+					if (ring_acquired[j]) {
+						rss_ring_release(srv->jpeg_rings[j]);
+						ring_acquired[j] = false;
+					}
+					rss_ring_close(srv->jpeg_rings[j]);
+					srv->jpeg_rings[j] = NULL;
+					jpeg_idle[j] = 0;
+					jpeg_last_ws[j] = 0;
+				}
+
 				if (!srv->jpeg_rings[j]) {
 					if (jpeg_ring_open_slot(srv, j) && ring_wanted[j]) {
 						rss_ring_acquire(srv->jpeg_rings[j]);

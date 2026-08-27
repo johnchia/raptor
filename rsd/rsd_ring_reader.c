@@ -14,31 +14,27 @@
 #include <pthread.h>
 
 #include "rsd.h"
+#include <rss_media_clock.h>
+#include "rsd_idr_recovery.h"
 
 /* Forward declarations — called by send thread, defined below */
 static void rsd_send_audio_frame(rsd_client_t *c, uint32_t codec, const uint8_t *data, uint32_t len,
 				 uint32_t rtp_ts, int64_t capture_us);
-static void rsd_send_jpeg_frame(rsd_client_t *c, const uint8_t *data, uint32_t len,
-				uint32_t rtp_ts);
+static void rsd_send_jpeg_frame(rsd_client_t *c, const uint8_t *data, uint32_t len, uint32_t rtp_ts,
+				int64_t capture_us);
 
 /*
- * Minimum interval between IDR requests from the reader's lag-recovery
- * paths (skip-to-latest, RSS_EOVERFLOW, sendq-full). Without this cap the
- * three call sites cascade on slow SoCs: each IDR is ~10x a P-frame, so
- * requesting one slows the reader, which triggers another skip, which
- * requests another IDR — observed as 1:9 IDR:SLICE on T20 (expected with
- * GOP=60 is 1:60). One second is enough: the encoder's own GOP will
- * produce its next IDR in due course, and the client already has the
- * current keyframe.
+ * Request one recovery IDR when the reader or a client falls behind. Natural
+ * keyframes count against the same guard: otherwise a large IDR blocked in a
+ * high-RTT TCP writer fills the sendq, whose overflow requests another large
+ * IDR, and the recovery path becomes a self-sustaining burst generator.
  */
-#define RSD_IDR_REQ_MIN_INTERVAL_US 1000000
-
-static inline void rsd_maybe_request_idr(rss_ring_t *ring, int64_t *last_req_us)
+static inline void rsd_maybe_request_idr(rss_ring_t *ring, rsd_idr_recovery_t *recovery)
 {
 	int64_t now_us = rss_timestamp_us();
-	if (now_us - *last_req_us > RSD_IDR_REQ_MIN_INTERVAL_US) {
+	if (rsd_idr_recovery_request_due(recovery, now_us)) {
 		rss_ring_request_idr(ring);
-		*last_req_us = now_us;
+		rsd_idr_recovery_note(recovery, now_us);
 	}
 }
 
@@ -172,7 +168,7 @@ static void sendq_drain_audio(rsd_client_t *c)
  * large IDR frames from starving audio delivery.
  */
 static void rsd_send_video_interleaved(rsd_client_t *c, const uint8_t *data, uint32_t len,
-				       uint32_t rtp_ts)
+				       uint32_t rtp_ts, int64_t capture_us)
 {
 	if (!c->video.nal || !c->video.playing)
 		return;
@@ -235,15 +231,20 @@ static void rsd_send_video_interleaved(rsd_client_t *c, const uint8_t *data, uin
 			sendq_drain_audio(c);
 	}
 
+	/* Pair the wire timestamp with the frame's capture instant before an
+	 * RTCP sender report projects it to now.  Using the network send time
+	 * here makes every five-second SR expose queue/Wi-Fi latency as a PTS
+	 * correction at the receiver. */
+	pthread_mutex_lock(&c->write_lock);
+	Compy_RtpTransport_set_clock_reference(c->video.rtp, rtp_ts, (uint64_t)capture_us);
 	if (c->srv->rtcp_sr) {
 		int64_t now = rss_timestamp_us();
 		if (c->video.rtcp && now - c->video.last_rtcp > RSD_SR_INTERVAL_US) {
-			pthread_mutex_lock(&c->write_lock);
 			(void)!Compy_Rtcp_send_sr(c->video.rtcp);
-			pthread_mutex_unlock(&c->write_lock);
 			c->video.last_rtcp = now;
 		}
 	}
+	pthread_mutex_unlock(&c->write_lock);
 }
 
 /* Per-client send thread — drains sendq through compy (blocking I/O) */
@@ -270,9 +271,11 @@ void *rsd_client_send_thread(void *arg)
 
 		if (entry.type == RSD_FRAME_VIDEO) {
 			if (c->video.jpeg)
-				rsd_send_jpeg_frame(c, entry.data, entry.len, entry.rtp_ts);
+				rsd_send_jpeg_frame(c, entry.data, entry.len, entry.rtp_ts,
+						    entry.capture_us);
 			else
-				rsd_send_video_interleaved(c, entry.data, entry.len, entry.rtp_ts);
+				rsd_send_video_interleaved(c, entry.data, entry.len, entry.rtp_ts,
+							   entry.capture_us);
 		} else {
 			pthread_mutex_lock(&c->write_lock);
 			rsd_send_audio_frame(c, entry.codec, entry.data, entry.len, entry.rtp_ts,
@@ -292,17 +295,20 @@ void *rsd_video_reader_thread(void *arg)
 	rsd_server_t *srv = rctx->srv;
 	int stream_idx = rctx->idx;
 
-	/* Wall-clock video timestamps: derive from IMP's CLOCK_MONOTONIC_RAW
-	 * timestamp, same clock source as audio. Both streams share the same
-	 * timebase so inter-stream drift is zero by construction. */
+	/* RTP cadence derives from the encoder timestamps. Their epoch and clock
+	 * domain are private to the producer, so continuously map fresh ring frames
+	 * to CLOCK_MONOTONIC for sender-report projection. */
 	int64_t video_ts_epoch = 0;
+	rss_media_clock_t video_clock;
+	rss_media_clock_init(&video_clock);
 	uint32_t last_rtp_ts = 0; /* enforce monotonic RTP timestamps */
 	bool has_last_rtp_ts = false;
 	uint64_t last_write_seq = 0;
 	int idle_count = 0;
 
 	/* Per-thread state for rsd_maybe_request_idr (see top of file). */
-	int64_t last_idr_req_us = 0;
+	rsd_idr_recovery_t idr_recovery;
+	rsd_idr_recovery_init(&idr_recovery);
 
 	uint64_t total_read = 0, total_pushed = 0, total_overflow = 0;
 	int64_t last_count_log = rss_timestamp_us();
@@ -339,6 +345,7 @@ void *rsd_video_reader_thread(void *arg)
 			last_write_seq = 0;
 			idle_count = 0;
 			video_ts_epoch = 0;
+			rss_media_clock_init(&video_clock);
 			last_rtp_ts = 0;
 			has_last_rtp_ts = false;
 			atomic_store_explicit(&rctx->vps_len, 0, memory_order_relaxed);
@@ -574,7 +581,7 @@ void *rsd_video_reader_thread(void *arg)
 					 stream_idx, (unsigned long long)pre_seq,
 					 (unsigned long long)read_seq, (unsigned long long)skipped);
 				rctx->read_seq = read_seq;
-				rsd_maybe_request_idr(rctx->ring, &last_idr_req_us);
+				rsd_maybe_request_idr(rctx->ring, &idr_recovery);
 				break;
 			}
 			if (ret != 0)
@@ -583,6 +590,15 @@ void *rsd_video_reader_thread(void *arg)
 			rctx->read_seq = read_seq;
 			total_read++;
 
+			bool first_clock_sample = !rss_media_clock_ready(&video_clock);
+			int64_t capture_mono_us = rss_media_clock_map(
+				&video_clock, (int64_t)meta.timestamp, rss_timestamp_us());
+			if (first_clock_sample)
+				RSS_INFO("video[%d] initial media->monotonic offset=%lld us",
+					 stream_idx,
+					 (long long)rss_media_clock_offset(&video_clock));
+
+			int64_t read_now_us = rss_timestamp_us();
 			if (video_ts_epoch == 0)
 				video_ts_epoch = meta.timestamp;
 			uint32_t rtp_ts = (uint32_t)((uint64_t)(meta.timestamp - video_ts_epoch) *
@@ -592,6 +608,9 @@ void *rsd_video_reader_thread(void *arg)
 				rtp_ts = last_rtp_ts + frame_dur;
 			last_rtp_ts = rtp_ts;
 			has_last_rtp_ts = true;
+
+			if (meta.is_key)
+				rsd_idr_recovery_note(&idr_recovery, read_now_us);
 
 			if (meta.is_key && rctx->last_codec != 2 && rctx->last_codec != 3 &&
 			    atomic_load_explicit(&rctx->sps_len, memory_order_relaxed) == 0)
@@ -651,12 +670,13 @@ void *rsd_video_reader_thread(void *arg)
 
 				int qret;
 				qret = rsd_sendq_push_video(&c->sendq, frame_data, length,
-							    client_ts, sei, sei_len, is_h265);
+							    client_ts, capture_mono_us, sei,
+							    sei_len, is_h265);
 				if (qret == RSD_SENDQ_OK)
 					total_pushed++;
 				else if (qret == RSD_SENDQ_DROPPED) {
 					c->waiting_keyframe = (c->video.jpeg == NULL);
-					rsd_maybe_request_idr(rctx->ring, &last_idr_req_us);
+					rsd_maybe_request_idr(rctx->ring, &idr_recovery);
 				}
 			}
 			pthread_mutex_unlock(&srv->clients_lock);
@@ -678,7 +698,8 @@ void *rsd_video_reader_thread(void *arg)
 
 /* ── JPEG send path (RFC 2435) ── */
 
-static void rsd_send_jpeg_frame(rsd_client_t *c, const uint8_t *data, uint32_t len, uint32_t rtp_ts)
+static void rsd_send_jpeg_frame(rsd_client_t *c, const uint8_t *data, uint32_t len, uint32_t rtp_ts,
+				int64_t capture_us)
 {
 	if (!c->video.jpeg || !c->video.playing)
 		return;
@@ -686,17 +707,16 @@ static void rsd_send_jpeg_frame(rsd_client_t *c, const uint8_t *data, uint32_t l
 	pthread_mutex_lock(&c->write_lock);
 	(void)!Compy_JpegTransport_send_frame(c->video.jpeg, Compy_RtpTimestamp_Raw(rtp_ts),
 					      U8Slice99_new((uint8_t *)data, len));
-	pthread_mutex_unlock(&c->write_lock);
+	Compy_RtpTransport_set_clock_reference(c->video.rtp, rtp_ts, (uint64_t)capture_us);
 
 	if (c->srv->rtcp_sr) {
 		int64_t now = rss_timestamp_us();
 		if (c->video.rtcp && now - c->video.last_rtcp > RSD_SR_INTERVAL_US) {
-			pthread_mutex_lock(&c->write_lock);
 			(void)!Compy_Rtcp_send_sr(c->video.rtcp);
-			pthread_mutex_unlock(&c->write_lock);
 			c->video.last_rtcp = now;
 		}
 	}
+	pthread_mutex_unlock(&c->write_lock);
 }
 
 /* ── Audio ring reader thread ── */

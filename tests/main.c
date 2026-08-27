@@ -23,10 +23,16 @@ extern SUITE(rhd_auth_suite);
 extern SUITE(rhd_slots_suite);
 extern SUITE(ipc_ctrl_suite);
 extern SUITE(sendq_suite);
+extern SUITE(rwd_sendq_suite);
+extern SUITE(rwd_pacer_suite);
+extern SUITE(rwd_rtcp_suite);
 extern SUITE(rad_clock_suite);
+extern SUITE(media_clock_suite);
+extern SUITE(idr_recovery_suite);
 extern SUITE(resync_suite);
 extern SUITE(backchannel_suite);
 extern SUITE(config_suite);
+extern SUITE(rhd_slots_suite);
 
 GREATEST_MAIN_DEFS();
 
@@ -56,9 +62,15 @@ int main(int argc, char **argv)
 	RUN_SUITE(rhd_slots_suite);
 	RUN_SUITE(ipc_ctrl_suite);
 	RUN_SUITE(sendq_suite);
+	RUN_SUITE(rwd_sendq_suite);
+	RUN_SUITE(rwd_pacer_suite);
+	RUN_SUITE(rwd_rtcp_suite);
 	RUN_SUITE(rad_clock_suite);
+	RUN_SUITE(media_clock_suite);
+	RUN_SUITE(idr_recovery_suite);
 	RUN_SUITE(resync_suite);
 	RUN_SUITE(backchannel_suite);
 	RUN_SUITE(config_suite);
+	RUN_SUITE(rhd_slots_suite);
 	GREATEST_MAIN_END();
 }

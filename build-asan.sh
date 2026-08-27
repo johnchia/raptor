@@ -106,25 +106,39 @@ fi
 
 # ── Clone/update dependencies ──
 
+# A third argument pins the clone to that tag: the checkout is made once
+# and never pulled, since a detached tag checkout with a single fetch
+# refspec fast-forwards straight back onto master. faac needs this: the
+# firmware builds the 2.1 release and upstream master changed the
+# faac_params_init signature on 2026-08-20, which broke this build for
+# everyone whose deps clone had been updated since.
 clone_or_pull() {
-    local name="$1" url="$2" dir="$DEPS/$name"
+    local name="$1" url="$2" ref="$3" dir="$DEPS/$name"
     if [ -d "$dir/.git" ]; then
-        echo "  update  $name"
-        git -C "$dir" pull --ff-only -q 2>/dev/null || true
+        if [ -n "$ref" ]; then
+            if [ "$(git -C "$dir" describe --tags --exact-match 2>/dev/null)" != "$ref" ]; then
+                echo "  pin     $name -> $ref"
+                git -C "$dir" fetch --depth 1 -q origin "refs/tags/$ref:refs/tags/$ref" 2>/dev/null || true
+                git -C "$dir" checkout -q "$ref"
+            fi
+        else
+            echo "  update  $name"
+            git -C "$dir" pull --ff-only -q 2>/dev/null || true
+        fi
     else
-        echo "  clone   $name"
-        git clone --depth 1 -q "$url" "$dir"
+        echo "  clone   $name${ref:+ ($ref)}"
+        git clone --depth 1 -q ${ref:+--branch "$ref"} "$url" "$dir"
     fi
 }
 
 # Use sibling repos if they exist, otherwise clone into deps/
 find_or_clone() {
-    local name="$1" url="$2" varname="$3"
+    local name="$1" url="$2" varname="$3" ref="$4"
     local sibling="$RAPTOR_DIR/../$name"
     if [ -d "$sibling" ]; then
         eval "$varname=\"$sibling\""
     else
-        clone_or_pull "$name" "$url"
+        clone_or_pull "$name" "$url" "$ref"
         eval "$varname=\"$DEPS/$name\""
     fi
 }
@@ -135,7 +149,7 @@ find_or_clone raptor-ipc    https://github.com/gtxaspec/raptor-ipc.git    IPC_DI
 find_or_clone raptor-hal    https://github.com/gtxaspec/raptor-hal.git    HAL_DIR
 find_or_clone compy         https://github.com/gtxaspec/compy.git         COMPY_DIR
 find_or_clone libschrift    https://github.com/tomolt/libschrift.git      SCHRIFT_DIR
-find_or_clone faac          https://github.com/knik0/faac.git             FAAC_DIR
+find_or_clone faac          https://github.com/knik0/faac.git             FAAC_DIR faac-2.1
 find_or_clone ESP8266Audio  https://github.com/earlephilhower/ESP8266Audio.git ESP8266AUDIO_DIR
 
 # Build mbedTLS from source with DTLS-SRTP enabled
@@ -250,6 +264,7 @@ $CC $CFLAGS -c "$COMMON_DIR/src/rss_sei.c" -o "$OUT/rss_sei.o"
 $CC $CFLAGS -c "$COMMON_DIR/src/rss_sign.c" -o "$OUT/rss_sign.o"
 $CC $CFLAGS -c "$COMMON_DIR/src/rss_jpeg.c" -o "$OUT/rss_jpeg.o"
 $CC $CFLAGS -c "$COMMON_DIR/src/rss_aac.c" -o "$OUT/rss_aac.o"
+$CC $CFLAGS -c "$COMMON_DIR/src/rss_media_clock.c" -o "$OUT/rss_media_clock.o"
 $CC $CFLAGS -c "$COMMON_DIR/third_party/monocypher/monocypher.c" -o "$OUT/monocypher.o"
 $CC $CFLAGS -c "$COMMON_DIR/third_party/monocypher/monocypher-ed25519.c" -o "$OUT/monocypher-ed25519.o"
 $CC $CFLAGS -c "$COMMON_DIR/src/cJSON.c" -o "$OUT/cJSON.o"
@@ -259,7 +274,7 @@ const char *rss_build_time = "asan-build";
 const char *rss_build_platform = "x86_64";
 BUILDEOF
 $CC $CFLAGS -c "$OUT/rss_build_info.c" -o "$OUT/rss_build_info.o"
-ar rcs "$OUT/librss_common.a" "$OUT"/rss_log.o "$OUT"/rss_config.o "$OUT"/rss_daemon.o "$OUT"/rss_util.o "$OUT"/rss_ctrl_common.o "$OUT"/rss_ctrl_client.o "$OUT"/rss_http.o "$OUT"/rss_ts.o "$OUT"/rss_sei.o "$OUT"/rss_sign.o "$OUT"/rss_jpeg.o "$OUT"/rss_aac.o "$OUT"/monocypher.o "$OUT"/monocypher-ed25519.o "$OUT"/cJSON.o
+ar rcs "$OUT/librss_common.a" "$OUT"/rss_log.o "$OUT"/rss_config.o "$OUT"/rss_daemon.o "$OUT"/rss_util.o "$OUT"/rss_ctrl_common.o "$OUT"/rss_ctrl_client.o "$OUT"/rss_http.o "$OUT"/rss_ts.o "$OUT"/rss_sei.o "$OUT"/rss_sign.o "$OUT"/rss_jpeg.o "$OUT"/rss_aac.o "$OUT"/rss_media_clock.o "$OUT"/monocypher.o "$OUT"/monocypher-ed25519.o "$OUT"/cJSON.o
 
 echo "=== raptor-ipc ==="
 $CC $CFLAGS -c "$IPC_DIR/src/rss_ring.c" -o "$OUT/rss_ring.o"
@@ -499,9 +514,12 @@ $CC $RWD_CFLAGS -c "$RAPTOR_DIR/rwd/rwd_sdp.c" -o "$OUT/rwd_sdp.o"
 $CC $RWD_CFLAGS -c "$RAPTOR_DIR/rwd/rwd_ice.c" -o "$OUT/rwd_ice.o"
 $CC $RWD_CFLAGS -c "$RAPTOR_DIR/rwd/rwd_dtls.c" -o "$OUT/rwd_dtls.o"
 $CC $RWD_CFLAGS -c "$RAPTOR_DIR/rwd/rwd_media.c" -o "$OUT/rwd_media.o"
+$CC $RWD_CFLAGS -c "$RAPTOR_DIR/rwd/rwd_sendq.c" -o "$OUT/rwd_sendq.o"
+$CC $RWD_CFLAGS -c "$RAPTOR_DIR/rwd/rwd_pacer.c" -o "$OUT/rwd_pacer.o"
 $CC $RWD_CFLAGS -c "$RAPTOR_DIR/rwd/rwd_webtorrent.c" -o "$OUT/rwd_webtorrent.o"
 $CC -o "$OUT/rwd" "$OUT"/rwd_main.o "$OUT"/rwd_signaling.o "$OUT"/rwd_sdp.o \
-    "$OUT"/rwd_ice.o "$OUT"/rwd_dtls.o "$OUT"/rwd_media.o "$OUT"/rwd_webtorrent.o \
+    "$OUT"/rwd_ice.o "$OUT"/rwd_dtls.o "$OUT"/rwd_media.o "$OUT"/rwd_sendq.o \
+    "$OUT"/rwd_pacer.o "$OUT"/rwd_webtorrent.o \
     $LIBS "$COMPY_BUILD/libcompy.a" $LIBS_TLS -lopus $LDFLAGS
 echo "  -> rwd"
 
