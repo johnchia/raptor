@@ -1140,9 +1140,9 @@ static void server_run(rhd_server_t *srv)
 					RSS_DEBUG("jpeg ring replaced by a new producer, "
 						  "reopening (%s)",
 						  jpeg_ring_names[j]);
-					if (ring_acquired[j]) {
+					if (srv->jpeg_acquired[j]) {
 						rss_ring_release(srv->jpeg_rings[j]);
-						ring_acquired[j] = false;
+						srv->jpeg_acquired[j] = false;
 					}
 					rss_ring_close(srv->jpeg_rings[j]);
 					srv->jpeg_rings[j] = NULL;
