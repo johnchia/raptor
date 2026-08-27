@@ -37,3 +37,4 @@ fuzz/fuzz_http_auth
 # stays tracked (ignore only hides new files). Refresh seeds with add -f.
 fuzz/corpus/
 tests/tools/
+.build-config
