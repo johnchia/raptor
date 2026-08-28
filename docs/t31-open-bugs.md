@@ -14,7 +14,7 @@ turned it destructive. Each pair is written up as one section.
 | 2 | Exposure compensation is the only knob with an `auto` button, and pressing it fails | same | **fixed**, board-verified |
 | 3 | The IR-cut filter does not move, in either direction | `ric`, default `pulse_ms` | **default raised to 30 ms**; one check still owed |
 | 4 | Any live rate-control change kills the encoder channel and wedges rvd's teardown | `hal_enc_set_rc_mode` | **fixed**, board-verified |
-| 5 | Reset removes the key, reports success, and the picture does not change | rcd's restart-tier model vs. ISP state that outlives rvd | open |
+| 5 | Reset removes the key, reports success, and the picture does not change | rcd's restart-tier model vs. ISP state that outlives rvd | **fixed**, board-verified |
 | 6 | The ISP getters report 0 for any value not written by the running rvd, while the hardware keeps applying the old one | `hal_isp.c` getters, Ingenic | **fixed** at the getter, board-verified |
 | 7 | Every ISP knob on the Image tab reads 0, whatever the picture is doing | `rcd_state.c`, refilling an absence rvd had just made honest | **fixed**, board-verified |
 | 8 | Brightness 0 does not darken the picture, it blows it to pure white | IMP, and a caps table that published 0 as reachable | **fixed** by a floor, board-verified |
@@ -609,7 +609,7 @@ with a hint saying `tuning 128`, while the control itself sits at 0.
 
 Three statements, and they cannot all be true. Two separate bugs meet here.
 
-### 5: reset cannot reach an ISP knob on Ingenic
+### 5: reset could not reach an ISP knob on Ingenic
 
 rcd does everything right. Timed on the board, with sleeps long enough that
 nothing is a race:
@@ -645,12 +645,62 @@ knob back."**
 Only a reboot clears it, which is confirmed rather than assumed: hue left at
 200 with no key in the file read 128 after a power cycle.
 
-**What a fix has to choose between.** Either rcd stops promising that a restart
-settles an ISP reset -- `takes effect on reboot` is at least true, and the
-machinery for that note already exists -- or the HAL gains a real restore, which
-on Ingenic means reading the knob's value back out of the tuning binary at reset
-time, since there is no auto mode to defer to. The first is honest and cheap;
-the second is what the button ought to do. Neither is done.
+**Fixed, by putting the knob back rather than by promising less.** The second
+of the two options this section used to weigh -- a real restore -- and it needs
+nothing read out of a tuning binary, because the value was already published. A
+knob's caps carry a `neutral`, defined in `raptor_hal.h` as *the value meaning
+"as the tuning file left it"*, and the console has been drawing it under every
+slider as `tuning 128` all along. Nobody was using it for the one thing it
+names.
+
+So `rvd` gains `reset-isp <key>`: look the knob up in the caps, write the
+neutral, and drop the key from rvd's own config so a later config-save cannot
+put it back. One rule covers both families, because the neutral already means
+the same thing on each -- on SigmaStar writing it hands the module to the
+tuner's own curve rather than pinning the midpoint (`star/hal_isp.c` has always
+worked that way), and on Ingenic it writes the value the part boots with, there
+being no curve to defer to.
+
+`rcd` sends it instead of deferring. The key table gains `live_reset`, set for
+the ISP knobs and nothing else, and a reset the owner enacts leaves the file
+changed while owing no restart -- so `applied` reads `live` and the stale list
+stays empty, which have to agree or a client is told to apply something rcd is
+not recording. A refusal falls back to exactly the old behaviour, so naming a
+restore can only improve on it.
+
+A knob with no caps row has no published tuning value and is refused rather
+than guessed at:
+
+    # raptorctl rvd reset-isp hflip
+    {"status":"error","reason":"this knob publishes no tuning value to put back"}
+    # raptorctl rvd reset-isp brightness
+    {"status":"ok"}
+
+Orientation and the gain ceilings are the real cases. They stay restart-tier,
+which for them is honest -- rvd rewrites them from the file at its next start.
+
+**On the board**, the sequence from the top of this section, run again:
+
+    0) start                            file: NONE      live: ABSENT
+    1) config set image hue 200         file: NONE      live: 200
+    2) config reset image hue           file: NONE      live: 128    <- was 200
+       "put back to the tuning value"
+    3) after an rvd restart             file: NONE      live: ABSENT
+       config pending: stale = []
+
+And measured on the picture rather than on the readback, a getter agreeing with
+itself being what finding 6 was about. Whole-frame mean luma, with no reboot
+and no restart anywhere in it:
+
+    baseline                            luma 115.96
+    config set image brightness 210     luma 239.81
+    config reset image brightness       luma 115.68
+
+**A CLI gap found on the way.** rcd has had reset since long before this and no
+client but the console could send one: a reset is `value: null`, and a shell
+cannot say null -- "null" is a word, and a word is a string like any other.
+`raptorctl config reset <section> <key>` is that verb, and it prints what the
+reset came to, which is no longer one answer.
 
 ### 6: the getter answers for a value it no longer has
 
@@ -868,12 +918,17 @@ rather than 0. And the floor, asked for the value that used to blow the frame:
 
 ### What this says about finding 5
 
-That it is load-bearing. Findings 6, 7 and 8 are all consequences of ISP state
+That it was load-bearing. Findings 6, 7 and 8 are all consequences of ISP state
 outliving the process that set it: the getter that cannot answer, the client
-that invents an answer, and the reset that cannot undo the answer. Each has now
-been made honest in its own layer, and none of them fixes the underlying
-disagreement — the hardware still holds a value nothing in the config names,
-and only a reboot clears it.
+that invents an answer, and the reset that cannot undo the answer. The first
+two could only be made honest in their own layer. The third is the one that
+removes the disagreement, because a knob that can be put back is a knob whose
+configured state and hardware state can be brought back into agreement on
+demand — which is why it was worth fixing rather than documenting.
+
+With 5 fixed the cost noted above is bounded rather than permanent: a knob
+raptor has never written still reports no value, and a knob it has written can
+now be returned to the tuning without a power cycle.
 
 ---
 
