@@ -2642,6 +2642,63 @@ TEST only_the_isp_knobs_take_it(void)
  * the range, and a form drawn from the range alone can never say "leave this
  * to the tuning". Said only where it is true.
  */
+/*
+ * And which keys their owner can put back without being restarted.
+ *
+ * `tier` does not answer this: tier is what setting a value costs, and a reset
+ * is a different operation with a different cost -- restart-tier for almost
+ * every key however live it is to set, because rcd has no default to hand a
+ * live command. A client reading only `tier` stages every reset behind an
+ * apply and warns about a restart that will not happen, which is what the
+ * console did for thirteen knobs whose owner could have undone the write on
+ * the spot.
+ *
+ * hflip is the counter-example and shares the section: live to set, and rvd
+ * has no way to un-write it short of reading the file again at its next start.
+ */
+TEST the_schema_says_which_keys_reset_live(void)
+{
+	cJSON *out = cJSON_CreateObject();
+	rcd_schema_emit(out, NULL);
+	const cJSON *keys = cJSON_GetObjectItemCaseSensitive(out, "keys");
+	ASSERT(cJSON_IsArray(keys));
+
+	int checked = 0;
+	const cJSON *k = NULL;
+	cJSON_ArrayForEach(k, keys)
+	{
+		const cJSON *sec = cJSON_GetObjectItemCaseSensitive(k, "section");
+		const cJSON *key = cJSON_GetObjectItemCaseSensitive(k, "key");
+		const cJSON *rl = cJSON_GetObjectItemCaseSensitive(k, "resets_live");
+
+		if (!cJSON_IsString(sec) || !cJSON_IsString(key))
+			continue;
+
+		/* Published for every key, so a client can tell "no" from "this
+		 * camera is too old to say". */
+		ASSERTm("every key states whether it resets live", cJSON_IsBool(rl));
+
+		if (strcmp(sec->valuestring, "image") == 0 &&
+		    strcmp(key->valuestring, "contrast") == 0) {
+			ASSERTm("an ISP knob resets live", cJSON_IsTrue(rl));
+			checked++;
+		}
+		if (strcmp(sec->valuestring, "image") == 0 &&
+		    strcmp(key->valuestring, "hflip") == 0) {
+			ASSERTm("orientation does not", cJSON_IsFalse(rl));
+			checked++;
+		}
+		if (strcmp(sec->valuestring, "stream0") == 0 &&
+		    strcmp(key->valuestring, "width") == 0) {
+			ASSERTm("nor does a restart-tier key", cJSON_IsFalse(rl));
+			checked++;
+		}
+	}
+	ASSERT_EQ(3, checked);
+	cJSON_Delete(out);
+	PASS();
+}
+
 TEST the_schema_says_which_keys_take_auto(void)
 {
 	cJSON *out = cJSON_CreateObject();
@@ -3163,7 +3220,11 @@ TEST resetting_an_isp_knob_asks_rvd_to_put_it_back(void)
 
 	const rcd_key_t *k = rcd_key_find("image", "brightness");
 	ASSERT(k);
-	ASSERT_STR_EQm("the key under test names a restore", "reset-isp", k->live_reset);
+	/* Checked for NULL before it is compared: ASSERT_STR_EQ strcmps its
+	 * arguments, so a key that stopped naming a restore would take the
+	 * whole suite down with a SEGV instead of failing this line. */
+	ASSERTm("the key under test names a restore", k->live_reset != NULL);
+	ASSERT_STR_EQ("reset-isp", k->live_reset);
 
 	if (!fake_daemon_start_reply(&d, "rvd", "{\"status\":\"ok\"}")) {
 		unlink(path);
@@ -3482,6 +3543,7 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(every_label_array_spans_its_range);
 	RUN_TEST(an_isp_knob_takes_the_word_auto);
 	RUN_TEST(only_the_isp_knobs_take_it);
+	RUN_TEST(the_schema_says_which_keys_reset_live);
 	RUN_TEST(the_schema_says_which_keys_take_auto);
 	RUN_TEST(exposure_compensation_goes_both_ways);
 	RUN_TEST(a_knob_left_on_auto_reads_back_as_auto);

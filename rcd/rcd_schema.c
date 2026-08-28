@@ -966,6 +966,17 @@ static void emit_key(cJSON *arr, const rcd_key_t *k)
 	 */
 	cJSON_AddStringToObject(o, "tier", rcd_key_live(k) ? "live" : "restart");
 	cJSON_AddStringToObject(o, "impact", rcd_impact_name(rcd_key_impact(k)));
+	/*
+	 * Whether putting this key back takes effect at once, which `tier` does
+	 * not answer: tier is what setting a value costs, and a reset is a
+	 * different operation with a different cost. For almost every key it is
+	 * restart-tier whatever the tier here says, because rcd has no default
+	 * to hand a live command -- and for the few whose owner can be asked to
+	 * put the key back, it costs nothing at all. A client without this
+	 * stages every reset behind an apply and warns about a restart that is
+	 * not going to happen.
+	 */
+	cJSON_AddBoolToObject(o, "resets_live", k->live_reset != NULL);
 
 	/* A credential is settable and never readable, and a client that does
 	 * not know that draws an input which always looks empty and calls it a

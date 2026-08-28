@@ -275,6 +275,8 @@ const probe_epilogue = `
   TABS: TABS, byId: byId, render: render, refreshBar: refreshBar,
   getKeys: function () { return KEYS; },
   canReset: canReset, toggleReset: toggleReset,
+  resetsLive: resetsLive, commitReset: commitReset,
+  RESET: RESET, dirty: dirty, UNSET: UNSET,
   setActive: function (v) { active = v; },
   ACT_STATE: ACT_STATE,
   V: V,
@@ -340,6 +342,104 @@ try {
 		p.toggleReset(id, false);
 	});
 	if (!staged) fail("no key could be staged for reset");
+
+	/*
+	 * A reset its owner can enact is sent, not staged.
+	 *
+	 * The two are told apart by rcd, per key, and getting it wrong is not a
+	 * cosmetic difference: staging one makes the operator confirm "stops
+	 * capture" for a reset that restarts nothing, and then leaves the knob
+	 * alone until an Apply that has nothing to apply.
+	 */
+	let live_reset = 0, staged_reset = 0;
+	{
+		/* Driven through the button rather than by calling the sender,
+		 * because which of the two a click reaches is the thing under
+		 * test. */
+		/* The row can be on any tab, so the tab is found rather than
+		 * assumed -- and a key with no reset control drawn is a
+		 * different failure than one whose button does the wrong
+		 * thing. */
+		const undoOf = id => {
+			for (const t of p.TABS) {
+				p.setActive(t.id);
+				p.render();
+				const row = sheet.querySelectorAll(".row")
+						 .find(r => r.dataset.id === id);
+				const b = row && row.querySelectorAll(".undo")[0];
+				if (b) return b;
+			}
+			fail("no reset control drawn for " + id);
+		};
+		const press = async id => {
+			const b = undoOf(id);
+			for (const fn of (b.handlers.click || [])) await fn();
+			await settle();
+		};
+
+		/* contrast, not brightness: the fixture leaves brightness unset,
+		 * so "the value was cleared" would pass without clearing
+		 * anything. */
+		const isp = "image.contrast";
+
+		if (!p.resetsLive(isp))
+			fail(isp + " should reset live -- is resets_live reaching the page?");
+
+		/* Whatever the fixture offers that cannot be put back live: the
+		 * contrast is the point, not the particular key. */
+		let orient = null;
+		p.TABS.forEach(t => {
+			p.setActive(t.id);
+			p.render();
+			sheet.querySelectorAll(".row").forEach(r => {
+				const id = r.dataset.id;
+				if (orient || !id || p.resetsLive(id)) return;
+				if (r.querySelectorAll(".undo").length) orient = id;
+			});
+		});
+		if (!orient) fail("no staged-reset key in the fixture to contrast with");
+
+		const before = served;
+		await press(isp);
+		if (served === before)
+			fail("resetting " + isp + " sent nothing");
+		if (p.RESET.has(isp) || p.dirty.has(isp))
+			fail("resetting " + isp + " staged it as well as sending it");
+		if (!p.UNSET.has(isp))
+			fail("after a live reset " + isp + " should read as unset");
+		if (p.V[isp] !== undefined)
+			fail("after a live reset " + isp + " kept its old value");
+		live_reset++;
+
+		/* And the other kind still waits for Apply, sending nothing now. */
+		const before2 = served;
+		await press(orient);
+		if (served !== before2)
+			fail("staging " + orient + " sent a request it should have held");
+		if (!p.RESET.has(orient))
+			fail(orient + " was not staged");
+		p.toggleReset(orient, false);
+		staged_reset++;
+	}
+
+	/*
+	 * And when the owner cannot be asked -- rvd stopped, or the command
+	 * refused -- rcd falls back to the file and says so with the same
+	 * `applied` a set uses. The page has to follow it there, because that
+	 * is the case where the restart really is owed.
+	 */
+	{
+		const isp = "image.brightness";
+
+		refuseNext = 65;
+		await p.commitReset(isp);
+		await settle();
+		refuseNext = null;
+
+		if (!p.RESET.has(isp) || !p.dirty.has(isp))
+			fail("a refused live reset must fall back to staging");
+		p.toggleReset(isp, false);
+	}
 
 	/*
 	 * Actions, which nothing above touches: the day/night override shipped
@@ -510,5 +610,6 @@ try {
 	console.log("ok  " + p.TABS.length + " tabs, " + drawn + " groups, " + undos +
 		    " reset controls, " + staged + " redrawn with a reset staged, " +
 		    "day/night override wired, image knobs on the camera's own " +
-		    "ranges, " + served + " requests served");
+		    "ranges, " + live_reset + " reset live and " + staged_reset +
+		    " staged, " + served + " requests served");
 })();

@@ -729,11 +729,23 @@ const valueOf = (k, name) => k.labels ? k.min + k.labels.indexOf(name) : name;
    value will become -- only that it will be the daemon's. It says that rather
    than guessing, and the field fills in for real after the restart.
 
-   Staged like every other restart-tier change and sent by Apply, because that
-   is what a reset is however live the key is when it carries a value. */
+   Staged and sent by Apply, because that is what a reset costs for a key whose
+   default only arrives when its owner next reads the file.
+
+   Except where the owner can be asked to put the key back, which rcd reports
+   per key as `resets_live`. Those are sent at once, like a live set: staging
+   one would make the operator confirm a restart that is not going to happen,
+   and then not happen. The ISP knobs are the case -- their state lives in the
+   driver, so rvd can undo a write without being restarted. */
+const resetsLive = id => !!(byId[id] && byId[id].resets_live);
+
+/* A key already at its default has nothing to put back -- unless its owner
+   holds state the file does not describe. An ISP knob set from MQTT or the
+   CLI is exactly that: absent from the config and still applied, so "not
+   configured" stops meaning "at the default" and the button has to stay. */
 const canReset = id => byId[id] && byId[id].resettable !== false &&
                        byId[id].type !== "credential" &&
-                       (!DEFAULTED.has(id) || RESET.has(id));
+                       (resetsLive(id) || !DEFAULTED.has(id) || RESET.has(id));
 
 function toggleReset(id, on) {
   if (on === undefined) on = !RESET.has(id);
@@ -747,12 +759,25 @@ function toggleReset(id, on) {
 /* A whole group at once. The caller passes only the keys that have something
    to put back -- most of a group is already at its default, and staging those
    would ask for a restart to change nothing. */
-function resetKeys(ids) {
+async function resetKeys(ids) {
   if (!ids.length) { wlog("sys", "nothing here to put back"); return; }
-  ids.forEach(id => toggleReset(id, true));
+
+  /* Two kinds in one group, and they part company here: the ones the owner
+     can put back go now, the rest wait for Apply. One at a time, because rcd
+     answers one at a time and a group is a handful of keys, not a hundred. */
+  const now = ids.filter(resetsLive);
+  const later = ids.filter(id => !resetsLive(id));
+
+  later.forEach(id => toggleReset(id, true));
+  if (later.length)
+    wlog("sys", "staged " + later.length + " key" + (later.length === 1 ? "" : "s") +
+                " for reset — Apply puts them back");
   refreshBar(); render();
-  wlog("sys", "staged " + ids.length + " key" + (ids.length === 1 ? "" : "s") +
-              " for reset — Apply puts them back");
+
+  for (const id of now) await commitReset(id);
+  if (now.length)
+    wlog("ok", "put " + now.length + " key" + (now.length === 1 ? "" : "s") + " back");
+  refreshBar(); render();
 }
 
 /* Two buttons, not one taking either kind of argument: one key id and a list
@@ -772,7 +797,11 @@ function keyUndoButton(id) {
     RESET.has(id) ? "keep the reset" : "reset",
     "Take this key out of the configuration and let " +
       ((byId[id] && byId[id].owner) || "the camera") + " use its own default",
-    () => { toggleReset(id); refreshBar(); render(); });
+    async () => {
+      if (resetsLive(id) && !RESET.has(id)) await commitReset(id);
+      else toggleReset(id);
+      refreshBar(); render();
+    });
 }
 
 /* Scoped to the rows the group draws rather than to its section: a section
@@ -833,6 +862,40 @@ async function commit(id, val, el) {
   else dirty.add(id);
   if (el) el.classList.toggle("dirty", dirty.has(id));
   refreshBar();
+}
+
+/*
+ * A reset its owner enacts, sent the way a live set is sent.
+ *
+ * The reply decides what happened rather than this page assuming it. rcd asks
+ * the owner and falls back to the file when the owner cannot be reached or
+ * refuses, and says which by the same `applied` it uses for a set -- so a
+ * camera with rvd stopped lands in the staged case by a different road, with
+ * the restart genuinely owed and the warning genuinely right.
+ */
+async function commitReset(id) {
+  const k = byId[id];
+  if (inflight.has(id)) return;
+  inflight.add(id);
+  try {
+    const r = await api({cmd:"set", edits:[{section:k.section, key:k.key, value:null}]});
+    const res = (r.results || [])[0] || {};
+    if (res.applied === "saved") {
+      RESET.add(id); dirty.add(id);
+      wlog("sys", id + " staged for reset — " + (res.note || "Apply puts it back"));
+    } else {
+      /* Out of the file and out of the hardware. The value goes with it: what
+         the knob reads now is the owner's, and the next poll brings it. */
+      delete V[id]; delete SAVED[id];
+      UNSET.add(id); DEFAULTED.add(id);
+      RESET.delete(id); dirty.delete(id);
+      wlog("ok", id + " — " + (res.note || "put back"));
+    }
+  } catch (e) {
+    wlog("err", id + " — " + e.message);
+  } finally {
+    inflight.delete(id);
+  }
 }
 
 /* `prev` is passed in: V[id] has already been moved to the new value so the
@@ -1384,7 +1447,8 @@ function render() {
     if (g.note) { const n = document.createElement("span"); n.className = "note";
       n.textContent = g.note; h.append(n); }
     const resettable = (g.matrix ? KEYS.filter(k => g.matrix.includes(k.section)) : rows)
-                         .map(id_of).filter(id => canReset(id) && !DEFAULTED.has(id));
+                         .map(id_of)
+                         .filter(id => canReset(id) && (resetsLive(id) || !DEFAULTED.has(id)));
     if (resettable.length) h.append(groupUndoButton(resettable));
     const own = document.createElement("span"); own.className = "owner";
     own.textContent = g.matrix ? (byId[g.matrix[0] + ".width"] || {}).owner || ""
