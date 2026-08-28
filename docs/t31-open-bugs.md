@@ -1,11 +1,11 @@
-# Four things wrong on a T31, found from the console
+# Six things wrong on a T31, found from the console
 
 Field report from a Wyze Cam v3 (T31X, gc2053, 1920x1080) on the 2026-08-27
 nightly, build `8307ecf`, OpenIPC base. Every finding below was reproduced on
 that board; the numbers are measurements, not estimates.
 
-Two of the four are the same bug wearing different clothes, so they are written
-up together.
+Findings 1 and 2 are the same bug wearing different clothes, and 5 and 6 arrive
+together on the same control, so each pair is written up as one section.
 
 | # | Symptom | Where it lives | State |
 |---|---------|----------------|-------|
@@ -13,6 +13,15 @@ up together.
 | 2 | Exposure compensation is the only knob with an `auto` button, and pressing it fails | same | **fixed**, board-verified |
 | 3 | The IR-cut filter does not move, in either direction | `ric`, default `pulse_ms` | **default raised to 30 ms**; one check still owed |
 | 4 | Any live rate-control change kills the encoder channel and wedges rvd's teardown | `hal_enc_set_rc_mode` | **fixed**, board-verified |
+| 5 | Reset removes the key, reports success, and the picture does not change | rcd's restart-tier model vs. ISP state that outlives rvd | open |
+| 6 | The ISP getters report 0 for any value not written by the running rvd, while the hardware keeps applying the old one | `hal_isp.c` getters, Ingenic | **fixed** at the getter, board-verified |
+
+A seventh, found while testing 4 and tracked upstream rather than here: CBR
+cannot reach its target bitrate, because the default QP floor of 34 pins the
+encoder at a quality too low to spend the budget --
+[gtxaspec/raptor-hal#10](https://github.com/gtxaspec/raptor-hal/issues/10).
+It is upstream's, reproduces from a cold start, and is unrelated to finding 4
+beyond having been hidden behind it.
 
 ---
 
@@ -589,6 +598,153 @@ would wedge the same way:
 
 ---
 
+## 5 and 6: reset says it worked, and the camera misreports what it is doing
+
+Set an image knob, press reset, reload: the value is still there. And on a
+camera that has never had one set, brightness and saturation read as `not set`
+with a hint saying `tuning 128`, while the control itself sits at 0.
+
+Three statements, and they cannot all be true. Two separate bugs meet here.
+
+### 5: reset cannot reach an ISP knob on Ingenic
+
+rcd does everything right. Timed on the board, with sleeps long enough that
+nothing is a race:
+
+    1) config set image hue 200      file: hue = 200     live: 200
+    2) reset (value:null)            file: NONE          live: 200
+       {"reset":true,"applied":"saved",
+        "stale":[{"daemon":"rvd","impact":"pipeline","keys":[...]}]}
+    3) after rvd restart             file: NONE          live: 200   <- want 128
+
+The key comes out of the file, the reply correctly says a restart is owed, the
+restart happens, and the value does not move. rcd's model is stated in its own
+comment at the point the decision is made:
+
+> A reset has no value to hand a live command, and rcd has no default to put in
+> its place -- the daemon's own is the point of the exercise, and it reaches it
+> by reading the file at its next start. So every reset is restart-tier,
+> whatever the key's tier is when it carries a value.
+
+That is true of a daemon whose state lives in its own process. **It is false of
+the ISP, whose state lives in the IMP driver and outlives rvd entirely.**
+`rvd_pipeline.c` only ever writes the keys the config names -- `ISP_IF_ASKED`,
+and otherwise `"%s left to the tuning file"` -- so nothing un-writes a knob. A
+removed key leaves the last value in the hardware, permanently.
+
+On SigmaStar there is a way back: `RSS_ISP_AUTO` hands the module to the
+tuning's own curve, which is exactly what a reset wants to mean. On Ingenic
+there is not. `has_auto` is false for every row, `HAL_ISP_REFUSE_AUTO` rejects
+the sentinel, and both are correct -- IMP has no auto/manual op_type to hand
+anything back to. **There is no operation on this family that means "put this
+knob back."**
+
+Only a reboot clears it, which is confirmed rather than assumed: hue left at
+200 with no key in the file read 128 after a power cycle.
+
+**What a fix has to choose between.** Either rcd stops promising that a restart
+settles an ISP reset -- `takes effect on reboot` is at least true, and the
+machinery for that note already exists -- or the HAL gains a real restore, which
+on Ingenic means reading the knob's value back out of the tuning binary at reset
+time, since there is no auto mode to defer to. The first is honest and cheap;
+the second is what the button ought to do. Neither is done.
+
+### 6: the getter answers for a value it no longer has
+
+The page drew the slider at 0, and that is where it was noticed, but the 0 does
+not come from the page.
+
+**The Ingenic ISP getters are only valid for writes made by the current
+process.** Across an rvd restart the ISP keeps applying the old value and
+`IMP_ISP_Tuning_Get*` forgets it, so the reported number and the picture come
+apart completely:
+
+    set brightness 200            readback 200
+    restart rvd (no key in file)  readback 0     <- and the picture is still at 200
+
+Measured rather than argued, mean luma over a downsampled frame:
+
+    getter says 0        luma = 239.42
+    explicitly set 128   luma = 118.20
+    explicitly set 200   luma = 239.52
+
+239.42 against 239.52 is the same picture. The hardware was at 200 while the
+getter said 0. That is not a stale reading or an unset sentinel -- it is an
+answer about a value libimp has lost and the ISP has not.
+
+The same divergence shows on a pristine boot, which is how it first appeared:
+brightness and saturation read 0 while contrast, sharpness and hue read 128, and
+a saturation truly at 0 is monochrome where the picture was not --
+
+    readback says 0        mean chroma = 23.02      colour
+    explicitly set to 0    mean chroma =  0.00      greyscale
+    explicitly set to 128  mean chroma = 23.66      colour
+
+The setter and getter are otherwise perfectly symmetric: 200, 64 and 128 all
+round-trip on brightness, saturation and contrast alike. So there is nothing
+wrong with the pair. What is wrong is the assumption that a reading survives the
+process that made it.
+
+**The fix is at the getter, and a per-knob "written since IMP init" flag is the
+mechanism** -- not as a heuristic, but because it has exactly the lifetime over
+which the getter is meaningful. The flag and libimp's cache are created and lost
+together, so the flag is a precise statement of when the cache can be believed.
+
+It answers the question a caller is really asking, too. "What is this knob set
+to" has no answer for a knob raptor has never set: the tuning owns it, and the
+tuning's value is not something IMP will hand back. Declining is both the honest
+reply and the only available one -- there is no second API to read what is
+applied, so a wrong number is the alternative, not a better one.
+
+`hal_isp.c` now marks a knob on any write the SDK accepts and its getter returns
+`RSS_ERR_NOENT` for anything unmarked. A refused write does not count: the
+sentinel never reached the SDK, so it cannot have made the readback meaningful.
+
+rvd's `get-isp` was the other half, and it was already dropping this on the
+floor for a second reason. It ignored every getter's return, so a knob the HAL
+had explicitly declined to read still went out as 0 -- which is why spatial and
+temporal denoise reported 0 on every Ingenic camera ever: `hal_isp_get_sinter_strength`
+and its temper twin have always returned `RSS_ERR_NOTSUP`, because no generation
+has a getter for them. `get-isp` now withholds the value for any knob whose
+getter declined, whatever the reason, and keeps publishing the caps -- what the
+knob accepts is known whether or not anything has been written to it, and a
+client still has to draw the control. The absence is the message: no reading,
+use the neutral the caps carry.
+
+That leaves the console needing no logic at all. Its existing last resort was
+already the published neutral; it simply never got there, because a value was
+always present. The only change to the page is the comment saying why that
+fallback is now load-bearing.
+
+On the board, with `drc_strength = 128` the one knob the config names:
+
+    nothing written        "drc_strength":128
+    set brightness 96,
+      saturation 140       "brightness":96 "saturation":140 "drc_strength":128
+    after rvd restart      "drc_strength":128
+
+The last line is the case that used to lie. The hardware is still at 96 and 140;
+the camera no longer claims to know that, and no longer claims 0 either.
+
+Pinned in `t_isp_imp.c`, first in `main()` because the flag is set by the first
+successful write and every other leg makes one: an unwritten knob answers
+`NOENT` without the SDK being reached at all, a refused write leaves it as
+unreadable as it was, and a real write makes the reading answerable and correct.
+`IMP_ISP_Tuning_GetBrightness` came out of the abort stubs to be a recording
+fake for it. The console side keeps its own leg in `console_smoke.js`, with the
+fixture's `temper` carrying caps and no value -- a camera saying it has no
+reading -- and the page required to draw the neutral from the caps.
+
+**What it costs.** A knob stuck by finding 5 is now invisible rather than
+misdrawn: nothing reports both the configured state and the hardware state while
+5 lets them disagree. Three knobs also lose a reading that happened to be
+correct -- hue, DPC and defog kept their value across the restart above where
+the other nine did not -- but which ones do is not a distinction this file can
+safely encode, and an answer that is right by luck is not one a client can act
+on.
+
+---
+
 ## Reproducing
 
 Board at 192.168.1.108, root. Colour measurements are whole-frame channel means
@@ -596,19 +752,21 @@ from a single RTSP frame downsampled to 160x90, six seconds after the command,
 via `ffmpeg -rtsp_transport tcp -i rtsp://192.168.1.108:554/stream0 -frames:v 1`.
 Relative channel ratios only — absolute levels move with AE and say nothing.
 
-The board was left running the fixed `rvd` (md5 `9c7f225c`, T31 uClibc, built
-2026-08-28) with `pulse_ms = 100` set live so the IR-cut filter actually moves.
-That does not persist, so a restart returns it to the marginal 10 ms until the
-default changes. Everything else is as found: ae_comp live at 128 with no key
-in the file, `max_again` back at its fresh-start 160, both streams `cbr`,
-`ric` on `auto`, all
-daemons in their prior state. The stock binary is at `/tmp/rvd.orig`.
+The board was left running the fixed `rvd` (md5 `cbfa2ba1`), the fixed `ric`
+(`52d41004`), and the console at `/usr/share/raptor/index.html`; stock copies are at `/tmp/rvd.orig` and `/tmp/ric.orig`, and
+`ringdump` -- absent from this image and the only bitrate instrument on it --
+was left at `/tmp/ringdump`. `pulse_ms` reverts to the shipped default on the
+next restart, which is now 30 ms.
 
-One thing noticed on the way out and not chased: resetting an `[image]` key
+Everything else is as found: `[image]` holding only `drc_strength` and `vflip`,
+both streams on the modes the config named, `ric` on `auto`, all daemons in
+their prior state. Two reboots happened during finding 5, deliberately -- a
+reboot is the only thing that clears a stuck ISP knob, which is the finding.
+
+Loose ends noticed and not chased: `set-rc-mode` with an explicit bitrate does
+not update `enc_cfg.bitrate`, so `get-bitrate` afterwards reports the old
+figure; a live ISP set reaches rvd's in-memory config and the file at different
+moments, so the two can disagree for a while; and resetting an `[image]` key
 triggers an apply that tries to restart `rad`, which is deliberately stopped on
-this camera (`[audio] enabled = false`), and the reset returns
-`"apply_error":"rad did not come back within 26 s"` having otherwise
-succeeded. Two smaller ones in the same bracket: `set-rc-mode` with an explicit
-bitrate does not update `enc_cfg.bitrate`, so `get-bitrate` afterwards reports
-the old figure; and `rc_mode` was not written to `/etc/raptor.conf` by a live
-change, so it does not survive an rvd restart.
+this camera (`[audio] enabled = false`), returning
+`"apply_error":"rad did not come back within 26 s"` having otherwise succeeded.
