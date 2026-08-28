@@ -1342,18 +1342,7 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		}
 
 		/*
-		 * A reset has no value to hand a live command, and rcd has no
-		 * default to put in its place -- the daemon's own is the point
-		 * of the exercise, and it reaches it by reading the file at
-		 * its next start. So every reset is restart-tier, whatever the
-		 * key's tier is when it carries a value.
-		 */
-		/*
-		 * A key whose owner can put it back is put back by asking it,
-		 * before any of the reasoning below about restarts applies.
-		 * The key still leaves the file -- that is what a reset is --
-		 * but the value does not survive in the hardware waiting for a
-		 * restart that will never overwrite it.
+		 * A key whose owner can put it back is put back by asking it.
 		 *
 		 * Attempted whether or not the file holds the key, which is
 		 * the case that motivates it: an ISP knob written live and
@@ -1379,6 +1368,14 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 			 * any owner could do better. */
 		}
 
+		/*
+		 * Everything else. A reset has no value to hand a live command
+		 * and rcd has no default to put in its place -- the daemon's
+		 * own is the point of the exercise, and a daemon that cannot
+		 * be asked reaches it by reading the file at its next start.
+		 * So a reset is restart-tier unless its owner answered above,
+		 * whatever the key's tier is when it carries a value.
+		 */
 		if (!k->live_cmd || stage_only || edits[i].reset) {
 			to_file[i] = true;
 			continue;
