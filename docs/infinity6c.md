@@ -202,6 +202,10 @@ address, plus `dmesg`, would settle it.
 - **An unsupported OSD pixel format hangs the whole MI graph.** `ARGB8888` is
   the one to avoid; the symptom is not an error but a stall that reads as a
   resolution limit. Cover colour is VYU444 and cover size is in 8192ths.
+- **The 16 OSD region slots are global, not per stream**, and rvd never gives
+  one back when an element disappears. Renaming the overlay elements a few
+  times under a live rvd runs the pool dry and the overlay silently stops
+  adding anything — see [rvd-osd-region-leak.md](rvd-osd-region-leak.md).
 - **`osdrv-i6c` ships 2022 MI libraries against a 2024 `mi.ko`.** The symptom is
   a dark picture: the mismatch breaks CUS3A's AE (a 112-byte structure against
   108). The fix is a coherent 2024-06 library set, keeping the 0907
