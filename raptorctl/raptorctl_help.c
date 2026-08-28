@@ -14,6 +14,7 @@ const struct help_entry help_entries[] = {
 	{NULL, "config get <section> <key>           Read config value"},
 	{NULL, "config get <section>                Show all keys in section"},
 	{NULL, "config set <section> <key> <value>  Set config value (through rcd)"},
+	{NULL, "config reset <section> <key>        Put a key back to its default"},
 	{NULL, "config apply                        Restart whatever is running behind"},
 	{NULL, "config pending                      What is saved but not yet in effect"},
 	{NULL, "config action <name> [key value]     Run one of rcd's actions"},
@@ -97,6 +98,7 @@ const struct help_entry help_entries[] = {
 	{"rvd", "set-wb <mode> [r] [b]               White balance"},
 	{"rvd", "get-wb                              Show white balance settings"},
 	{"rvd", "get-isp                             ISP settings, plus each knob's range"},
+	{"rvd", "reset-isp <key>                     Put one ISP knob back to the tuning"},
 	{"rvd", "get-exposure                        Show exposure info"},
 	{"rsd", "clients                             List connected clients"},
 	{"rsd", "set-backchannel-codecs <list>       Offered talk-back codecs, e.g. pcmu,opus"

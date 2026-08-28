@@ -124,6 +124,9 @@ static const struct cmd_arg args_cpu[] = {{"cpu", A_INT}, {NULL, A_END}};
 
 static const struct cmd_arg args_key_val[] = {{"key", A_STR}, {"value", A_INT}, {NULL, A_END}};
 
+/* A command that names one setting and carries no value of its own. */
+static const struct cmd_arg args_key[] = {{"key", A_STR}, {NULL, A_END}};
+
 static const struct cmd_arg args_enc_set[] = {
 	{"channel", A_INT}, {"param", A_STR}, {"value", A_INT}, {NULL, A_END}};
 
@@ -155,6 +158,7 @@ static const struct cmd_def cmd_table[] = {
 	{"set-fps", NULL, 2, args_ch_val},
 
 	/* Sensor rate: transient override, whole pipeline (0 = base) */
+	{"reset-isp", NULL, 1, args_key},
 	{"set-sensor-fps", NULL, 1, args_val},
 	{"get-sensor-fps", NULL, 0, args_none},
 	{"timelapse-set", NULL, 2, args_key_val},

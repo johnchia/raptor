@@ -96,17 +96,26 @@ static void add_typed(cJSON *j, const char *key, const char *val)
  */
 static int config_set_via_rcd(const char *section, const char *key, const char *value)
 {
+	const char *verb = value ? "set" : "reset";
 	cJSON *j = jcmd("set");
 	if (!j)
 		return 1;
 	jadd_s(j, "section", section);
 	jadd_s(j, "key", key);
-	add_typed(j, "value", value);
+	/*
+	 * A reset is `value: null`, which no shell can hand over: "null" is a
+	 * word, and a word is a string like any other. So it is a verb of its
+	 * own here and a NULL value on the way through.
+	 */
+	if (value)
+		add_typed(j, "value", value);
+	else
+		cJSON_AddNullToObject(j, "value");
 
 	char req[512];
 	jstr(j, req, sizeof(req));
 	if (!req[0]) {
-		fprintf(stderr, "config set: request too large\n");
+		fprintf(stderr, "config %s: request too large\n", verb);
 		return 1;
 	}
 
@@ -115,16 +124,18 @@ static int config_set_via_rcd(const char *section, const char *key, const char *
 
 	char *resp = NULL;
 	if (rss_ctrl_send_command_alloc(sock, req, &resp, 30000) < 0) {
-		fprintf(stderr, "config set: rcd is not running, and writes go "
-				"through it.\nStart it (/etc/init.d/S31raptor start) "
-				"and try again.\n");
+		fprintf(stderr,
+			"config %s: rcd is not running, and writes go "
+			"through it.\nStart it (/etc/init.d/S31raptor start) "
+			"and try again.\n",
+			verb);
 		return 1;
 	}
 
 	cJSON *root = cJSON_Parse(resp);
 	free(resp);
 	if (!root) {
-		fprintf(stderr, "config set: rcd answered unusably\n");
+		fprintf(stderr, "config %s: rcd answered unusably\n", verb);
 		return 1;
 	}
 
@@ -132,7 +143,7 @@ static int config_set_via_rcd(const char *section, const char *key, const char *
 	int rc = 0;
 	if (!cJSON_IsString(status) || strcmp(status->valuestring, "ok") != 0) {
 		const cJSON *why = cJSON_GetObjectItemCaseSensitive(root, "reason");
-		fprintf(stderr, "config set: %s\n",
+		fprintf(stderr, "config %s: %s\n", verb,
 			cJSON_IsString(why) ? why->valuestring : "refused");
 		rc = 1;
 	} else {
@@ -146,6 +157,13 @@ static int config_set_via_rcd(const char *section, const char *key, const char *
 		const cJSON *applied = cJSON_GetObjectItemCaseSensitive(first, "applied");
 		if (cJSON_IsString(applied) && strcmp(applied->valuestring, "saved") == 0)
 			printf("saved; run 'raptorctl config apply' to restart what needs it\n");
+
+		/* What a reset came to, which is no longer one answer: a knob
+		 * its owner can put back is put back now, and everything else
+		 * still waits for the restart reported above. */
+		const cJSON *note = cJSON_GetObjectItemCaseSensitive(first, "note");
+		if (!value && cJSON_IsString(note))
+			printf("%s\n", note->valuestring);
 	}
 
 	cJSON_Delete(root);
@@ -357,6 +375,15 @@ int handle_config(int argc, char **argv)
 		return config_set_via_rcd(argv[3], argv[4], argv[5]);
 	}
 
-	fprintf(stderr, "Usage: raptorctl config <get|set|save|apply|pending> ...\n");
+	/* config reset <section> <key> */
+	if (strcmp(argv[2], "reset") == 0) {
+		if (argc < 5) {
+			fprintf(stderr, "Usage: raptorctl config reset <section> <key>\n");
+			return 1;
+		}
+		return config_set_via_rcd(argv[3], argv[4], NULL);
+	}
+
+	fprintf(stderr, "Usage: raptorctl config <get|set|reset|save|apply|pending> ...\n");
 	return 1;
 }

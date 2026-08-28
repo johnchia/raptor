@@ -1080,6 +1080,22 @@ static bool live_request(const rcd_edit_t *e, char *out, size_t outsz)
  * dirtied on the config handed to it, so starting from a clean read means
  * exactly these edits reach the file -- not anything a daemon has changed in
  * its own memory and not yet saved. */
+/* A reset carries no value: the owner is asked to put the key back, and what
+ * to put it back to is the owner's to know. */
+static bool reset_request(const rcd_key_t *k, char *out, size_t outsz)
+{
+	cJSON *req = cJSON_CreateObject();
+	if (!req)
+		return false;
+
+	cJSON_AddStringToObject(req, "cmd", k->live_reset);
+	cJSON_AddStringToObject(req, "key", k->key);
+
+	bool fit = cJSON_PrintPreallocated(req, out, (int)outsz, 0);
+	cJSON_Delete(req);
+	return fit;
+}
+
 static int write_file(rcd_state_t *st, rcd_edit_t *edits, const bool *to_file, bool *changed, int n)
 {
 	int wanted = 0;
@@ -1251,6 +1267,9 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 	bool to_file[RCD_EDITS_MAX] = {false};
 	bool changed[RCD_EDITS_MAX] = {false};
 	bool staged[RCD_EDITS_MAX] = {false};
+	/* Reset live by the owner: the key still leaves the file, but nothing
+	 * is owed afterwards and there is nothing for `apply` to settle. */
+	bool restored[RCD_EDITS_MAX] = {false};
 	const char *note[RCD_EDITS_MAX] = {NULL};
 	char notebuf[RCD_EDITS_MAX][192];
 
@@ -1329,6 +1348,37 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		 * its next start. So every reset is restart-tier, whatever the
 		 * key's tier is when it carries a value.
 		 */
+		/*
+		 * A key whose owner can put it back is put back by asking it,
+		 * before any of the reasoning below about restarts applies.
+		 * The key still leaves the file -- that is what a reset is --
+		 * but the value does not survive in the hardware waiting for a
+		 * restart that will never overwrite it.
+		 *
+		 * Attempted whether or not the file holds the key, which is
+		 * the case that motivates it: an ISP knob written live and
+		 * then reset is already absent from the file while the driver
+		 * goes on applying it, so "not in the file" is exactly when
+		 * the picture is wrong and a restart is exactly what does not
+		 * fix it.
+		 */
+		if (edits[i].reset && k->live_reset && !stage_only) {
+			char req[RCD_REQ_MAX];
+			const char *owner = rcd_daemon_name(rcd_section_owner(k->section));
+
+			if (reset_request(k, req, sizeof(req)) &&
+			    rcd_ask_ok_err(owner, req, notebuf[i], sizeof(notebuf[i]))) {
+				to_file[i] = true;
+				restored[i] = true;
+				note[i] = "put back to the tuning value";
+				continue;
+			}
+			/* Refused, or the owner is not running. Either way the
+			 * key belongs out of the file and the restart is the
+			 * only thing left -- which is what a reset was before
+			 * any owner could do better. */
+		}
+
 		if (!k->live_cmd || stage_only || edits[i].reset) {
 			to_file[i] = true;
 			continue;
@@ -1367,7 +1417,7 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 	}
 
 	for (int i = 0; i < n; i++)
-		if (edits[i].reset && to_file[i] && !changed[i])
+		if (edits[i].reset && to_file[i] && !changed[i] && !restored[i])
 			note[i] = "already at its default";
 
 	int saved = 0;
@@ -1376,7 +1426,7 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 			saved++; /* already recorded above, with no daemon */
 			continue;
 		}
-		if (!to_file[i] || !changed[i])
+		if (!to_file[i] || !changed[i] || restored[i])
 			continue;
 		rcd_stale_add(st, edits[i].k->section, edits[i].k->key,
 			      rcd_section_owner(edits[i].k->section));
@@ -1408,11 +1458,16 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		/*
 		 * "saved" means rcd still owes this to a daemon restart, which
 		 * is what `apply` is for. Anything else is in force already:
-		 * a live command that reached its daemon, a provider whose
-		 * store is the value, or an edit that found the setting the
-		 * way it was asking for it.
+		 * a live command that reached its daemon, a reset the owner
+		 * put back itself, a provider whose store is the value, or an
+		 * edit that found the setting the way it was asking for it.
+		 *
+		 * A restore leaves the file changed and owes nothing, so it is
+		 * the one case where those two come apart -- and this has to
+		 * agree with the stale list above or a client is told to apply
+		 * something rcd is not recording.
 		 */
-		bool owed = staged[i] || (to_file[i] && changed[i]);
+		bool owed = staged[i] || (to_file[i] && changed[i] && !restored[i]);
 		cJSON_AddStringToObject(o, "applied", owed ? "saved" : "live");
 		if (note[i] && note[i][0])
 			cJSON_AddStringToObject(o, "note", note[i]);

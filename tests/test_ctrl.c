@@ -54,6 +54,8 @@ static struct {
 	/* ISP */
 	int set_brightness;
 	int brightness_stored;
+	int set_drc;
+	int set_brightness_n_idx;
 
 	/* Ring header republishes, and the channel of the last one */
 	int publish_count;
@@ -184,19 +186,57 @@ static int rec_isp_get_brightness(void *ctx, int *val)
 	return 0;
 }
 
-/* A knob whose hardware range is not 0..255 and which has an auto mode --
- * Infinity6C's brightness, whose MI field is a level in 0..100. */
+/* The per-sensor arm of the same knob. rvd picks between the two by whether
+ * the request names a sensor, and a reset has to land on the same one a set
+ * would -- so the index is recorded, not just the value. */
+static int rec_isp_set_brightness_n(void *ctx, int sensor_idx, int val)
+{
+	(void)ctx;
+	rec.set_brightness_n_idx = sensor_idx;
+	rec.set_brightness = val;
+	rec.brightness_stored = val;
+	rec.call_count++;
+	return rec.return_val;
+}
+
+static int rec_isp_set_drc_strength(void *ctx, int val)
+{
+	(void)ctx;
+	rec.set_drc = val;
+	rec.call_count++;
+	return rec.return_val;
+}
+
+/*
+ * Two knobs, because rvd dispatches them differently: brightness has a
+ * per-sensor variant and DRC does not, and each arm carries its own bookkeeping
+ * for the config key. Their neutrals differ from each other and from 128 so a
+ * reset writing the wrong knob's value, or a hardcoded midpoint, shows up as a
+ * number rather than passing.
+ *
+ * brightness is Infinity6C's -- a level in 0..100 with an auto mode, so the
+ * range published here is not the 0..255 a reader might assume.
+ */
 static int rec_isp_get_knob_caps(void *ctx, const char *name, rss_isp_knob_t *caps)
 {
 	(void)ctx;
-	if (strcmp(name, "brightness") != 0)
-		return RSS_ERR_NOTSUP;
-	caps->min = 0;
-	caps->max = 100;
-	caps->neutral = 50;
-	caps->has_auto = true;
-	caps->enabled = false;
-	return 0;
+	if (strcmp(name, "brightness") == 0) {
+		caps->min = 0;
+		caps->max = 100;
+		caps->neutral = 50;
+		caps->has_auto = true;
+		caps->enabled = false;
+		return 0;
+	}
+	if (strcmp(name, "drc_strength") == 0) {
+		caps->min = 0;
+		caps->max = 255;
+		caps->neutral = 64;
+		caps->has_auto = false;
+		caps->enabled = true;
+		return 0;
+	}
+	return RSS_ERR_NOTSUP;
 }
 
 /* WB mock that preserves state for merge testing */
@@ -346,6 +386,8 @@ static void setup(void)
 	ops.enc_get_color2grey = (void *)rec_enc_get_color2grey;
 	ops.isp_set_brightness = (void *)rec_isp_set_brightness;
 	ops.isp_get_brightness = (void *)rec_isp_get_brightness;
+	ops.isp_set_brightness_n = (void *)rec_isp_set_brightness_n;
+	ops.isp_set_drc_strength = (void *)rec_isp_set_drc_strength;
 	ops.isp_get_knob_caps = (void *)rec_isp_get_knob_caps;
 	ops.isp_get_wb = rec_isp_get_wb;
 	ops.isp_set_wb = (void *)rec_isp_set_wb;
@@ -1083,6 +1125,90 @@ TEST set_isp_takes_a_number_or_the_word_auto(void)
  * reader of this reply pulls it with a typed accessor, and a union would make
  * them all silently read zero.
  */
+/*
+ * A reset that reaches the hardware.
+ *
+ * Removing the key was never enough: the ISP keeps its state in the driver,
+ * so a knob written once goes on being applied through every rvd restart, and
+ * a config with no [image] section at all can be running someone's brightness
+ * from an hour ago. The value to put back is the one the caps already publish
+ * -- caps.neutral is defined as what the knob reads when the tuning has had
+ * its way with it -- so this asserts the neutral by value, and that the key is
+ * dropped rather than stored, which is the half that keeps a later
+ * config-save from writing it straight back.
+ */
+TEST reset_isp_writes_the_tuning_value_and_drops_the_key(void)
+{
+	setup();
+
+	call("{\"cmd\":\"set-brightness\",\"value\":70}");
+	ASSERT_EQ(70, rec.set_brightness);
+	ASSERT_EQ(70, rss_config_get_int(st.cfg, "image", "brightness", -1));
+
+	rec.call_count = 0;
+	call("{\"cmd\":\"reset-isp\",\"key\":\"brightness\"}");
+	ASSERT(strstr(resp, "\"status\":\"ok\"") != NULL);
+
+	/* The mock publishes neutral 50, not 128: a reset that wrote a
+	 * hardcoded midpoint would pass against a 0..255 knob and be wrong
+	 * everywhere else. */
+	ASSERT_EQ(1, rec.call_count);
+	ASSERT_EQ(50, rec.set_brightness);
+	ASSERT_EQ(-1, rss_config_get_int(st.cfg, "image", "brightness", -1));
+
+	/* Naming a sensor takes the other half of the same dispatch, which
+	 * carries its own call and its own config bookkeeping. */
+	call("{\"cmd\":\"set-brightness\",\"value\":70,\"sensor\":1}");
+	ASSERT_EQ(70, rss_config_get_int(st.cfg, "sensor1_image", "brightness", -1));
+
+	rec.set_brightness_n_idx = -1;
+	call("{\"cmd\":\"reset-isp\",\"key\":\"brightness\",\"sensor\":1}");
+	ASSERT(strstr(resp, "\"status\":\"ok\"") != NULL);
+	ASSERT_EQm("the reset reached the sensor it named", 1, rec.set_brightness_n_idx);
+	ASSERT_EQ(50, rec.set_brightness);
+	ASSERT_EQ(-1, rss_config_get_int(st.cfg, "sensor1_image", "brightness", -1));
+
+	/* And again on the arm with no per-sensor variant, which keeps the
+	 * config key by a different line of its own. */
+	call("{\"cmd\":\"set-drc\",\"value\":200}");
+	ASSERT_EQ(200, rss_config_get_int(st.cfg, "image", "drc_strength", -1));
+
+	call("{\"cmd\":\"reset-isp\",\"key\":\"drc_strength\"}");
+	ASSERT(strstr(resp, "\"status\":\"ok\"") != NULL);
+	ASSERT_EQ(64, rec.set_drc);
+	ASSERT_EQ(-1, rss_config_get_int(st.cfg, "image", "drc_strength", -1));
+
+	teardown();
+	PASS();
+}
+
+/*
+ * And one that cannot. A knob with no caps row has no published tuning value,
+ * so there is nothing to put it back to -- orientation and the gain ceilings
+ * are the real examples, and the mock's single row has the same shape. The
+ * refusal matters because rcd falls back to a restart on it, so a guess here
+ * would be enacted rather than reported.
+ */
+TEST reset_isp_refuses_a_knob_with_no_published_tuning_value(void)
+{
+	setup();
+	rec.call_count = 0;
+
+	call("{\"cmd\":\"reset-isp\",\"key\":\"contrast\"}");
+	ASSERT(strstr(resp, "\"status\":\"error\"") != NULL);
+
+	call("{\"cmd\":\"reset-isp\",\"key\":\"no_such_knob\"}");
+	ASSERT(strstr(resp, "\"status\":\"error\"") != NULL);
+
+	/* Naming no knob at all is refused rather than resetting everything. */
+	call("{\"cmd\":\"reset-isp\"}");
+	ASSERT(strstr(resp, "\"status\":\"error\"") != NULL);
+
+	ASSERTm("nothing was written on any of those", rec.call_count == 0);
+	teardown();
+	PASS();
+}
+
 TEST get_isp_separates_auto_from_a_value(void)
 {
 	setup();
@@ -1429,6 +1555,8 @@ SUITE(ctrl_suite)
 	RUN_TEST(set_wb_gain_only_preserves_mode);
 	RUN_TEST(get_wb_returns_current_state);
 	RUN_TEST(set_isp_takes_a_number_or_the_word_auto);
+	RUN_TEST(reset_isp_writes_the_tuning_value_and_drops_the_key);
+	RUN_TEST(reset_isp_refuses_a_knob_with_no_published_tuning_value);
 	RUN_TEST(get_isp_separates_auto_from_a_value);
 	RUN_TEST(get_isp_publishes_the_range_the_hardware_accepts);
 	RUN_TEST(get_isp_falls_back_to_the_exposure_gains);

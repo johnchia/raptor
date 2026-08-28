@@ -1162,6 +1162,13 @@ static int isp_value_arg(const char *cmd_json, int *val)
 /* Written back as the word rather than as RSS_ISP_AUTO's sentinel, which is a
  * HAL implementation detail and would not survive a round trip through the
  * file as a number. */
+/* Two rows in the knob list carry no [image] key -- a toggle and a [sensor]
+ * setting -- and are simply not things a reset can name. */
+static bool isp_key_is(const char *row, const char *want)
+{
+	return row && strcmp(row, want) == 0;
+}
+
 static void isp_store(rss_config_t *cfg, const char *sect, const char *key, int val)
 {
 	if (!key)
@@ -1217,30 +1224,114 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 		return rss_ctrl_resp_error(resp, resp_size, "need value");                         \
 	}
 
-	ISP_SET_N("set-brightness", isp_set_brightness, "brightness")
-	ISP_SET_N("set-contrast", isp_set_contrast, "contrast")
-	ISP_SET_N("set-saturation", isp_set_saturation, "saturation")
-	ISP_SET_N("set-sharpness", isp_set_sharpness, "sharpness")
-	ISP_SET_N("set-hue", isp_set_hue, "hue")
-	ISP_SET_N("set-sinter", isp_set_sinter_strength, "sinter")
-	ISP_SET_N("set-temper", isp_set_temper_strength, "temper")
-	ISP_SET("set-dpc", isp_set_dpc_strength, "dpc_strength")
-	ISP_SET("set-drc", isp_set_drc_strength, "drc_strength")
-	ISP_SET("set-highlight-depress", isp_set_highlight_depress, "highlight_depress")
-	ISP_SET("set-backlight-comp", isp_set_backlight_comp, "backlight_comp")
-	ISP_SET("set-defog-strength", isp_set_defog_strength, "defog_strength")
-	ISP_SET_N("set-ae-comp", isp_set_ae_comp, "ae_comp")
-	ISP_SET_N("set-max-again", isp_set_max_again, "max_again")
-	ISP_SET_N("set-max-dgain", isp_set_max_dgain, "max_dgain")
-	ISP_SET_N("set-hflip", isp_set_hflip, "hflip")
-	ISP_SET_N("set-vflip", isp_set_vflip, "vflip")
-	/* No [image] key of its own: an on/off toggle for the strength above. */
-	ISP_SET("set-defog", isp_set_defog, NULL)
-	/* Lives in [sensor], not [image] — left to the config write path. */
-	ISP_SET_N("set-antiflicker", isp_set_antiflicker, NULL)
+/*
+ * The knobs, once. Two things dispatch on this list -- setting a knob and
+ * putting one back -- and they have to name the same op for the same key or
+ * a reset lands on a different knob than the set it undoes. Writing it out
+ * twice is how that drifts, so it is written once and expanded twice. `N` is
+ * a knob with a per-sensor variant, `S` one without.
+ */
+#define ISP_KNOBS(N, S)                                                                            \
+	N("set-brightness", isp_set_brightness, "brightness")                                      \
+	N("set-contrast", isp_set_contrast, "contrast")                                            \
+	N("set-saturation", isp_set_saturation, "saturation")                                      \
+	N("set-sharpness", isp_set_sharpness, "sharpness")                                         \
+	N("set-hue", isp_set_hue, "hue")                                                           \
+	N("set-sinter", isp_set_sinter_strength, "sinter")                                         \
+	N("set-temper", isp_set_temper_strength, "temper")                                         \
+	S("set-dpc", isp_set_dpc_strength, "dpc_strength")                                         \
+	S("set-drc", isp_set_drc_strength, "drc_strength")                                         \
+	S("set-highlight-depress", isp_set_highlight_depress, "highlight_depress")                 \
+	S("set-backlight-comp", isp_set_backlight_comp, "backlight_comp")                          \
+	S("set-defog-strength", isp_set_defog_strength, "defog_strength")                          \
+	N("set-ae-comp", isp_set_ae_comp, "ae_comp")                                               \
+	N("set-max-again", isp_set_max_again, "max_again")                                         \
+	N("set-max-dgain", isp_set_max_dgain, "max_dgain")                                         \
+	N("set-hflip", isp_set_hflip, "hflip")                                                     \
+	N("set-vflip", isp_set_vflip, "vflip")                                                     \
+	/* No [image] key of its own: an on/off toggle for the strength above. */                  \
+	S("set-defog", isp_set_defog, NULL)                                                        \
+	/* Lives in [sensor], not [image] -- left to the config write path. */                     \
+	N("set-antiflicker", isp_set_antiflicker, NULL)
+
+	ISP_KNOBS(ISP_SET_N, ISP_SET)
 
 #undef ISP_SET_N
 #undef ISP_SET
+
+	/*
+	 * Put a knob back where the tuning left it.
+	 *
+	 * A reset carries no value of its own, which is why rcd treats one as
+	 * restart-tier: the daemon's own default is the point of the exercise
+	 * and it normally reaches it by reading the file at its next start.
+	 * That holds for state a daemon keeps in its own process. It does not
+	 * hold for the ISP, whose state lives in the driver and outlives rvd,
+	 * so nothing un-writes a knob and a removed key leaves the last value
+	 * applied for good -- on Ingenic until the next power cycle, there
+	 * being no auto mode to hand the knob back to.
+	 *
+	 * The value to put back is already published. caps.neutral is defined
+	 * as what the knob reads when the tuning has had its way with it, and
+	 * both families honour that: on SigmaStar writing the neutral hands the
+	 * module to the tuner's own curve rather than pinning the midpoint, and
+	 * on Ingenic it writes the value the part boots with. One rule, because
+	 * the neutral already means the same thing on both.
+	 *
+	 * A knob with no caps row has no published tuning value and so nothing
+	 * to be put back to -- orientation and the gain ceilings are the live
+	 * examples. Refused here rather than guessed at, which leaves rcd doing
+	 * what it does today.
+	 */
+	if (strcmp(cmd, "reset-isp") == 0) {
+		/* The longest knob name is highlight_depress. */
+		char key[32] = "";
+		rss_isp_knob_t caps;
+		int ret;
+
+		if (rss_json_get_str(cmd_json, "key", key, sizeof(key)) != 0 || !key[0])
+			return rss_ctrl_resp_error(resp, resp_size, "need key");
+
+		ret = RSS_HAL_CALL(st->ops, isp_get_knob_caps, st->hal_ctx, key, &caps);
+		if (ret != 0)
+			return rss_ctrl_resp_error(resp, resp_size,
+						   "this knob publishes no tuning value to "
+						   "put back");
+
+/*
+ * The write, and then the key out of rvd's own config: a reset that stored the
+ * neutral like an ordinary set would put the key back in the file at the next
+ * config-save, which is the opposite of what was asked for.
+ */
+#define ISP_RESET_N(name, fn, k)                                                                   \
+	if (isp_key_is((k), key)) {                                                                \
+		int r;                                                                             \
+		if (sensor_idx >= 0)                                                               \
+			r = RSS_HAL_CALL(st->ops, fn##_n, st->hal_ctx, sensor_idx, caps.neutral);  \
+		else                                                                               \
+			r = RSS_HAL_CALL(st->ops, fn, st->hal_ctx, caps.neutral);                  \
+		if (r == 0)                                                                        \
+			rss_config_unset(st->cfg,                                                  \
+					 image_section(sensor_idx, img_sect, sizeof(img_sect)),    \
+					 (k));                                                     \
+		return fmt_hal_result(resp, resp_size, r);                                         \
+	}
+
+#define ISP_RESET(name, fn, k)                                                                     \
+	if (isp_key_is((k), key)) {                                                                \
+		int r = RSS_HAL_CALL(st->ops, fn, st->hal_ctx, caps.neutral);                      \
+		if (r == 0)                                                                        \
+			rss_config_unset(st->cfg, "image", (k));                                   \
+		return fmt_hal_result(resp, resp_size, r);                                         \
+	}
+
+		ISP_KNOBS(ISP_RESET_N, ISP_RESET)
+
+#undef ISP_RESET_N
+#undef ISP_RESET
+
+		return rss_ctrl_resp_error(resp, resp_size, "no such knob");
+	}
 
 	if (strcmp(cmd, "set-wb") == 0) {
 		rss_wb_config_t wb = {0};

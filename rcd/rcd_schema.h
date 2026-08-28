@@ -300,6 +300,26 @@ typedef struct rcd_key {
 	 * refuses the word, with an error naming the key.
 	 */
 	bool auto_ok;
+
+	/*
+	 * The command that puts this key back, for a key whose owner can do
+	 * that without being restarted.
+	 *
+	 * A reset normally has no value to hand a live command -- the daemon's
+	 * own default is the point, and it reaches it by reading the file at
+	 * its next start -- which is why a reset is restart-tier whatever the
+	 * key's tier is when it carries a value. That reasoning holds for
+	 * state a daemon keeps in its own process, and fails for state that
+	 * outlives it: an ISP knob lives in the driver, so removing the key
+	 * un-writes nothing and the last value stays applied.
+	 *
+	 * A key naming a command here has an owner that can undo the write
+	 * itself, and the reset is sent rather than deferred. The command takes
+	 * the key's name and no value -- what to put back is the owner's to
+	 * know, which is the whole point of asking it. A refusal falls back to
+	 * the restart, so naming one can only improve on the old behaviour.
+	 */
+	const char *live_reset; /* NULL: a reset waits for the restart */
 } rcd_key_t;
 
 /*

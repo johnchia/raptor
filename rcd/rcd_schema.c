@@ -230,30 +230,35 @@ static const char *const choices_threshold[] = {
  * because -Werror=missing-field-initializers means the whole of it has to be
  * spelled out either way.
  */
-#define LIVE(cmd)     cmd, "value", -1, NULL, NULL, RCD_IMPACT_NONE, 0, false
-#define LIVE_CH(c, n) c, "value", n, NULL, NULL, RCD_IMPACT_NONE, 0, false
+#define LIVE(cmd)     cmd, "value", -1, NULL, NULL, RCD_IMPACT_NONE, 0, false, NULL
+#define LIVE_CH(c, n) c, "value", n, NULL, NULL, RCD_IMPACT_NONE, 0, false, NULL
 
 /* A live command whose value is not called `value`. rvd's set-rc-mode names
  * its argument `mode` because the command carries a bitrate as well, and a
  * key is applied by the command the daemon already has rather than by one
  * added to spell the field the way this table would prefer. */
-#define LIVE_CH_ARG(c, a, n) c, a, n, NULL, NULL, RCD_IMPACT_NONE, 0, false
+#define LIVE_CH_ARG(c, a, n) c, a, n, NULL, NULL, RCD_IMPACT_NONE, 0, false, NULL
 
 /* A live command that answers for a family of settings and is told which one
  * by name. See rcd_key_t::live_sel. */
-#define LIVE_SEL(cmd, sel) cmd, "value", -1, sel, NULL, RCD_IMPACT_NONE, 0, false
+#define LIVE_SEL(cmd, sel) cmd, "value", -1, sel, NULL, RCD_IMPACT_NONE, 0, false, NULL
 
-#define SAVED		   NULL, NULL, -1, NULL, NULL, RCD_IMPACT_NONE, 0, false
-#define PROVIDED(p, imp)   NULL, NULL, -1, NULL, &(p), (imp), 0, false
+#define SAVED		   NULL, NULL, -1, NULL, NULL, RCD_IMPACT_NONE, 0, false, NULL
+#define PROVIDED(p, imp)   NULL, NULL, -1, NULL, &(p), (imp), 0, false, NULL
 
 /* An ISP knob: live like the rest, and it takes the word "auto" as well as a
  * number. See rcd_key_t::auto_ok -- the word says "follow the tuning's own
- * curve", which no number on the scale can say. */
-#define LIVE_ISP(cmd) cmd, "value", -1, NULL, NULL, RCD_IMPACT_NONE, 0, true
+ * curve", which no number on the scale can say.
+ *
+ * And it is put back by asking rvd rather than by restarting it: the ISP keeps
+ * its state in the driver, so a restart re-reads a file that no longer names
+ * the key and writes nothing over the value left behind. See
+ * rcd_key_t::live_reset. */
+#define LIVE_ISP(cmd) cmd, "value", -1, NULL, NULL, RCD_IMPACT_NONE, 0, true, "reset-isp"
 
 /* A provider whose value can cost the client its way back in: written like
  * any other, and put back if nobody confirms within `sec`. */
-#define GUARDED(p, imp, sec) NULL, NULL, -1, NULL, &(p), (imp), (sec), false
+#define GUARDED(p, imp, sec) NULL, NULL, -1, NULL, &(p), (imp), (sec), false, NULL
 
 static const rcd_key_t keys[] = {
 	/* -- Sensor -- */

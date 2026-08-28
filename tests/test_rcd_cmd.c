@@ -1503,7 +1503,8 @@ typedef struct {
 	int conns;
 	pthread_t tid;
 	bool stop;
-	const char *reply; /* NULL for the shortest valid thing */
+	const char *reply;  /* NULL for the shortest valid thing */
+	char last_req[512]; /* what the caller sent, for asserting on */
 } fake_daemon_t;
 
 static void *fake_daemon_run(void *arg)
@@ -1530,13 +1531,20 @@ static void *fake_daemon_run(void *arg)
 		if (read(c, hdr, 2) == 2) {
 			size_t want = ((size_t)hdr[0] << 8) | hdr[1];
 			char sink[1024];
+			size_t kept = 0;
 
+			d->last_req[0] = '\0';
 			while (want > 0) {
 				ssize_t n =
 					read(c, sink, want > sizeof(sink) ? sizeof(sink) : want);
 
 				if (n <= 0)
 					break;
+				if (kept + (size_t)n < sizeof(d->last_req)) {
+					memcpy(d->last_req + kept, sink, (size_t)n);
+					kept += (size_t)n;
+					d->last_req[kept] = '\0';
+				}
 				want -= (size_t)n;
 			}
 		}
@@ -3071,12 +3079,73 @@ TEST a_reset_removes_the_line_and_only_charges_for_what_moved(void)
 	PASS();
 }
 
-/* A reset of a live key is not live: there is no value to hand the running
- * daemon, and the default it will read is in the daemon, not in rcd. So it
- * goes to the file and the owner is recorded behind, whatever the key's tier
- * is when it carries a value. */
+/* A reset of a live key that its owner cannot put back is not live: there is
+ * no value to hand the running daemon, and the default it will read is in the
+ * daemon, not in rcd. So it goes to the file and the owner is recorded behind,
+ * whatever the key's tier is when it carries a value.
+ *
+ * Orientation is the case: live to set, and rvd has no way to undo the write
+ * short of being restarted. The ISP knobs are the other case and name a
+ * live_reset -- see resetting_an_isp_knob_asks_rvd_to_put_it_back. */
 TEST a_reset_is_never_live(void)
 {
+	rcd_state_t st;
+	char path[320];
+
+	if (!sysconf_dir_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	snprintf(path, sizeof(path), "%s/raptor.conf", RCD_SYSCONF_DIR);
+	FILE *f = fopen(path, "w");
+	ASSERT(f);
+	fputs("[image]\nhflip = 1\n", f);
+	fclose(f);
+
+	memset(&st, 0, sizeof(st));
+	st.config_path = path;
+
+	const rcd_key_t *k = rcd_key_find("image", "hflip");
+	ASSERT(k);
+	ASSERTm("the key under test is not a live one", rcd_key_live(k));
+	ASSERTm("and its owner cannot put it back", k->live_reset == NULL);
+
+	cJSON *req = cJSON_Parse("{\"section\":\"image\",\"key\":\"hflip\",\"value\":null}");
+	cJSON *resp = rcd_cmd_set(&st, req);
+	cJSON_Delete(req);
+	ASSERT(resp);
+
+	const cJSON *one = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(resp, "results"), 0);
+	ASSERT_STR_EQ("saved", cJSON_GetObjectItemCaseSensitive(one, "applied")->valuestring);
+	cJSON_Delete(resp);
+
+	char text[256] = "";
+	f = fopen(path, "r");
+	ASSERT(f);
+	fread(text, 1, sizeof(text) - 1, f);
+	fclose(f);
+	ASSERT(strstr(text, "hflip") == NULL);
+	ASSERT_EQ(1, st.stale_count);
+
+	unlink(path);
+	PASS();
+}
+
+/*
+ * And a reset of a key its owner *can* put back is sent, not deferred.
+ *
+ * An ISP knob lives in the driver and outlives rvd, so taking the key out of
+ * the file un-writes nothing: the restart rcd used to record re-reads a file
+ * that no longer names the knob and leaves the last value applied, on Ingenic
+ * until the next power cycle. rvd is asked instead, and it knows what to put
+ * back because the HAL publishes it.
+ *
+ * The request is asserted rather than just the outcome. rvd answers ok to a
+ * great many things, so a reply alone would pass against a reset that sent the
+ * wrong command, or the right command naming the wrong knob.
+ */
+TEST resetting_an_isp_knob_asks_rvd_to_put_it_back(void)
+{
+	fake_daemon_t d;
 	rcd_state_t st;
 	char path[320];
 
@@ -3094,24 +3163,36 @@ TEST a_reset_is_never_live(void)
 
 	const rcd_key_t *k = rcd_key_find("image", "brightness");
 	ASSERT(k);
-	ASSERTm("the key under test is not a live one", rcd_key_live(k));
+	ASSERT_STR_EQm("the key under test names a restore", "reset-isp", k->live_reset);
+
+	if (!fake_daemon_start_reply(&d, "rvd", "{\"status\":\"ok\"}")) {
+		unlink(path);
+		SKIPm("cannot listen on " RSS_RUN_DIR " -- run the suite under unshare -rm");
+	}
 
 	cJSON *req = cJSON_Parse("{\"section\":\"image\",\"key\":\"brightness\",\"value\":null}");
 	cJSON *resp = rcd_cmd_set(&st, req);
-	cJSON_Delete(req);
-	ASSERT(resp);
 
-	const cJSON *one = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(resp, "results"), 0);
-	ASSERT_STR_EQ("saved", cJSON_GetObjectItemCaseSensitive(one, "applied")->valuestring);
+	cJSON_Delete(req);
+	fake_daemon_stop(&d, "rvd");
+	ASSERT(resp);
 	cJSON_Delete(resp);
 
+	ASSERTm("rvd was asked to put the knob back",
+		strstr(d.last_req, "\"cmd\":\"reset-isp\"") != NULL);
+	ASSERTm("and told which knob", strstr(d.last_req, "\"key\":\"brightness\"") != NULL);
+	ASSERTm("with no value of rcd's own", strstr(d.last_req, "value") == NULL);
+
+	/* The key still leaves the file -- that is what a reset is -- but
+	 * nothing is owed afterwards, because the picture already moved. */
 	char text[256] = "";
+
 	f = fopen(path, "r");
 	ASSERT(f);
 	fread(text, 1, sizeof(text) - 1, f);
 	fclose(f);
 	ASSERT(strstr(text, "brightness") == NULL);
-	ASSERT_EQ(1, st.stale_count);
+	ASSERT_EQm("a restore that worked owes no restart", 0, st.stale_count);
 
 	unlink(path);
 	PASS();
@@ -3388,6 +3469,7 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(the_schema_names_the_keys_that_cannot_be_reset);
 	RUN_TEST(a_reset_removes_the_line_and_only_charges_for_what_moved);
 	RUN_TEST(a_reset_is_never_live);
+	RUN_TEST(resetting_an_isp_knob_asks_rvd_to_put_it_back);
 	RUN_TEST(resetting_the_network_puts_the_shipped_stanza_back);
 	RUN_TEST(the_schema_says_where_a_system_key_takes_effect);
 	RUN_TEST(nothing_is_unavailable_until_the_camera_says_so);
