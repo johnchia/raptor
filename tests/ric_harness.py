@@ -1216,11 +1216,10 @@ def scenario_adc_dead(stub, watch):
 
 
 def scenario_pulse_width(stub, watch):
-    """pulse_ms drives the dual-GPIO coil pulse (default 10, the value
-    the fleet's ircut script has always used; thingino-firmware #1380).
-    100ms must measure as roughly 100ms; 10ms must measure clearly
-    shorter. Drain-time stamps cannot resolve 10ms exactly, so the
-    short assertion is an upper bound."""
+    """pulse_ms drives the dual-GPIO coil pulse. 100ms must measure as
+    roughly 100ms; 10ms must measure clearly shorter. Drain-time stamps
+    cannot resolve 10ms exactly, so the short assertion is an upper
+    bound."""
     for ms, lo, hi in ((100, 0.05, 0.3), (10, 0.0, 0.05)):
         conf = LUMA_CONF.replace("pulse_ms = 100", "pulse_ms = %d" % ms)
         stub.set_scene(luma=120, gain=500, ev=4000)
@@ -1235,6 +1234,32 @@ def scenario_pulse_width(stub, watch):
                "pulse_ms=%d: coil pulse within expected bounds" % ms,
                "width=%s" % w)
         ric.stop()
+
+
+def scenario_pulse_default(stub, watch):
+    """The shipped default, read from ric rather than timed.
+
+    Worth its own assertion because the number is a margin over a
+    mechanism, not a preference: it was 10ms, which is the width the
+    fleet's ircut script uses and which one Wyze Cam3 ran 40/40 on,
+    while another misses three quarters of its transitions there. A
+    silent revert to a fleet-alignment value would restore a fault that
+    only shows as a filter left in the wrong place.
+
+    Timing cannot make this claim -- 30ms is inside the drain-stamp
+    noise, same as 10ms was -- so it asks ric what it loaded."""
+    del watch
+    conf = GPIO_CONF + "trigger = luma\nnight_luma = 20\nhysteresis_sec = 2\n"
+    stub.set_scene(luma=120, gain=500, ev=4000)
+    ric = Ric("pulsedefault", conf)
+    if not ric.wait_running():
+        result(False, "pulse default: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    r = ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "get-thresholds"})
+    result(r is not None and r.get("pulse_ms") == 30,
+           "pulse_ms defaults to 30ms with no config key", str(r))
+    ric.stop()
 
 
 def scenario_gain_trigger(stub, watch):
@@ -2410,6 +2435,7 @@ def main():
         scenario_ir940_only_board,
         scenario_startup_forced,
         scenario_pulse_width,
+        scenario_pulse_default,
         scenario_gain_trigger,
         scenario_photo,
         scenario_photo_night_boot,

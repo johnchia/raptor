@@ -132,13 +132,18 @@ static void load_config(ric_state_t *st)
 		"poll_interval_ms",
 		rss_config_get_int(cfg, "ircut", "poll_interval_ms", default_poll), 50, 10000);
 
-	/* Dual-GPIO coil pulse. 10ms is what the thingino ircut script has
-	 * driven the whole fleet with since thingino-daynight existed; both
-	 * 10ms and 100ms measured 20/20 reliable on a dual-GPIO Wyze Cam3,
-	 * so the default follows the fleet. Clamped: a zero pulse moves no
-	 * filter, and holding the coil for seconds is a heater. */
+	/* Dual-GPIO coil pulse. A margin, not a target: units of the same
+	 * model differ by more than 3x in how long their coil must be held,
+	 * so a width that measures perfectly on one board can miss most of
+	 * its transitions on another. A miss is silent -- the filter stays
+	 * where it was until the next automatic transition, hours away under
+	 * the luma trigger -- so the default is the one that survives the
+	 * slowest mechanism rather than the one that suits the median, at
+	 * three times the shortest width seen working on a marginal unit.
+	 * Clamped: a zero pulse moves no filter, and holding the coil for
+	 * seconds is a heater. */
 	c->pulse_ms =
-		cfg_clamp("pulse_ms", rss_config_get_int(cfg, "ircut", "pulse_ms", 10), 1, 1000);
+		cfg_clamp("pulse_ms", rss_config_get_int(cfg, "ircut", "pulse_ms", 30), 1, 1000);
 
 	if (clamped_keys[0])
 		RSS_WARN("config values out of range, clamped: %s", clamped_keys);
