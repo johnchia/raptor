@@ -1503,12 +1503,13 @@ typedef struct {
 	int conns;
 	pthread_t tid;
 	bool stop;
+	const char *reply; /* NULL for the shortest valid thing */
 } fake_daemon_t;
 
 static void *fake_daemon_run(void *arg)
 {
 	fake_daemon_t *d = arg;
-	static const char reply[] = "{\"status\":\"ok\",\"keys\":{}}";
+	const char *reply = d->reply ? d->reply : "{\"status\":\"ok\",\"keys\":{}}";
 
 	while (!d->stop) {
 		struct pollfd pfd = {.fd = d->fd, .events = POLLIN};
@@ -1550,11 +1551,12 @@ static void *fake_daemon_run(void *arg)
 	return NULL;
 }
 
-static bool fake_daemon_start(fake_daemon_t *d, const char *name)
+static bool fake_daemon_start_reply(fake_daemon_t *d, const char *name, const char *reply)
 {
 	char path[128];
 
 	memset(d, 0, sizeof(*d));
+	d->reply = reply;
 	mkdir(RSS_RUN_DIR, 0755);
 	snprintf(path, sizeof(path), RSS_SOCK_FMT, name);
 	unlink(path);
@@ -1574,6 +1576,11 @@ static bool fake_daemon_start(fake_daemon_t *d, const char *name)
 		return false;
 	}
 	return pthread_create(&d->tid, NULL, fake_daemon_run, d) == 0;
+}
+
+static bool fake_daemon_start(fake_daemon_t *d, const char *name)
+{
+	return fake_daemon_start_reply(d, name, NULL);
 }
 
 static void fake_daemon_stop(fake_daemon_t *d, const char *name)
@@ -1601,6 +1608,73 @@ static cJSON *get_naming(const char *section, const char *key, int n)
 		cJSON_AddItemToArray(arr, e);
 	}
 	return root;
+}
+
+/*
+ * An ISP knob rvd has no reading for stays absent from `state`.
+ *
+ * rvd leaves the value out when its getter declines -- Ingenic has no getter
+ * for the denoise strengths, and answers nothing for a knob the running
+ * process has not written. rcd has no number that can stand in for that: 0 is
+ * a position on all thirteen scales, and on Ingenic brightness 0 is the
+ * position that blows the picture white. A subscriber that reads a fabricated
+ * 0 as a reading and echoes it back is what makes that reachable, so the hole
+ * has to survive the hop.
+ */
+TEST state_leaves_out_an_isp_knob_rvd_could_not_read(void)
+{
+	fake_daemon_t d;
+	rcd_state_t st;
+	static const char isp[] = "{\"status\":\"ok\",\"brightness\":96,"
+				  "\"caps\":{\"brightness\":{\"min\":1,\"max\":255,"
+				  "\"neutral\":128},\"temper\":{\"min\":0,\"max\":255,"
+				  "\"neutral\":128}},\"settable\":\",brightness,temper,\"}";
+
+	memset(&st, 0, sizeof(st));
+	if (!fake_daemon_start_reply(&d, "rvd", isp))
+		SKIPm("cannot listen on " RSS_RUN_DIR " -- run the suite under unshare -rm");
+
+	/* `state` asks the pidfile which sockets are worth a round trip, so the
+	 * fake has to look alive as well as answer. Our own pid is a live one. */
+	char pidpath[128];
+	FILE *pf;
+
+	snprintf(pidpath, sizeof(pidpath), "%s/rvd.pid", RSS_RUN_DIR);
+	pf = fopen(pidpath, "w");
+	if (pf) {
+		fprintf(pf, "%d\n", (int)getpid());
+		fclose(pf);
+	}
+
+	cJSON *r = rcd_cmd_state(&st, NULL);
+
+	fake_daemon_stop(&d, "rvd");
+	unlink(pidpath);
+	ASSERT(r != NULL);
+
+	const cJSON *image = cJSON_GetObjectItemCaseSensitive(r, "image");
+
+	ASSERT(image != NULL);
+
+	const cJSON *bright = cJSON_GetObjectItemCaseSensitive(image, "brightness");
+
+	ASSERTm("a knob rvd read is carried across", cJSON_IsNumber(bright));
+	ASSERT_EQ(96, bright->valueint);
+
+	/* And the one it did not read is absent rather than zero. Asserted as
+	 * absence and not as a value, because any value here is the bug. */
+	ASSERTm("a knob rvd could not read must not appear at all",
+		cJSON_GetObjectItemCaseSensitive(image, "temper") == NULL);
+	ASSERTm("nor may any other unread knob",
+		cJSON_GetObjectItemCaseSensitive(image, "contrast") == NULL);
+
+	/* The caps and the settable list are not readings and still travel:
+	 * a client has to draw the control whether or not it has a value. */
+	ASSERT(cJSON_GetObjectItemCaseSensitive(image, "caps") != NULL);
+	ASSERT(cJSON_GetObjectItemCaseSensitive(image, "settable") != NULL);
+
+	cJSON_Delete(r);
+	PASS();
 }
 
 /*
@@ -3330,6 +3404,7 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(exposure_compensation_goes_both_ways);
 	RUN_TEST(a_knob_left_on_auto_reads_back_as_auto);
 	RUN_TEST(refuses_more_edits_than_a_request_may_carry);
+	RUN_TEST(state_leaves_out_an_isp_knob_rvd_could_not_read);
 	RUN_TEST(get_asks_a_daemon_once_however_many_keys_name_its_section);
 	RUN_TEST(get_asks_once_per_distinct_section);
 	RUN_TEST(get_refuses_more_keys_than_a_request_may_carry);

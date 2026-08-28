@@ -60,14 +60,26 @@ static void copy_bool(cJSON *dst, const cJSON *src, const char *key)
 		cJSON_AddBoolToObject(dst, key, cJSON_IsTrue(v));
 }
 
+/* And the same for a number, for the same reason and with a sharper edge:
+ * every ISP knob's scale contains 0, so a fallback zero is not a marker a
+ * subscriber can recognise but a position on the slider. */
+static void copy_int(cJSON *dst, const cJSON *src, const char *key)
+{
+	const cJSON *v = cJSON_GetObjectItemCaseSensitive(src, key);
+	if (cJSON_IsNumber(v))
+		cJSON_AddNumberToObject(dst, key, cJSON_GetNumberValue(v));
+}
+
 /*
  * rvd: the ISP tuning, read back from the hardware rather than the config.
  *
- * A platform that does not implement a block leaves its getter untouched, so
- * the value reads 0 rather than being absent -- indistinguishable from a real
- * zero from out here. The controls are honest about that by being controls:
- * they say what the ISP reports, which on such a platform is what it will keep
- * reporting whatever is written.
+ * A knob rvd has no reading for is absent from get-isp, and it has to stay
+ * absent here. There is no number that means "no reading": 0 is a legal
+ * position on all thirteen scales, and on Ingenic it is a destructive one --
+ * brightness runs dark-to-light over 1..255 and 0 sits off the end of it,
+ * blowing the picture to white. Filling the gap with a zero therefore does
+ * not merely misreport the knob, it hands every client a plausible value to
+ * echo back, and the first one that does clears the shot.
  */
 static void collect_rvd_isp(cJSON *state)
 {
@@ -99,14 +111,14 @@ static void collect_rvd_isp(cJSON *state)
 	cJSON *o = cJSON_AddObjectToObject(state, "image");
 	if (o) {
 		for (int i = 0; isp_keys[i]; i++)
-			cJSON_AddNumberToObject(o, isp_keys[i], json_int(resp, isp_keys[i], 0));
+			copy_int(o, resp, isp_keys[i]);
 
 		/*
-		 * Which of them this platform can actually set. Every key above
-		 * reads back a number whether or not the ISP has the block, so
-		 * without this a subscriber cannot tell a real 0 from an absent
-		 * one -- and a control offered for a block that is not there is
-		 * one that does nothing, quietly.
+		 * Which of them this platform can actually set, which is not
+		 * what the presence of a reading says: on Ingenic every knob
+		 * above is settable and most of them read back nothing, and a
+		 * control offered for a block that is not there is one that
+		 * does nothing, quietly.
 		 */
 		const cJSON *set = cJSON_GetObjectItemCaseSensitive(resp, "settable");
 		if (cJSON_IsString(set) && set->valuestring)
