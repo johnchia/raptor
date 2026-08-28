@@ -1,11 +1,12 @@
-# Six things wrong on a T31, found from the console
+# Eight things wrong on a T31, found from the console
 
 Field report from a Wyze Cam v3 (T31X, gc2053, 1920x1080) on the 2026-08-27
 nightly, build `8307ecf`, OpenIPC base. Every finding below was reproduced on
 that board; the numbers are measurements, not estimates.
 
-Findings 1 and 2 are the same bug wearing different clothes, and 5 and 6 arrive
-together on the same control, so each pair is written up as one section.
+Findings 1 and 2 are the same bug wearing different clothes; 5 and 6 arrive
+together on the same control; 7 and 8 are a repair and the hardware fact that
+turned it destructive. Each pair is written up as one section.
 
 | # | Symptom | Where it lives | State |
 |---|---------|----------------|-------|
@@ -15,8 +16,10 @@ together on the same control, so each pair is written up as one section.
 | 4 | Any live rate-control change kills the encoder channel and wedges rvd's teardown | `hal_enc_set_rc_mode` | **fixed**, board-verified |
 | 5 | Reset removes the key, reports success, and the picture does not change | rcd's restart-tier model vs. ISP state that outlives rvd | open |
 | 6 | The ISP getters report 0 for any value not written by the running rvd, while the hardware keeps applying the old one | `hal_isp.c` getters, Ingenic | **fixed** at the getter, board-verified |
+| 7 | Every ISP knob on the Image tab reads 0, whatever the picture is doing | `rcd_state.c`, refilling an absence rvd had just made honest | **fixed**, board-verified |
+| 8 | Brightness 0 does not darken the picture, it blows it to pure white | IMP, and a caps table that published 0 as reachable | **fixed** by a floor, board-verified |
 
-A seventh, found while testing 4 and tracked upstream rather than here: CBR
+One more, found while testing 4 and tracked upstream rather than here: CBR
 cannot reach its target bitrate, because the default QP floor of 34 pins the
 encoder at a quality too low to spend the budget --
 [gtxaspec/raptor-hal#10](https://github.com/gtxaspec/raptor-hal/issues/10).
@@ -745,6 +748,135 @@ on.
 
 ---
 
+## 7 and 8: a hole refilled, and the one value that must not fill it
+
+### What you see
+
+Every knob on the Image tab sits at 0 — brightness, contrast, saturation, all
+thirteen — under rows that say "not set" and "tuning 128". Then a section reset
+leaves the stream pure white.
+
+Two separate faults, and neither is dangerous alone. Together they take a
+camera out.
+
+### The hole, and who refilled it
+
+Finding 6 ends with rvd omitting the value for a knob whose getter cannot
+answer. That is the honest report: on Ingenic the readback is a cache with the
+process's lifetime, while the ISP goes on applying what it was last told, so
+after a restart rvd genuinely does not know. `get-isp` says so by leaving the
+value out, and the console's last resort is the neutral the caps carry.
+
+The console never got there, because rcd filled the hole back in one hop
+later. `collect_rvd_isp` copied all thirteen knobs with a default:
+
+```c
+for (int i = 0; isp_keys[i]; i++)
+        cJSON_AddNumberToObject(o, isp_keys[i], json_int(resp, isp_keys[i], 0));
+```
+
+An absent key became `0`, indistinguishable from a reading of 0. The comment
+directly beneath it asserted the very thing that had just stopped being true —
+"every key above reads back a number whether or not the ISP has the block".
+Two lines further on, `copy_bool` already had the right doctrine for exactly
+this case, and had had it all along:
+
+> Copies a bool across only when the daemon reported one: an absent key means
+> the feature is not built in, and a false would claim it is present and off.
+
+The integers never got the same treatment. They do now, through a `copy_int`
+that says so in the same words.
+
+### Why 0 was the worst possible filler
+
+Because on this part, brightness 0 is not a dim picture. Measured by whole-frame
+mean luma on the gc2053, ISP otherwise untouched:
+
+    brightness    mean luma
+             0       254.81     <- blown white
+             1         0.24
+            64        18.87
+           128       117.88     <- neutral
+           192       225.74
+           255       250.70
+
+The scale runs dark-to-light over 1..255 and 0 sits off the top of it. It is
+not a steep curve or a clipped highlight: 0 and 1 are adjacent integers a
+thousand luma steps apart.
+
+This is brightness alone, not an Ingenic trait. The other knobs on the same
+byte range are continuous across 0 — asked for 0 and for 1, they answer the
+same picture:
+
+    knob            at 0     at 1     continuous
+    contrast      112.03   112.03     yes
+    saturation    117.98   118.31     yes
+    sharpness     118.81   118.83     yes
+    ae_comp         5.86    16.80     yes
+    brightness    254.81     0.24     no
+
+### How the two met
+
+A live ISP knob is written the instant its control is touched — `commitLive`,
+no Apply step. So the console was drawing thirteen sliders parked at 0, one of
+which was a slider parked on the value that whites out the camera. Reaching it
+took no more than a click on the left end of the track.
+
+rcd's reset is not what wrote it: a reset carries no value a live command could
+use, so `rcd_cmd_set` sends nothing and only takes the key out of the file.
+What the reset did was restart rvd, and finding 5 is why that changed nothing —
+the hardware kept the 0 it had already been given, and the fresh rvd had no
+reading with which to notice.
+
+### The fixes
+
+Two, because either alone leaves the fault reachable.
+
+`rcd_state.c` carries the absence: `copy_int` copies a number only when rvd
+reported one. Caps and the settable list still travel — what a knob accepts is
+known whether or not anything has been written to it, and a client still has to
+draw the control.
+
+`hal_isp.c` puts a floor under brightness at 1, in the setter and in the
+published caps together. The caps table's own doctrine already required both:
+
+> the range this layer publishes in `imp_knob_caps` has to be the range it
+> enforces, or a client that drew its control from that answer still gets a
+> bare -1 back from the SDK
+
+A floor in the setter alone still draws a slider that can reach 0; a floor in
+the caps alone still lets the CLI through. Absorbing 0 rather than refusing it
+matches every other out-of-range value here, which the clamp has always taken
+rather than bounced.
+
+### On the board
+
+rcd, after the fix, with rvd freshly restarted and nothing written:
+
+    numeric readings : {'max_again': 205, 'max_dgain': 32, 'hflip': 0, 'vflip': 0}
+    caps present     : True
+    settable present : True
+
+The four rvd can genuinely read are carried; the thirteen it cannot are absent
+rather than 0. And the floor, asked for the value that used to blow the frame:
+
+    asked 0    readback 1    luma 0.24
+    asked 1    readback 1    luma 0.24
+    asked 128  readback 128  luma 114.62
+
+    caps: {'min': 1, 'max': 255, 'neutral': 128, 'auto': False, 'enabled': True}
+
+### What this says about finding 5
+
+That it is load-bearing. Findings 6, 7 and 8 are all consequences of ISP state
+outliving the process that set it: the getter that cannot answer, the client
+that invents an answer, and the reset that cannot undo the answer. Each has now
+been made honest in its own layer, and none of them fixes the underlying
+disagreement — the hardware still holds a value nothing in the config names,
+and only a reboot clears it.
+
+---
+
 ## Reproducing
 
 Board at 192.168.1.108, root. Colour measurements are whole-frame channel means
@@ -752,7 +884,8 @@ from a single RTSP frame downsampled to 160x90, six seconds after the command,
 via `ffmpeg -rtsp_transport tcp -i rtsp://192.168.1.108:554/stream0 -frames:v 1`.
 Relative channel ratios only — absolute levels move with AE and say nothing.
 
-The board was left running the fixed `rvd` (md5 `cbfa2ba1`), the fixed `ric`
+The board was left running the fixed `rvd` (md5 `6b51b271`), the fixed `rcd`
+(`6e8c418e`), the fixed `ric`
 (`52d41004`), and the console at `/usr/share/raptor/index.html`; stock copies are at `/tmp/rvd.orig` and `/tmp/ric.orig`, and
 `ringdump` -- absent from this image and the only bitrate instrument on it --
 was left at `/tmp/ringdump`. `pulse_ms` reverts to the shipped default on the
