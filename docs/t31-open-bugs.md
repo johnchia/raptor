@@ -654,12 +654,27 @@ slider as `tuning 128` all along. Nobody was using it for the one thing it
 names.
 
 So `rvd` gains `reset-isp <key>`: look the knob up in the caps, write the
-neutral, and drop the key from rvd's own config so a later config-save cannot
-put it back. One rule covers both families, because the neutral already means
-the same thing on each -- on SigmaStar writing it hands the module to the
-tuner's own curve rather than pinning the midpoint (`star/hal_isp.c` has always
-worked that way), and on Ingenic it writes the value the part boots with, there
-being no curve to defer to.
+hand-back, and drop the key from rvd's own config so a later config-save cannot
+put it back.
+
+**Which hand-back is not one rule, and assuming it was cost a board test.** A
+knob with an auto mode takes `RSS_ISP_AUTO`, which returns the module to the
+tuning's own curve; one without takes `caps.neutral`. The first version wrote
+the neutral to everything, on the strength of `star/hal_isp.c` documenting that
+a write of the neutral *is* a hand-back there, and of `infinity6c/hal_isp.c`
+saying its shapes carry `enOpType` "so that neutral can hand the module back".
+The second of those describes a capability, not the write path: on i6c only the
+sentinel moves `enOpType`, and the board said so plainly --
+
+    a) baseline                        contrast=50   in-auto-list=True
+    b) config set image contrast 80    contrast=80   in-auto-list=False
+    c) config reset image contrast     contrast=50   in-auto-list=False   <- wrong
+
+The value came back and the module stayed manual, pinned at a number that
+merely looked like the tuning's. `caps.has_auto` is the question both families
+already answer, so the reset asks it. After the fix, step (c) reads
+`in-auto-list=True`, and on Ingenic -- where `has_auto` is false everywhere and
+the sentinel is refused outright -- the neutral is still what gets written.
 
 `rcd` sends it instead of deferring. The key table gains `live_reset`, set for
 the ISP knobs and nothing else, and a reset the owner enacts leaves the file
@@ -678,6 +693,18 @@ than guessed at:
 
 Orientation and the gain ceilings are the real cases. They stay restart-tier,
 which for them is honest -- rvd rewrites them from the file at its next start.
+
+**The console stops staging these.** A reset used to be held back for Apply
+whatever the key was, on the reasoning that a reset is restart-tier however
+live the key is to set. That is still true of orientation and every
+restart-tier key, and it stopped being true of the thirteen knobs -- so the
+page was making an operator confirm "Restarts rvd -- stops capture", in red,
+for a reset that restarts nothing and marks nothing stale. rcd now publishes
+`resets_live` per key and the console sends those at once, like a live set,
+following the reply into the staged case when rvd cannot be reached. Its
+"already at its default" test also stops hiding the button for an ISP knob: not
+being in the config no longer means not being applied, which was the shape of
+finding 5 surviving in the UI.
 
 **On the board**, the sequence from the top of this section, run again:
 
