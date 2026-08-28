@@ -1280,22 +1280,40 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 		int dpc = 0, drc = 0, hld = 0, blc = 0, dfg = 0;
 		int hf = 0, vf = 0, ae = 0;
 		uint32_t again = 0, dgain = 0;
-		RSS_HAL_CALL(st->ops, isp_get_brightness, st->hal_ctx, &bri);
-		RSS_HAL_CALL(st->ops, isp_get_contrast, st->hal_ctx, &con);
-		RSS_HAL_CALL(st->ops, isp_get_saturation, st->hal_ctx, &sat);
-		RSS_HAL_CALL(st->ops, isp_get_sharpness, st->hal_ctx, &shp);
-		RSS_HAL_CALL(st->ops, isp_get_hue, st->hal_ctx, &hue);
-		RSS_HAL_CALL(st->ops, isp_get_sinter_strength, st->hal_ctx, &sin);
-		RSS_HAL_CALL(st->ops, isp_get_temper_strength, st->hal_ctx, &tem);
+		/*
+		 * Whether each of these came back at all, because a getter that
+		 * declines is not the same as one reporting zero and this reply
+		 * used to make them the same. Two backends decline for reasons
+		 * of their own: Ingenic has no getter for spatial or temporal
+		 * denoise on any generation, and answers nothing for a knob the
+		 * running process has not written, since IMP's readback is a
+		 * cache that dies with the process while the ISP goes on
+		 * applying what it was last told. Reporting 0 for either put a
+		 * number on the wire that no part of the camera held -- a
+		 * console drew its slider there under a row that said the knob
+		 * was unset, and it was the slider that was wrong.
+		 */
+		bool ok_bri, ok_con, ok_sat, ok_shp, ok_hue, ok_sin, ok_tem, ok_ae;
+		bool ok_dpc, ok_drc, ok_hld, ok_blc, ok_dfg;
+		ok_bri = RSS_HAL_CALL(st->ops, isp_get_brightness, st->hal_ctx, &bri) == RSS_OK;
+		ok_con = RSS_HAL_CALL(st->ops, isp_get_contrast, st->hal_ctx, &con) == RSS_OK;
+		ok_sat = RSS_HAL_CALL(st->ops, isp_get_saturation, st->hal_ctx, &sat) == RSS_OK;
+		ok_shp = RSS_HAL_CALL(st->ops, isp_get_sharpness, st->hal_ctx, &shp) == RSS_OK;
+		ok_hue = RSS_HAL_CALL(st->ops, isp_get_hue, st->hal_ctx, &hue) == RSS_OK;
+		ok_sin =
+			RSS_HAL_CALL(st->ops, isp_get_sinter_strength, st->hal_ctx, &sin) == RSS_OK;
+		ok_tem =
+			RSS_HAL_CALL(st->ops, isp_get_temper_strength, st->hal_ctx, &tem) == RSS_OK;
 		RSS_HAL_CALL(st->ops, isp_get_hvflip, st->hal_ctx, &hf, &vf);
-		RSS_HAL_CALL(st->ops, isp_get_ae_comp, st->hal_ctx, &ae);
+		ok_ae = RSS_HAL_CALL(st->ops, isp_get_ae_comp, st->hal_ctx, &ae) == RSS_OK;
 		RSS_HAL_CALL(st->ops, isp_get_max_again, st->hal_ctx, &again);
 		RSS_HAL_CALL(st->ops, isp_get_max_dgain, st->hal_ctx, &dgain);
-		RSS_HAL_CALL(st->ops, isp_get_dpc_strength, st->hal_ctx, &dpc);
-		RSS_HAL_CALL(st->ops, isp_get_drc_strength, st->hal_ctx, &drc);
-		RSS_HAL_CALL(st->ops, isp_get_highlight_depress, st->hal_ctx, &hld);
-		RSS_HAL_CALL(st->ops, isp_get_backlight_comp, st->hal_ctx, &blc);
-		RSS_HAL_CALL(st->ops, isp_get_defog_strength, st->hal_ctx, &dfg);
+		ok_dpc = RSS_HAL_CALL(st->ops, isp_get_dpc_strength, st->hal_ctx, &dpc) == RSS_OK;
+		ok_drc = RSS_HAL_CALL(st->ops, isp_get_drc_strength, st->hal_ctx, &drc) == RSS_OK;
+		ok_hld = RSS_HAL_CALL(st->ops, isp_get_highlight_depress, st->hal_ctx, &hld) ==
+			 RSS_OK;
+		ok_blc = RSS_HAL_CALL(st->ops, isp_get_backlight_comp, st->hal_ctx, &blc) == RSS_OK;
+		ok_dfg = RSS_HAL_CALL(st->ops, isp_get_defog_strength, st->hal_ctx, &dfg) == RSS_OK;
 		rss_wb_config_t wb = {0};
 		/*
 		 * The gains second, from the exposure readback, for the platforms
@@ -1322,20 +1340,21 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 		const struct {
 			const char *key;
 			int val;
+			bool have;
 		} knobs[] = {
-			{"brightness", bri},
-			{"contrast", con},
-			{"saturation", sat},
-			{"sharpness", shp},
-			{"hue", hue},
-			{"sinter", sin},
-			{"temper", tem},
-			{"ae_comp", ae},
-			{"dpc_strength", dpc},
-			{"drc_strength", drc},
-			{"highlight_depress", hld},
-			{"backlight_comp", blc},
-			{"defog_strength", dfg},
+			{"brightness", bri, ok_bri},
+			{"contrast", con, ok_con},
+			{"saturation", sat, ok_sat},
+			{"sharpness", shp, ok_shp},
+			{"hue", hue, ok_hue},
+			{"sinter", sin, ok_sin},
+			{"temper", tem, ok_tem},
+			{"ae_comp", ae, ok_ae},
+			{"dpc_strength", dpc, ok_dpc},
+			{"drc_strength", drc, ok_drc},
+			{"highlight_depress", hld, ok_hld},
+			{"backlight_comp", blc, ok_blc},
+			{"defog_strength", dfg, ok_dfg},
 		};
 		cJSON *r = cJSON_CreateObject();
 		cJSON *caps = NULL;
@@ -1354,6 +1373,29 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 
 			have_caps = RSS_HAL_CALL(st->ops, isp_get_knob_caps, st->hal_ctx,
 						 knobs[i].key, &k) == RSS_OK;
+
+			/*
+			 * The caps go out either way -- what the knob accepts is
+			 * known whether or not anything has been written to it,
+			 * and a client still has to draw the control. Only the
+			 * value is withheld, and its absence is the message: no
+			 * reading, use the neutral the caps carry.
+			 */
+			if (!knobs[i].have) {
+				if (caps && have_caps) {
+					cJSON *c = cJSON_AddObjectToObject(caps, knobs[i].key);
+
+					if (c) {
+						cJSON_AddNumberToObject(c, "min", (double)k.min);
+						cJSON_AddNumberToObject(c, "max", (double)k.max);
+						cJSON_AddNumberToObject(c, "neutral",
+									(double)k.neutral);
+						cJSON_AddBoolToObject(c, "auto", k.has_auto);
+						cJSON_AddBoolToObject(c, "enabled", k.enabled);
+					}
+				}
+				continue;
+			}
 
 			/*
 			 * A knob in auto holds no value of raptor's -- the

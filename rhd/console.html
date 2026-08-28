@@ -659,6 +659,14 @@ function isAuto(id) {
  * reading -- the value the picture is at, which is the tuner's and not ours.
  * Drawing an empty slider there would be the one thing that is certainly
  * wrong: the knob has a position, it just has not got one from this page.
+ *
+ * A knob with no reading at all is a different case and the camera says so by
+ * leaving the value out of get-isp: Ingenic has no getter for the denoise
+ * strengths, and answers nothing for a knob the running rvd has not written,
+ * because IMP's readback is a cache that dies with the process while the ISP
+ * goes on applying what it was last told. The caps still arrive, so the
+ * neutral below is the position -- which is what the row's own hint says the
+ * tuning sits at.
  */
 function shown(id) {
   const k = byId[id];

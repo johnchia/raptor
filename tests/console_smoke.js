@@ -182,9 +182,15 @@ const SCHEMA = JSON.parse(fs.readFileSync(path.join(__dirname, "console_schema.j
  * off, and three knobs are following the tuning's own curve rather than any
  * value of ours. A page that drew its own bounds instead would look right on
  * this reply and be wrong on every value it sent.
+ *
+ * temper carries caps and no value, which is a camera saying it has no reading
+ * for the knob -- Ingenic has no getter for the denoise strengths at all, and
+ * withholds any knob the running rvd has not written, since IMP's readback is
+ * a cache that dies with the process. The page has to draw that from the caps
+ * rather than from a number nobody sent.
  */
 const ISP_STATE = {
-	brightness: 50, contrast: 65, sharpness: 40, temper: 1, ae_comp: 0,
+	brightness: 50, contrast: 65, sharpness: 40, ae_comp: 0,
 	drc_strength: 128, defog_strength: 52, hflip: 0, vflip: 0,
 	auto: ",brightness,sharpness,drc_strength,",
 	settable: ",brightness,contrast,sharpness,temper,hflip,vflip,ae_comp," +
@@ -452,6 +458,16 @@ try {
 	 * nothing to hand back and nothing to offer. */
 	if (rowFor("temper").querySelector(".autobtn"))
 		fail("temporal denoise has no auto mode on this camera and the page offered one");
+
+	/*
+	 * And a knob the camera sends caps but no value for has to land on the
+	 * neutral those caps carry. Drawing 0 there -- the number a missing
+	 * field reads as -- would put the control somewhere the camera never
+	 * said, under a row already reading "not set" and "tuning 1".
+	 */
+	if (Number(sliderIn(rowFor("temper")).value) !== 1)
+		fail("a knob the camera sent no value for drew " +
+		     sliderIn(rowFor("temper")).value + " instead of the tuning's neutral");
 
 	/* And the knob on auto still shows where the picture is -- the tuner's
 	 * value, read from the camera rather than left blank. */
