@@ -1271,12 +1271,20 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 	 * applied for good -- on Ingenic until the next power cycle, there
 	 * being no auto mode to hand the knob back to.
 	 *
-	 * The value to put back is already published. caps.neutral is defined
-	 * as what the knob reads when the tuning has had its way with it, and
-	 * both families honour that: on SigmaStar writing the neutral hands the
-	 * module to the tuner's own curve rather than pinning the midpoint, and
-	 * on Ingenic it writes the value the part boots with. One rule, because
-	 * the neutral already means the same thing on both.
+	 * What to put back is already published, and it is whichever of two
+	 * things the knob supports. One with an auto mode takes RSS_ISP_AUTO,
+	 * which hands the module to the tuning's own curve -- strictly better
+	 * than any number, the curve varying the knob with the light where a
+	 * constant cannot. One without takes caps.neutral, defined as what the
+	 * knob reads when the tuning has had its way with it.
+	 *
+	 * Not one rule for both: writing the neutral is not a hand-back
+	 * everywhere. Infinity6C leaves the module in manual at a value that
+	 * happens to equal the neutral -- board-checked, contrast reset to 50
+	 * and stayed out of the auto list -- and only the sentinel moves
+	 * enOpType. Ingenic has no auto mode at all and refuses the sentinel,
+	 * so there the neutral is the whole of what can be done.
+	 * caps.has_auto is the question both answer.
 	 *
 	 * A knob with no caps row has no published tuning value and so nothing
 	 * to be put back to -- orientation and the gain ceilings are the live
@@ -1298,6 +1306,8 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 						   "this knob publishes no tuning value to "
 						   "put back");
 
+		int back = caps.has_auto ? RSS_ISP_AUTO : caps.neutral;
+
 /*
  * The write, and then the key out of rvd's own config: a reset that stored the
  * neutral like an ordinary set would put the key back in the file at the next
@@ -1307,9 +1317,9 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 	if (isp_key_is((k), key)) {                                                                \
 		int r;                                                                             \
 		if (sensor_idx >= 0)                                                               \
-			r = RSS_HAL_CALL(st->ops, fn##_n, st->hal_ctx, sensor_idx, caps.neutral);  \
+			r = RSS_HAL_CALL(st->ops, fn##_n, st->hal_ctx, sensor_idx, back);          \
 		else                                                                               \
-			r = RSS_HAL_CALL(st->ops, fn, st->hal_ctx, caps.neutral);                  \
+			r = RSS_HAL_CALL(st->ops, fn, st->hal_ctx, back);                          \
 		if (r == 0)                                                                        \
 			rss_config_unset(st->cfg,                                                  \
 					 image_section(sensor_idx, img_sect, sizeof(img_sect)),    \
@@ -1319,7 +1329,7 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 
 #define ISP_RESET(name, fn, k)                                                                     \
 	if (isp_key_is((k), key)) {                                                                \
-		int r = RSS_HAL_CALL(st->ops, fn, st->hal_ctx, caps.neutral);                      \
+		int r = RSS_HAL_CALL(st->ops, fn, st->hal_ctx, back);                              \
 		if (r == 0)                                                                        \
 			rss_config_unset(st->cfg, "image", (k));                                   \
 		return fmt_hal_result(resp, resp_size, r);                                         \

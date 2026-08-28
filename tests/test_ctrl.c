@@ -1131,11 +1131,18 @@ TEST set_isp_takes_a_number_or_the_word_auto(void)
  * Removing the key was never enough: the ISP keeps its state in the driver,
  * so a knob written once goes on being applied through every rvd restart, and
  * a config with no [image] section at all can be running someone's brightness
- * from an hour ago. The value to put back is the one the caps already publish
- * -- caps.neutral is defined as what the knob reads when the tuning has had
- * its way with it -- so this asserts the neutral by value, and that the key is
- * dropped rather than stored, which is the half that keeps a later
- * config-save from writing it straight back.
+ * from an hour ago.
+ *
+ * What gets written back is whichever hand-back the knob supports, and the two
+ * are asserted separately because they are different instructions. A knob with
+ * an auto mode gets the sentinel, which returns it to the tuning's own curve;
+ * one without gets the published neutral. Writing the neutral to a knob that
+ * has an auto mode is the bug this distinction exists for -- on Infinity6C it
+ * leaves the module manual at a value that merely looks right, and only the
+ * sentinel moves enOpType.
+ *
+ * The key being dropped rather than stored is the other half, and the one that
+ * keeps a later config-save from writing it straight back.
  */
 TEST reset_isp_writes_the_tuning_value_and_drops_the_key(void)
 {
@@ -1149,11 +1156,12 @@ TEST reset_isp_writes_the_tuning_value_and_drops_the_key(void)
 	call("{\"cmd\":\"reset-isp\",\"key\":\"brightness\"}");
 	ASSERT(strstr(resp, "\"status\":\"ok\"") != NULL);
 
-	/* The mock publishes neutral 50, not 128: a reset that wrote a
-	 * hardcoded midpoint would pass against a 0..255 knob and be wrong
-	 * everywhere else. */
+	/* brightness has an auto mode in the mock, so the hand-back is the
+	 * sentinel and not the neutral 50 sitting right there in its caps. */
 	ASSERT_EQ(1, rec.call_count);
-	ASSERT_EQ(50, rec.set_brightness);
+	ASSERT_EQm("a knob with an auto mode is handed back to the tuning, not "
+		   "pinned at its neutral",
+		   RSS_ISP_AUTO, rec.set_brightness);
 	ASSERT_EQ(-1, rss_config_get_int(st.cfg, "image", "brightness", -1));
 
 	/* Naming a sensor takes the other half of the same dispatch, which
@@ -1165,7 +1173,7 @@ TEST reset_isp_writes_the_tuning_value_and_drops_the_key(void)
 	call("{\"cmd\":\"reset-isp\",\"key\":\"brightness\",\"sensor\":1}");
 	ASSERT(strstr(resp, "\"status\":\"ok\"") != NULL);
 	ASSERT_EQm("the reset reached the sensor it named", 1, rec.set_brightness_n_idx);
-	ASSERT_EQ(50, rec.set_brightness);
+	ASSERT_EQ(RSS_ISP_AUTO, rec.set_brightness);
 	ASSERT_EQ(-1, rss_config_get_int(st.cfg, "sensor1_image", "brightness", -1));
 
 	/* And again on the arm with no per-sensor variant, which keeps the
@@ -1175,7 +1183,9 @@ TEST reset_isp_writes_the_tuning_value_and_drops_the_key(void)
 
 	call("{\"cmd\":\"reset-isp\",\"key\":\"drc_strength\"}");
 	ASSERT(strstr(resp, "\"status\":\"ok\"") != NULL);
-	ASSERT_EQ(64, rec.set_drc);
+	/* No auto mode on this one, so the neutral is the hand-back -- and it
+	 * is 64, not 128, so a hardcoded midpoint would fail here. */
+	ASSERT_EQm("a knob with no auto mode goes to its published neutral", 64, rec.set_drc);
 	ASSERT_EQ(-1, rss_config_get_int(st.cfg, "image", "drc_strength", -1));
 
 	teardown();
