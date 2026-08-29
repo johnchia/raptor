@@ -20,11 +20,13 @@ turned it destructive. Each pair is written up as one section.
 | 8 | Brightness 0 does not darken the picture, it blows it to pure white | IMP, and a caps table that published 0 as reachable | **fixed** by a floor, board-verified |
 
 One more, found while testing 4 and tracked upstream rather than here: CBR
-cannot reach its target bitrate, because the default QP floor of 34 pins the
-encoder at a quality too low to spend the budget --
+could not reach its target bitrate, because the default QP floor of 34 pinned
+the encoder at a quality too low to spend the budget --
 [gtxaspec/raptor-hal#10](https://github.com/gtxaspec/raptor-hal/issues/10).
-It is upstream's, reproduces from a cold start, and is unrelated to finding 4
-beyond having been hidden behind it.
+It was upstream's, reproduced from a cold start, and was unrelated to finding 4
+beyond having been hidden behind it. Upstream fixed it by lowering the CBR
+floor to 15, leaving the ceiling at 51 so a hard scene can still be compressed
+down to hold the target; the fix is in this branch.
 
 ---
 
