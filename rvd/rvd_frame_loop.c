@@ -16,6 +16,10 @@
 #include <sys/epoll.h>
 
 #include "rvd.h"
+#include <rss_vui.h>
+#ifdef __mips__
+#include <sys/cachectl.h>
+#endif
 
 #define RVD_STATS_INTERVAL_US 30000000 /* 30s */
 #define RVD_REAP_INTERVAL_US  10000000 /* 10s */
@@ -103,6 +107,17 @@ void *rvd_encoder_thread(void *arg)
 		RSS_DEBUG("jpeg chn %d: pulsed receive every %lld ms", s->chn,
 			  (long long)(pulse_interval_us / 1000));
 	bool had_readers = false; /* pulse pacing applies to held demand only */
+	/* The source frame counter stamped into the ring: the encoder's own
+	 * sequence for video channels, so consumers can split source loss
+	 * from ring overflow. JPEG channels pass none: pulse and on-demand
+	 * duty-cycling skip source frames by design, and a designed gap
+	 * must not read as loss. */
+	const bool vui_full_range = st->vui_full_range;
+	const int vui_matrix = st->vui_matrix;
+	bool vui_flip_logged = false;
+	bool vui_flip_warned = false;
+	bool vui_matrix_logged = false;
+	bool vui_matrix_warned = false;
 
 	while (rss_running(st->running) && atomic_load(&st->stream_active[idx])) {
 		/* JPEG on-demand: start/stop encoder based on ring consumers */
@@ -232,6 +247,67 @@ void *rvd_encoder_thread(void *arg)
 			continue;
 		}
 
+		/* The ISP feeds the encoder BT.601 full-range YUV, but the
+		 * SPS VUI the encoder writes declares limited-range BT.709,
+		 * so players rescale 16-235 (clipping both ends) and
+		 * reconstruct hues with the wrong matrix. Both fixes are
+		 * length-preserving edits of the video_signal_type block --
+		 * done here, before publish, so every consumer (and the SDP
+		 * parameter caches built from ring frames) sees the
+		 * corrected declaration on both ring modes. */
+		if ((vui_full_range || vui_matrix >= 0) && !s->is_jpeg && frame.is_key) {
+			for (uint32_t n = 0; n < frame.nal_count; n++) {
+				rss_nal_type_t t = frame.nals[n].type;
+				if (t != RSS_NAL_H264_SPS && t != RSS_NAL_H265_SPS)
+					continue;
+				bool edited = false;
+				if (vui_full_range) {
+					int rc = rss_vui_set_full_range(
+						(uint8_t *)frame.nals[n].data, frame.nals[n].length,
+						t == RSS_NAL_H265_SPS);
+					if (rc == 1) {
+						edited = true;
+						if (!vui_flip_logged) {
+							vui_flip_logged = true;
+							RSS_INFO("stream%d: declaring full-range "
+								 "video in the SPS VUI",
+								 idx);
+						}
+					} else if (rc < 0 && !vui_flip_warned) {
+						vui_flip_warned = true;
+						RSS_WARN("stream%d: SPS VUI range fix skipped "
+							 "(rc=%d)",
+							 idx, rc);
+					}
+				}
+				if (vui_matrix >= 0) {
+					int rc = rss_vui_set_matrix(
+						(uint8_t *)frame.nals[n].data, frame.nals[n].length,
+						t == RSS_NAL_H265_SPS, (uint8_t)vui_matrix);
+					if (rc == 1) {
+						edited = true;
+						if (!vui_matrix_logged) {
+							vui_matrix_logged = true;
+							RSS_INFO("stream%d: declaring matrix %d "
+								 "in the SPS VUI",
+								 idx, vui_matrix);
+						}
+					} else if (rc < 0 && !vui_matrix_warned) {
+						vui_matrix_warned = true;
+						RSS_WARN("stream%d: SPS VUI matrix fix skipped "
+							 "(rc=%d)",
+							 idx, rc);
+					}
+				}
+				if (edited) {
+#ifdef __mips__
+					cacheflush((void *)(uintptr_t)frame.nals[n].data,
+						   frame.nals[n].length, DCACHE);
+#endif
+				}
+			}
+		}
+
 		/* Helix JPEG cold start can hand over a full-length frame whose
 		 * tail never landed in memory: plausible Content-Length, no EOI
 		 * anywhere in the scan data. Publishing it gives every consumer
@@ -329,11 +405,14 @@ void *rvd_encoder_thread(void *arg)
 
 			ret = rss_ring_publish_ref(s->ring, rmem_off, (uint32_t)total_len64,
 						   frame.timestamp, primary_nal_type(&frame),
-						   frame.is_key ? 1 : 0, buf_idx);
+						   frame.is_key ? 1 : 0, buf_idx,
+						   s->is_jpeg ? RSS_SRC_SEQ_NONE : frame.seq);
 			if (ret != 0) {
 				/* A rejected publish is a dropped frame the ring
 				 * never saw; if it is a keyframe, every client in
 				 * the keyframe hold starves until the next one. */
+				if (!s->is_jpeg)
+					rss_ring_report_drop(s->ring, frame.seq);
 				int64_t now_us = rss_timestamp_us();
 				if (now_us - last_pub_warn_us > 5000000) {
 					last_pub_warn_us = now_us;
@@ -357,8 +436,11 @@ void *rvd_encoder_thread(void *arg)
 				iov[n].length = frame.nals[n].length;
 			}
 			ret = rss_ring_publish_iov(s->ring, iov, cnt, frame.timestamp,
-						   primary_nal_type(&frame), frame.is_key ? 1 : 0);
+						   primary_nal_type(&frame), frame.is_key ? 1 : 0,
+						   s->is_jpeg ? RSS_SRC_SEQ_NONE : frame.seq);
 			if (ret != 0) {
+				if (!s->is_jpeg)
+					rss_ring_report_drop(s->ring, frame.seq);
 				int64_t now_us = rss_timestamp_us();
 				if (now_us - last_pub_warn_us > 5000000) {
 					last_pub_warn_us = now_us;
@@ -447,7 +529,37 @@ void rvd_frame_loop(rvd_state_t *st, volatile sig_atomic_t *running)
 		}
 	}
 
+	int64_t last_vbs_check = rss_timestamp_us();
+
 	while (rss_running(running)) {
+		/* A stream that never produces a frame is the visible face
+		 * of two silent failures: the tx-isp driver refusing the
+		 * multi-buffer schedule, and rmem too small for the buffer
+		 * pool -- neither returns an error anywhere. Once per
+		 * stream, rebuild the channel with a single DMA buffer.
+		 * Runs in this thread so it serializes with control-socket
+		 * restarts. Explicit nr_vbs in the config is trusted. */
+		int64_t vbs_now = rss_timestamp_us();
+		if (vbs_now - last_vbs_check >= 1000000 && !st->v4l2_backend) {
+			last_vbs_check = vbs_now;
+			for (int i = 0; i < st->stream_count; i++) {
+				rvd_stream_t *s = &st->streams[i];
+				if (s->is_jpeg || !s->enabled || !s->ring || !s->nr_vbs_auto ||
+				    s->vbs_fallback_tried || s->fs_cfg.nr_vbs <= 1)
+					continue;
+				if (vbs_now - s->started_us < 6000000)
+					continue;
+				if (rss_ring_get_header(s->ring)->write_seq != 0)
+					continue;
+				RSS_WARN("stream%d: no frames %ds after start with nr_vbs=%d; "
+					 "rebuilding the channel with a single DMA buffer",
+					 i, (int)((vbs_now - s->started_us) / 1000000),
+					 s->fs_cfg.nr_vbs);
+				s->vbs_fallback_tried = true;
+				rvd_stream_restart_vbs_fallback(st, i);
+			}
+		}
+
 		/* Check control socket */
 		if (epoll_fd >= 0) {
 			struct epoll_event events[4];

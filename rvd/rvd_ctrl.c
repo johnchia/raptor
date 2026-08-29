@@ -1756,7 +1756,8 @@ static int find_jpeg_for_video_ctrl(rvd_state_t *st, int video_idx)
  * Returns 0 on success, or positive response length on failure
  * (error already written to resp).
  */
-static int do_stream_restart(rvd_state_t *st, int chn, char *resp, int resp_size)
+static int do_stream_restart_ex(rvd_state_t *st, int chn, char *resp, int resp_size,
+				bool recreate_fs)
 {
 	int jpeg = find_jpeg_for_video_ctrl(st, chn);
 	bool has_ivs = (st->streams[chn].fs_chn == st->ivs_fs_chn && atomic_load(&st->ivs_active));
@@ -1777,6 +1778,20 @@ static int do_stream_restart(rvd_state_t *st, int chn, char *resp, int resp_size
 
 	if (has_ivs)
 		atomic_store(&st->ivs_active, true); /* re-enable for bind chain */
+
+	if (recreate_fs && !st->v4l2_backend) {
+		/* Framesource channels are normally created once for the
+		 * process lifetime; a buffer-count change only lands by
+		 * building the channel again while the bind chain is down. */
+		int fsc = st->streams[chn].fs_chn;
+		RSS_HAL_CALL(st->ops, fs_destroy_channel, st->hal_ctx, fsc);
+		int cret = RSS_HAL_CALL(st->ops, fs_create_channel, st->hal_ctx, fsc,
+					&st->streams[chn].fs_cfg);
+		if (cret != RSS_OK)
+			RSS_ERROR("stream-restart: fs_create_channel(%d) failed: %d", fsc, cret);
+		RSS_HAL_CALL(st->ops, fs_set_fifo, st->hal_ctx, fsc, 0);
+		RSS_HAL_CALL(st->ops, fs_set_frame_depth, st->hal_ctx, fsc, 0);
+	}
 
 	int ret = rvd_stream_init(st, chn);
 	if (ret != RSS_OK) {
@@ -1805,6 +1820,23 @@ static int do_stream_restart(rvd_state_t *st, int chn, char *resp, int resp_size
 
 	RSS_INFO("stream-restart: channel %d complete", chn);
 	return 0;
+}
+
+static int do_stream_restart(rvd_state_t *st, int chn, char *resp, int resp_size)
+{
+	return do_stream_restart_ex(st, chn, resp, resp_size, false);
+}
+
+/*
+ * One-shot fallback for a stream that never produced a frame: the
+ * tx-isp driver can refuse a multi-buffer schedule, and rmem can be
+ * too small for it, and neither failure surfaces as an error -- the
+ * channel just stays silent. Rebuild it with a single DMA buffer.
+ */
+int rvd_stream_restart_vbs_fallback(rvd_state_t *st, int chn)
+{
+	st->streams[chn].fs_cfg.nr_vbs = 1;
+	return do_stream_restart_ex(st, chn, NULL, 0, true);
 }
 
 /* Returns 0 if valid, or positive response length (error already written) */
@@ -2695,6 +2727,20 @@ static int handle_config_cmd(const char *cmd, const char *cmd_json, rvd_state_t 
 			cJSON_AddNumberToObject(item, "max_qp", (double)s->enc_cfg.max_qp);
 			cJSON_AddNumberToObject(item, "rc_mode", (double)s->enc_cfg.rc_mode);
 			cJSON_AddNumberToObject(item, "profile", (double)s->enc_cfg.profile);
+			/* Source-loss ledger: frames the encoder produced that
+			 * never reached the ring, split by where they went
+			 * missing. Only meaningful on streams that stamp a
+			 * source counter (video; JPEG channels do not). */
+			if (s->ring && !s->is_jpeg) {
+				rss_ring_loss_t loss;
+				rss_ring_get_loss(s->ring, &loss);
+				cJSON_AddNumberToObject(item, "drop_source",
+							(double)loss.drop_source);
+				cJSON_AddNumberToObject(item, "drop_publish",
+							(double)loss.drop_publish);
+				cJSON_AddNumberToObject(item, "src_seq_resets",
+							(double)loss.src_seq_resets);
+			}
 			cJSON_AddItemToArray(arr, item);
 		}
 		cJSON_AddStringToObject(cfg, "config_path", st->config_path);

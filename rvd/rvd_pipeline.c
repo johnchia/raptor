@@ -265,8 +265,13 @@ static void load_stream_config(rss_config_t *cfg, const char *section, rvd_strea
 		.pixfmt = RSS_PIXFMT_NV12,
 		.fps_num = fps,
 		.fps_den = 1,
-		.nr_vbs = rss_config_get_int(cfg, section, "nr_vbs", 2),
+		.nr_vbs = rss_config_get_int(cfg, section, "nr_vbs", -1),
 	};
+	/* No configured value: default to 2 and allow the runtime
+	 * single-buffer fallback; an explicit value is trusted as-is. */
+	s->nr_vbs_auto = (s->fs_cfg.nr_vbs <= 0);
+	if (s->nr_vbs_auto)
+		s->fs_cfg.nr_vbs = 2;
 
 	/* Encoder config */
 	s->enc_cfg = (rss_video_config_t){
@@ -576,6 +581,26 @@ int rvd_pipeline_init(rvd_state_t *st)
 {
 	rss_config_t *cfg = st->cfg;
 	int ret;
+
+	/* The ISP hands the encoder BT.601 full-range YUV (its CSC boot
+	 * default; nothing here reprograms it), but the SPS VUI the
+	 * encoder emits declares limited-range BT.709. Parse the
+	 * correction knobs once here; the encoder threads apply them. */
+	st->vui_full_range = rss_config_get_bool(cfg, "system", "vui_full_range", true);
+	const char *vm = rss_config_get_str(cfg, "system", "vui_matrix", "smpte170m");
+	if (strcasecmp(vm, "smpte170m") == 0 || strcasecmp(vm, "bt601") == 0)
+		st->vui_matrix = 6;
+	else if (strcasecmp(vm, "bt470bg") == 0)
+		st->vui_matrix = 5;
+	else if (strcasecmp(vm, "bt709") == 0)
+		st->vui_matrix = 1;
+	else if (strcasecmp(vm, "unspecified") == 0)
+		st->vui_matrix = 2;
+	else {
+		if (strcasecmp(vm, "keep") != 0)
+			RSS_WARN("system.vui_matrix '%s' unknown, keeping the encoder's value", vm);
+		st->vui_matrix = -1;
+	}
 
 	pthread_mutex_init(&st->osd_lock, NULL);
 	for (int i = 0; i < RVD_MAX_STREAMS; i++)
@@ -1909,6 +1934,8 @@ void rvd_stream_deinit(rvd_state_t *st, int idx)
 int rvd_stream_start(rvd_state_t *st, int idx)
 {
 	rvd_stream_t *s = &st->streams[idx];
+
+	s->started_us = rss_timestamp_us();
 
 	/* JPEG on-demand: don't enable FS (shares with video) or start
 	 * encoder here — the encoder thread handles start/stop based on

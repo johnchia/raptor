@@ -33,10 +33,14 @@ typedef struct {
 	uint8_t level;
 } rss_ring_header_t __attribute__((aligned(64)));
 
+/* Mirrors RSS_SRC_SEQ_NONE in rss_ipc.h (not includable here): the
+ * backchannel speaker ring has no source frame counter. */
+#define RSD555_SRC_SEQ_NONE 0xFFFFFFFFu
+
 rss_ring_t *rss_ring_create(const char *name, uint32_t slot_count, uint32_t data_size);
 void rss_ring_destroy(rss_ring_t *ring);
 int rss_ring_publish(rss_ring_t *ring, const uint8_t *data, uint32_t length, int64_t timestamp,
-		     uint16_t nal_type, uint8_t is_key);
+		     uint16_t nal_type, uint8_t is_key, uint32_t src_seq);
 void rss_ring_set_stream_info(rss_ring_t *ring, uint32_t stream_id, uint32_t codec, uint32_t width,
 			      uint32_t height, uint32_t fps_num, uint32_t fps_den, uint8_t profile,
 			      uint8_t level);
@@ -184,6 +188,10 @@ typedef struct {
 	int source_count;
 	pthread_mutex_t sources_lock;
 } rsd555_audio_ctx_t;
+
+/* True when rtsp.out_buffer_size pinned one explicit sink buffer
+ * size; the subsessions then leave OutPacketBuffer::maxSize alone. */
+int rsd555_obuf_pinned(void);
 
 /* Source registration — called by FramedSource constructor/destructor */
 int rsd555_video_add_source(rsd555_video_ctx_t *ctx, rsd555_frame_queue_t *q);
