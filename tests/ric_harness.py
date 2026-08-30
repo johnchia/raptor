@@ -43,6 +43,7 @@ WORK = os.environ.get("RIC_TEST_WORK", "/tmp/ric-test")
 RIC_BIN = os.environ.get("RIC_BIN", "asan-out/ric")
 ADC_PRELOAD = os.environ.get("RIC_ADC_PRELOAD", "")
 POLL_MS = 200
+EXPOSURE_VALID_AE_LUMA = 1 << 2
 
 PASS = 0
 FAIL = 0
@@ -142,6 +143,7 @@ class StubRvd:
 
     def __init__(self):
         self.scene = {}
+        self.scene_queue = []
         self.modes = []  # (monotonic, "day"|"night")
         self.fps_calls = []  # (monotonic, int value) from set-sensor-fps
         self.fps_error = False  # answer set-sensor-fps with an error
@@ -172,6 +174,13 @@ class StubRvd:
     def set_scene(self, **kw):
         with self.lock:
             self.scene = dict(kw)
+            self.scene_queue = []
+
+    def set_scene_sequence(self, scenes):
+        """Return one scripted exposure per query, then hold the last."""
+        with self.lock:
+            self.scene_queue = [dict(sc) for sc in scenes]
+            self.scene = dict(scenes[-1])
 
     def mark(self):
         with self.lock:
@@ -203,7 +212,10 @@ class StubRvd:
                 cmd = json.loads(req).get("cmd", "")
                 if cmd == "get-exposure":
                     with self.lock:
-                        sc = dict(self.scene)
+                        if self.scene_queue:
+                            sc = self.scene_queue.pop(0)
+                        else:
+                            sc = dict(self.scene)
                     resp = {
                         "total_gain": sc.get("gain", 0),
                         "exposure_us": sc.get("exposure_us", 10000),
@@ -212,6 +224,8 @@ class StubRvd:
                         "wb_rgain": sc.get("rgain", 0),
                         "wb_bgain": sc.get("bgain", 0),
                     }
+                    if "valid_mask" in sc:
+                        resp["valid_mask"] = sc["valid_mask"]
                 elif cmd == "set-running-mode":
                     val = json.loads(req).get("value", "?")
                     with self.lock:
@@ -781,6 +795,60 @@ def scenario_probe_slow_ae(stub, watch):
     ric.stop()
 
 
+def scenario_probe_restore_slow_ae(stub, watch):
+    """A failed ambient probe must restart baseline settling when IR
+    returns. The post-IR AE walk is deliberately smooth: every old
+    pairwise sample differs by no more than 10%, so stale settle state
+    accepted a transitional EV and re-probed after every holdoff."""
+    conf = LUMA_CONF + "probe_holdoff_sec = 1\n"
+    stub.set_scene(luma=70, gain=4500, ev=1200000)
+    ric = Ric("proberestorewalk", conf)
+    if not ric.wait_running():
+        result(False, "probe restore walk: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    time.sleep(0.5)
+
+    mm = stub.mark()
+    stub.set_scene(luma=6, gain=8192, ev=50000000)
+    if not wait_for(lambda: "night" in stub.modes_since(mm), 4):
+        result(False, "probe restore walk: night entry", str(stub.modes_since(mm)))
+        ric.stop()
+        return
+    stub.set_scene(luma=72, gain=20000, ev=200000)
+    time.sleep(8 * POLL_MS / 1000.0)
+
+    gm = watch.mark()
+    stub.set_scene(luma=72, gain=14000, ev=140000)
+    if not wait_for(lambda: last_value(watch.since(gm), IRLED) == "0", 4):
+        result(False, "probe restore walk: dip lifts IR", str(watch.since(gm)))
+        ric.stop()
+        return
+
+    rm = watch.mark()
+    stub.set_scene(luma=4, gain=90000, ev=900000)
+    if not wait_for(lambda: last_value(watch.since(rm), IRLED) == "1", 4):
+        result(False, "probe restore walk: darkness restores IR", str(watch.since(rm)))
+        ric.stop()
+        return
+
+    walk = []
+    for gain in (30000, 27000, 24300, 21870, 19683, 17714, 15943, 14348,
+                 13000, 13000, 13000, 13000):
+        walk.append({"luma": 72, "gain": gain, "ev": gain * 10})
+    stub.set_scene_sequence(walk)
+    time.sleep((len(walk) + 10) * POLL_MS / 1000.0)
+
+    led_vals = [c for _, p, _, c in watch.since(rm) if p == IRLED]
+    result("0" not in led_vals,
+           "probe restore walk: settled return does not re-probe",
+           str(watch.since(rm)) + " " + ric.read_log()[-300:])
+    st = ric_status()
+    result(st is not None and st.get("state") == "night",
+           "probe restore walk: remains in night", str(st))
+    ric.stop()
+
+
 def scenario_probe_recheck(stub, watch):
     """IR wash can hide ambient light entirely: on a Wyze V3 the IR-lit
     scene reads EV 637 lit vs ~700 dark -- a 9% perturbation no dip
@@ -933,6 +1001,12 @@ def scenario_ctrl(stub, watch):
         "ctrl: status carries exposure block",
         str(s),
     )
+    thresholds = ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "get-thresholds"})
+    result(
+        thresholds is not None and thresholds.get("probe_recheck_sec") == 0,
+        "ctrl: disruptive interval probe defaults off",
+        str(thresholds),
+    )
     ric.stop()
 
 
@@ -979,7 +1053,7 @@ def scenario_zero_exposure(stub, watch):
         "zero exposure holds mode (no phantom night)",
         str(modes),
     )
-    warns = len(re.findall(r"WARN.*no exposure data", ric.read_log()))
+    warns = len(re.findall(r"WARN.*no valid gain, luma or ev data", ric.read_log()))
     result(warns == 1, "zero exposure warns exactly once", "warns=%d" % warns)
     # Manual override must still work on such platforms.
     gm = watch.mark()
@@ -987,6 +1061,25 @@ def scenario_zero_exposure(stub, watch):
     ok = r is not None and r.get("state") == "night"
     ev_ok = wait_for(lambda: last_value(watch.since(gm), IRLED) == "1", 3)
     result(ok and ev_ok, "zero exposure: manual override still actuates", str(r))
+    ric.stop()
+
+
+def scenario_valid_zero_luma(stub, watch):
+    """An explicitly valid zero luma is a black frame, not missing data.
+    This is the first exposure sample on a cold T31 ISP."""
+    stub.set_scene(luma=0, gain=0, ev=0,
+                   valid_mask=EXPOSURE_VALID_AE_LUMA)
+    ric = Ric("valid-zero-luma", LUMA_CONF)
+    if not ric.wait_running():
+        result(False, "valid-zero-luma: ric start", "no 'ric running'")
+        ric.stop()
+        return
+    mm = stub.mark()
+    ok = wait_for(lambda: "night" in stub.modes_since(mm), 4)
+    result(ok, "valid zero luma drives night",
+           str(stub.modes_since(mm)))
+    result("no valid gain, luma or ev" not in ric.read_log(),
+           "valid zero luma is not reported missing", ric.read_log()[-300:])
     ric.stop()
 
 
@@ -1216,10 +1309,11 @@ def scenario_adc_dead(stub, watch):
 
 
 def scenario_pulse_width(stub, watch):
-    """pulse_ms drives the dual-GPIO coil pulse. 100ms must measure as
-    roughly 100ms; 10ms must measure clearly shorter. Drain-time stamps
-    cannot resolve 10ms exactly, so the short assertion is an upper
-    bound."""
+    """pulse_ms drives the dual-GPIO coil pulse (default 100, the value
+    the fleet's ircut script has always used; thingino-firmware #1380).
+    100ms must measure as roughly 100ms; 10ms must measure clearly
+    shorter. Drain-time stamps cannot resolve 10ms exactly, so the
+    short assertion is an upper bound."""
     for ms, lo, hi in ((100, 0.05, 0.3), (10, 0.0, 0.05)):
         conf = LUMA_CONF.replace("pulse_ms = 100", "pulse_ms = %d" % ms)
         stub.set_scene(luma=120, gain=500, ev=4000)
@@ -1246,8 +1340,9 @@ def scenario_pulse_default(stub, watch):
     silent revert to a fleet-alignment value would restore a fault that
     only shows as a filter left in the wrong place.
 
-    Timing cannot make this claim -- 30ms is inside the drain-stamp
-    noise, same as 10ms was -- so it asks ric what it loaded."""
+    Timing cannot make this claim -- 100ms is inside the drain-stamp
+    noise for a default read at startup, same as 10ms was -- so it asks
+    ric what it loaded."""
     del watch
     conf = GPIO_CONF + "trigger = luma\nnight_luma = 20\nhysteresis_sec = 2\n"
     stub.set_scene(luma=120, gain=500, ev=4000)
@@ -1257,8 +1352,8 @@ def scenario_pulse_default(stub, watch):
         ric.stop()
         return
     r = ctrl_cmd(RUN_DIR + "/ric.sock", {"cmd": "get-thresholds"})
-    result(r is not None and r.get("pulse_ms") == 30,
-           "pulse_ms defaults to 30ms with no config key", str(r))
+    result(r is not None and r.get("pulse_ms") == 100,
+           "pulse_ms defaults to 100ms with no config key", str(r))
     ric.stop()
 
 
@@ -2424,6 +2519,7 @@ def main():
         scenario_probe_dark_restore,
         scenario_noir_luma_dawn,
         scenario_probe_slow_ae,
+        scenario_probe_restore_slow_ae,
         scenario_probe_recheck,
         scenario_recheck_rearm,
         scenario_ctrl,
@@ -2443,6 +2539,7 @@ def main():
         scenario_photo_interference,
         scenario_photo_no_ev,
         scenario_zero_exposure,
+        scenario_valid_zero_luma,
         scenario_partial_fields,
         scenario_adc,
         scenario_adc_dead,

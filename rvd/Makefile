@@ -9,6 +9,10 @@ all: $(BIN)
 # -L/-l flags, and only the files can be a prerequisite. The build-info object
 # is left out on purpose -- it is regenerated on every parse to stamp the time,
 # and listing it would relink every daemon on every build.
+#
+# The top-level Makefile now names rvd's deps itself, and a value handed down
+# on the sub-make command line beats this one; what is left here is the answer
+# for a standalone `make -C rvd`, which has no parent to ask.
 LIB_DEPS := $(filter %.a %.so,$(LIBS))
 
 # Recompile when the platform selection changes, not only when a source does:

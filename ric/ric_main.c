@@ -96,7 +96,7 @@ static void load_config(ric_state_t *st)
 			  rss_config_get_int(cfg, "ircut", "probe_holdoff_sec", 60), 1, 86400);
 	c->probe_recheck_sec =
 		cfg_clamp("probe_recheck_sec",
-			  rss_config_get_int(cfg, "ircut", "probe_recheck_sec", 600), 0, 86400);
+			  rss_config_get_int(cfg, "ircut", "probe_recheck_sec", 0), 0, 86400);
 
 	/* ADC thresholds (trigger=adc) */
 	c->adc_channel = rss_config_get_int(cfg, "ircut", "adc_channel", 0);
@@ -132,18 +132,21 @@ static void load_config(ric_state_t *st)
 		"poll_interval_ms",
 		rss_config_get_int(cfg, "ircut", "poll_interval_ms", default_poll), 50, 10000);
 
-	/* Dual-GPIO coil pulse. A margin, not a target: units of the same
-	 * model differ by more than 3x in how long their coil must be held,
-	 * so a width that measures perfectly on one board can miss most of
-	 * its transitions on another. A miss is silent -- the filter stays
-	 * where it was until the next automatic transition, hours away under
-	 * the luma trigger -- so the default is the one that survives the
-	 * slowest mechanism rather than the one that suits the median, at
-	 * three times the shortest width seen working on a marginal unit.
-	 * Clamped: a zero pulse moves no filter, and holding the coil for
-	 * seconds is a heater. */
+	/* Probe before the getter stores its default. An explicit runtime
+	 * setting is policy and wins over timing in thingino.json; otherwise
+	 * the device description may replace the fleet default with the
+	 * actuator's measured pulse width. */
+	c->pulse_ms_explicit = rss_config_get_str(cfg, "ircut", "pulse_ms", NULL) != NULL;
+	/* 100ms: 10ms measured 20/20 on one Wyze Cam3 yet intermittently
+	 * failed to move the filter on other units of the same model (day
+	 * state with the filter stuck in night = magenta video), and 100ms
+	 * measured reliable everywhere it has been tried. A coil rated for
+	 * a pulse shrugs off 100ms; a filter that missed its throw does
+	 * not recover until the next transition. Boards with a measured
+	 * timing still declare it in thingino.json. A zero pulse moves no
+	 * filter, and holding the coil for seconds is a heater. */
 	c->pulse_ms =
-		cfg_clamp("pulse_ms", rss_config_get_int(cfg, "ircut", "pulse_ms", 30), 1, 1000);
+		cfg_clamp("pulse_ms", rss_config_get_int(cfg, "ircut", "pulse_ms", 100), 1, 1000);
 
 	if (clamped_keys[0])
 		RSS_WARN("config values out of range, clamped: %s", clamped_keys);

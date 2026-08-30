@@ -560,6 +560,9 @@ static int mock_get_exposure(void *ctx, rss_exposure_t *exp)
 	exp->ev = 50000;
 	exp->wb_rgain = 256;
 	exp->wb_bgain = 192;
+	exp->valid_mask = RSS_EXPOSURE_VALID_TOTAL_GAIN | RSS_EXPOSURE_VALID_TIME |
+			  RSS_EXPOSURE_VALID_AE_LUMA | RSS_EXPOSURE_VALID_EV |
+			  RSS_EXPOSURE_VALID_WB_RGAIN | RSS_EXPOSURE_VALID_WB_BGAIN;
 	return RSS_OK;
 }
 
@@ -961,6 +964,15 @@ rss_hal_ctx_t *rss_hal_create(void)
 	if (ctx)
 		ctx->ops = &mock_ops;
 	return ctx;
+}
+
+/* The mock carries only the "imp" surface; asking for anything else
+ * answers NULL exactly like a real build without that backend. */
+rss_hal_ctx_t *rss_hal_create_backend(const char *backend)
+{
+	if (backend && strcmp(backend, "imp") != 0)
+		return NULL;
+	return rss_hal_create();
 }
 
 void rss_hal_destroy(rss_hal_ctx_t *ctx)
