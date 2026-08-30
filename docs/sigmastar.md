@@ -32,6 +32,7 @@ got to them.
 | JPEG snapshots | `/snap`, dedicated VPE port where geometry allows, else shared — see below |
 | MJPEG | `/mjpeg`, off the same JPEG channel — rate-capped, see below |
 | AE statistics | Grid placement and the `r,g,b,y` lane order, both confirmed from cell data |
+| Temporal NR | `temper` → NR3D's `u8TfStr` across all sixteen gain entries — measured, see below |
 
 ## Deliberately absent
 
@@ -50,11 +51,12 @@ These are decisions, not gaps. Each returns `RSS_ERR_NOTSUP` through
   `ivs_active` and the stage cannot appear in the pipeline.
 - **Scalar ISP strength knobs that MI models as toggles or curves.**
   `isp_set_dpc_strength` and `isp_set_defog_strength` map onto single-bit MI
-  fields; `isp_set_drc_strength`, `isp_set_highlight_depress` and
-  `isp_set_backlight_comp` live in WDR/HDR modules whose manual blocks are
-  multi-field curve descriptors; `isp_set_hue` is a 64-entry HSV LUT. Mapping
-  one scalar onto a curve is a tuning decision, not a HAL one. See
-  `hal_isp.c`.
+  fields; `isp_set_highlight_depress` and `isp_set_backlight_comp` live in HDR
+  modules whose manual blocks are multi-field curve descriptors; `isp_set_hue`
+  is a 64-entry HSV LUT. Mapping one scalar onto a curve is a tuning decision,
+  not a HAL one. See `hal_isp.c`. `isp_set_drc_strength` was in this list and is
+  not any more: WDR carries a single `Strength` byte, so the mapping is exact
+  rather than invented.
 - **`isp_set_wb` / `isp_get_wb`.** `AWB_SetAttr`'s 1464-byte payload does not
   follow the auto/manual offset convention the rest of the backend derives
   from, so it needs its own derivation. Deferred rather than guessed. (AWB
@@ -465,6 +467,62 @@ Two general points, both of which cost time here:
   this table (0..127 with unity at 32, not 64); EVComp is the second, and the one
   where the wrong guess is invisible because it shifts the picture rather than
   failing.
+
+### `temper` writes NR3D's gain run, and its range is one-sided
+
+The knob is the tuning's own temporal denoise strength, `u8TfStr`, written into
+all sixteen of NR3D's gain-indexed `stAuto` entries with `enOpType` left in
+auto. That is the whole point of the shape: MI goes on interpolating the module
+by gain, and every other field in it — the motion detector, which is where this
+family's shipped tunings actually differ — keeps the curve the tuner wrote.
+Writing `stManual` instead would have been one field instead of sixteen and
+would have cost all of it.
+
+It is **not** the VPE channel's `e3DNRLevel`. That selects the 3DNR reference
+frame's bit depth rather than an amount, six of its eight values mean "engine
+off", and mirror and flip are carried out by that same engine here — so its off
+position can stall the ISP outright. The level stays fixed at
+`STAR_VPE_NR3D_LEVEL` and this knob does not go near it; `t_isp.c` pins both
+halves of that together.
+
+**The range is 0..64 and the tuning ships 64.** Infinity6C's `TfStrY` runs to
+127 with 64 annotated "x1 gain" in `isp_api.xml`; Pudding's field stops at
+unity, and every shipped 6E tuning — plus the board's own `gc4653.bin` — sits
+there, flat across all sixteen entries. So `temper` on this SoC has no headroom
+above the tuner's value and its whole useful travel is downward. That is
+published honestly: `isp_get_knob_caps` reports `min 0, max 64, neutral 64`, and
+the neutral is read from the loaded tuning rather than assumed. 6C's own tuning
+SOP advises against the headroom it does publish (above 64 moving objects
+smear), so the two SoCs offer nominally the same control.
+
+Measured on an SSC30KQ/gc4653 at 42 dB gain and 50 ms, static dark scene, AE
+pinned (`total_gain` 131072 throughout). Twelve 2560×1440 NV12 snapshots per
+setting, per-pixel temporal standard deviation over a 100×2560 band, in 8-bit
+luma DN. The sweep was run twice in opposite orders as a drift control:
+
+| `temper` | temporal σ (down) | temporal σ (up) | vs the tuning | first-order IIR prediction |
+|---|---|---|---|---|
+| 64 (tuning) | 1.78 | 1.90 | — | — |
+| 48 | 8.36 | 8.20 | 4.5× | 9.27 |
+| 32 | 12.57 | 12.52 | 6.8× | 14.16 |
+| 16 | 18.05 | 18.05 | 9.8× | 19.00 |
+| 8 | 21.15 | 21.26 | 11.5× | 21.64 |
+| 0 (off) | 24.52 | 24.54 | 13.3× | 24.53 |
+
+The two passes agree to within 2%, and the prediction column is
+`σ₀·√((1−α)/(1+α))` for a first-order recursive filter with `α = TfStr/64` —
+which the measurement follows within about 10% across the range. That is an
+independent confirmation of what the field is: a unity-referenced temporal blend
+weight where 64 means full weight on the history, not an arbitrary 0..64 scale.
+
+The cost side, same scene, main stream at fixed QP: 15.6 Mbps at `temper` 64
+against 300 Mbps at 0. Temporal NR is what makes a noisy sensor encodable at
+this gain, which is the practical reading of the table above.
+
+Note the asymmetry this leaves in the schema. `rcd` bounds `temper` at 0..255
+for every platform, and the HAL refuses anything above 64 here (127 on 6C), so a
+client that ignores the published caps and sends 200 gets `RSS_ERR_INVAL`. The
+caps are the authority; the schema is only an envelope.
 
 ### `ae_target`, and the AE target curve
 
