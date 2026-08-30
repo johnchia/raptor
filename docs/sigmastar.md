@@ -190,6 +190,20 @@ Three consequences worth knowing:
   0x0 and killed a working snapshot port. Both it and `MI_VPE_SetPortCrop`
   are deliberately not bound in `i6_vpe.h`.
 
+### Two JPEG faults found while measuring this
+
+Both turned up using `/snap` as a measurement instrument, and neither is
+fixed here.
+
+- **`[jpeg] quality` does not reach the encoder on Infinity6E.** Moving it
+  from the default 75 to 95 changed the snapshot by 2% -- 215 kB against 219 kB
+  on an unchanged scene -- and 100 changed nothing again. Whatever the JPEG
+  channel is quantising with, it is not this key.
+- **`quality = 100` breaks snapshots on Infinity6C.** `/snap` answers 503 for
+  every request until the value is rolled back; the channel is created and
+  reports 5 fps, so it is the encoder rejecting the parameter rather than the
+  pipeline failing to build. Rolling back to 95 restores it immediately.
+
 ## Derived ABI, and the evidence for it
 
 Several structures are not in any header and were derived by disassembling the
@@ -518,6 +532,17 @@ weight where 64 means full weight on the history, not an arbitrary 0..64 scale.
 The cost side, same scene, main stream at fixed QP: 15.6 Mbps at `temper` 64
 against 300 Mbps at 0. Temporal NR is what makes a noisy sensor encodable at
 this gain, which is the practical reading of the table above.
+
+On Infinity6C the same knob runs to 127, and the headroom above unity is
+measured and not usable. At 96 and 127 an IMX335 board's static scene does get
+quieter -- sigma 1.3 to 2.7 against 3.0 at the tuning's 63 -- but the picture
+stops following the world. An `ae_comp` step that moved the sensor's gain from
+182013 to 156029, the same step that moves the picture 2.9 DN at 63 with 84% of
+it inside 5 s, moved it **0.18 DN in 120 seconds** at 127. That is a freeze
+frame rather than denoising, which is what the vendor's "moving objects smear"
+warning looks like on a static scene, and it is why 6E's hard ceiling at unity
+costs nothing. At either SoC's own tuning value the filter adds no meaningful
+lag.
 
 Note the asymmetry this leaves in the schema. `rcd` bounds `temper` at 0..255
 for every platform, and the HAL refuses anything above 64 here (127 on 6C), so a
