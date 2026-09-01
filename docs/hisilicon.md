@@ -47,7 +47,7 @@ configured 25 on both, with no dropped or reset frames and no errors.
 | Snapshots | duty-cycled MJPEG channel: receive and bind live in `enc_start`/`enc_stop`, because an idle-but-bound destination queues VPSS pictures until VB pool 0 is gone. Quality is the FIXQP qfactor via `enc_set_jpeg_qp` |
 | Orientation | `hflip` / `vflip` at the sensor, through `pfnMirrorFlip` |
 | ISP tuning | `/etc/sensors/iq/<sensor>.ini` applied on the first encoded frame — the static sections plus the dynamic ones at their daylight column, via get-modify-set on `HI_MPI_ISP_Set*`. `$RSS_ISP_TUNING` overrides the path. `static_3dnr` (VPSS NRX) and the per-ISO engines are deferred; `hal_isp.c` says why |
-| Audio | one AI device against the inner codec: `HI_MPI_AI_*` for capture, `/dev/acodec` ioctls for volume/gain/mute. rad encodes in software; VQE/AENC/AO stay absent with reasons in `hal_audio.c` |
+| Audio | one AI device against the inner codec: `HI_MPI_AI_*` for capture, `/dev/acodec` ioctls for volume/gain/mute. rad encodes in software; VQE/AENC/AO stay absent with reasons in `hal_audio.c`. Mic gain clamps at 15 — the driver accepts 16 but that value falls out of the 4-bit field and all but mutes the preamp; `v4_aud.h` records the measurement. `/dev/acodec` is exclusive-open, so nothing else can inspect the codec while rad holds it |
 
 ## Not written yet
 
