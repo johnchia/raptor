@@ -40,10 +40,11 @@ configured 25 on both, with no dropped or reset frames and no errors.
 | Goke sensor shims | the six `GK_API_*` forwarders eight of the 34 shipped sensor drivers need |
 | Sensor discovery | `/etc/sensors/*.ini` — driver name, object symbol, lane map, RAW depth, Bayer order, VI device attribute. No sensor table in the code |
 | MIPI receiver | `/dev/hi_mipi` ioctls in the vendor's own order, resets bracketing `SET_DEV_ATTR` |
-| VI | device → pipe → channel, `VI_OFFLINE_VPSS_ONLINE` |
+| VI | device → pipe → channel, `VI_OFFLINE_VPSS_OFFLINE` — the mode the VI→VPSS bind actually describes; the samples' online modes carry nothing here |
 | ISP | 3A registration, `MemInit`/`SetPubAttr`/`Init`, and the `HI_MPI_ISP_Run` thread |
 | VPSS | one group with 3DNR on, channels as framesources |
-| VENC | H.264, H.265, JPEG, MJPEG; CBR/VBR/FIXQP; bind, poll, collect, IDR, runtime bitrate/GOP/fps |
+| VENC | H.264, H.265, MJPEG (JPEG rides it — PT_JPEG refuses the attr set and divinus never uses it); CBR/VBR/FIXQP; bind, poll, collect, IDR, runtime bitrate/GOP/fps |
+| Snapshots | duty-cycled MJPEG channel: receive and bind live in `enc_start`/`enc_stop`, because an idle-but-bound destination queues VPSS pictures until VB pool 0 is gone. Quality is the FIXQP qfactor via `enc_set_jpeg_qp` |
 | Orientation | `hflip` / `vflip` at the sensor, through `pfnMirrorFlip` |
 
 ## Not written yet
