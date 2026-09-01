@@ -46,9 +46,24 @@ configured 25 on both, with no dropped or reset frames and no errors.
 | VENC | H.264, H.265, MJPEG (JPEG rides it — PT_JPEG refuses the attr set and divinus never uses it); CBR/VBR/FIXQP; bind, poll, collect, IDR, runtime bitrate/GOP/fps |
 | Snapshots | duty-cycled MJPEG channel: receive and bind live in `enc_start`/`enc_stop`, because an idle-but-bound destination queues VPSS pictures until VB pool 0 is gone. Quality is the FIXQP qfactor via `enc_set_jpeg_qp` |
 | Orientation | `hflip` / `vflip` at the sensor, through `pfnMirrorFlip` |
-| Frame rate ceiling | ~20 fps at 5 MP — a limit of the part, not the pipeline. Measured 20.79 fps over a 7.5 h soak at 2592x1944 (1080p reaches 24.9). Asking for 25 in the config is silently capped |
+| Frame rate | VI needs seven VB blocks in pool 0 at 5 MP; with six it loses ~5% of frames to `VbFail` and the pipe drops to 25-26 fps, which VPSS's source/destination ratio then scales again — that is what made a request of 20 fps produce 17. With seven, VI holds 30 and 20 fps means 19.7. Watch `/proc/umap/vi`'s `LostFrame`/`VbFail`, not just `/proc/umap/vb` |
 | ISP tuning | `/etc/sensors/iq/<sensor>.ini` applied on the first encoded frame — the static sections plus the dynamic ones at their daylight column, via get-modify-set on `HI_MPI_ISP_Set*`. `$RSS_ISP_TUNING` overrides the path. `static_3dnr` (VPSS NRX) and the per-ISO engines are deferred; `hal_isp.c` says why |
 | Audio | one AI device against the inner codec: `HI_MPI_AI_*` for capture, `/dev/acodec` ioctls for volume/gain/mute. rad encodes in software; VQE/AENC/AO stay absent with reasons in `hal_audio.c`. Mic gain clamps at 15 — the driver accepts 16 but that value falls out of the 4-bit field and all but mutes the preamp; `v4_aud.h` records the measurement. `/dev/acodec` is exclusive-open, so nothing else can inspect the codec while rad holds it |
+
+### Encoder quality: QP bounds are not wired
+
+`min_qp`/`max_qp` reach this backend and go nowhere. On gen4 they are not part
+of the channel attribute — they live in `VENC_RC_PARAM_S`, set through
+`HI_MPI_VENC_SetRcParam`, which nothing here calls. The driver's own 24..51
+applies instead, which lets I-frames run away (1 MB each at `gop = 100`, against
+a 625 KB whole-second budget at 5 Mbps/20 fps) and lets P-frames collapse. The
+visible result is a picture that is worst at every keyframe and recovers over
+the GOP. The vendor streamer bounds 28..42 on the same board and stays flat.
+
+The same struct carries `u32MinIprop`/`u32MaxIprop` (a direct cap on I-frame
+size) and `stSceneChangeDetect` — the latter worth ruling out against a second
+defect, where a short GOP emits two or three IDRs per boundary with no consumer
+requesting them (`gop = 40` and `60` do, `gop = 100` does not).
 
 ## Not written yet
 
