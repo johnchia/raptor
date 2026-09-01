@@ -191,6 +191,20 @@ for arg in "$@"; do
             echo "  make BOARD=ssc30kq_raptor RAPTOR_SRCDIR=/path/to/raptor-repos"
             exit 1
             ;;
+        hi3516ev200|hi3516ev300)
+            # Same reason as the SigmaStar arm above, plus one of its own:
+            # gen4 userland is soft-float musleabi, and every ARM toolchain
+            # this script could reach for is hard-float. Fetching the wrong
+            # one would produce a daemon that links and runs and then passes
+            # garbage floats into MPI, which is a worse failure than not
+            # building at all.
+            echo "$arg is HiSilicon/ARM. This script bootstraps an Ingenic"
+            echo "mipsel toolchain and SDK, and has nothing to fetch for it."
+            echo ""
+            echo "Build against an openipc-firmware output instead:"
+            echo "  ./build.sh $arg /path/to/openipc-firmware/output"
+            exit 1
+            ;;
         --no-tls)    OPT_TLS= ;;
         --alt)       OPT_ALT=1 ;;
         --no-aac)    OPT_AAC= ;;

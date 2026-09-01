@@ -9,6 +9,7 @@
 #   PLATFORM       - Target SoC:
 #                      Ingenic   - T10, T20, T21, T23, T30, T31, T32, T33, T40, T41, A1
 #                      SigmaStar - INFINITY6E, INFINITY6B0, INFINITY6C
+#                      HiSilicon - HI3516EV200, HI3516EV300
 #   CROSS_COMPILE  - Cross-compiler prefix
 #
 ifeq ($(filter clean distclean build,$(MAKECMDGOALS)),)
@@ -23,14 +24,42 @@ IPC_DIR    := ../raptor-ipc
 COMMON_DIR := ../raptor-common
 COMPY_DIR  := ../compy
 
-# Vendor selection — must match raptor-hal's Makefile. Ingenic parts link the
-# single IMP library; SigmaStar parts link no vendor library at all, reaching
-# MI through dlopen (see raptor-hal/src/star/i6_common.h).
+# Vendor and architecture selection — the platform lists must stay in step with
+# raptor-hal's, which now carries them in mk/sigmastar.mk and mk/hisilicon.mk
+# rather than in its Makefile. Two files, one invariant: a PLATFORM listed here
+# and not there builds the wrong backend.
+#
+# Ingenic parts link the single IMP library. SigmaStar and HiSilicon parts link
+# no vendor library at all, reaching MI and HiMPP through dlopen (see
+# raptor-hal/sigmastar-headers/infinity6e/i6_common.h and
+# raptor-hal/src/hal_internal_hisilicon.h).
+INGENIC_PLATFORMS   := T10 T20 T21 T23 T30 T31 T32 T33 T40 T41 A1
 SIGMASTAR_PLATFORMS := INFINITY6E INFINITY6B0 INFINITY6C
-ifneq ($(filter $(PLATFORM),$(SIGMASTAR_PLATFORMS)),)
-VENDOR := sigmastar
-else
-VENDOR := ingenic
+
+# Split by MPP generation, because V5 (CV610) is a different ABI from V4 and
+# will want its own backend directory. The union is what VENDOR keys on.
+HISI_GEN4_PLATFORMS := HI3516EV200 HI3516EV300
+HISI_GEN5_PLATFORMS :=
+HISILICON_PLATFORMS := $(strip $(HISI_GEN4_PLATFORMS) $(HISI_GEN5_PLATFORMS))
+
+VALID_PLATFORMS := $(INGENIC_PLATFORMS) $(SIGMASTAR_PLATFORMS) $(HISILICON_PLATFORMS)
+
+# No default clause. The old two-way form treated every unlisted PLATFORM as
+# Ingenic, so a typo built a MIPS-flavoured configuration for an ARM part and
+# said nothing until the link failed somewhere unhelpful.
+VENDOR := $(strip \
+  $(if $(filter $(PLATFORM),$(INGENIC_PLATFORMS)),ingenic) \
+  $(if $(filter $(PLATFORM),$(SIGMASTAR_PLATFORMS)),sigmastar) \
+  $(if $(filter $(PLATFORM),$(HISILICON_PLATFORMS)),hisilicon))
+
+ARCH := $(strip \
+  $(if $(filter $(PLATFORM),$(INGENIC_PLATFORMS)),mips) \
+  $(if $(filter $(PLATFORM),$(SIGMASTAR_PLATFORMS) $(HISILICON_PLATFORMS)),arm))
+
+ifeq ($(filter clean distclean build,$(MAKECMDGOALS)),)
+ifeq ($(VENDOR),)
+$(error Invalid PLATFORM=$(PLATFORM). Valid: $(VALID_PLATFORMS))
+endif
 endif
 
 # Toolchain
@@ -130,11 +159,7 @@ endif
 # The build dir is arch-suffixed because compy is a separate CMake project
 # built per target; build-standalone.sh overrides COMPY_BUILD/LIB_COMPY_FILE
 # outright, so this only sets the default for in-tree builds.
-ifeq ($(VENDOR),sigmastar)
-COMPY_BUILD  ?= $(CURDIR)/$(COMPY_DIR)/build-arm
-else
-COMPY_BUILD  ?= $(CURDIR)/$(COMPY_DIR)/build-mips
-endif
+COMPY_BUILD  ?= $(CURDIR)/$(COMPY_DIR)/build-$(ARCH)
 COMPY_CFLAGS := -I$(CURDIR)/$(COMPY_DIR)/include \
                 -I$(COMPY_BUILD)/_deps/slice99-src \
                 -I$(COMPY_BUILD)/_deps/datatype99-src \
@@ -291,15 +316,26 @@ endif
 # than failing, and the capture path never calls them — both references take
 # raw PCM and encode in software. libmi_ao is not needed at all; nothing in
 # scope plays audio out.
-ifeq ($(VENDOR),sigmastar)
-VENDOR_LIBS :=
-else
-VENDOR_LIBS := -limp -lalog
-endif
+# Keyed off VENDOR rather than written as an if/else, so that a vendor which
+# links nothing needs no entry at all.
+VENDOR_LIBS_ingenic := -limp -lalog
+VENDOR_LIBS := $(VENDOR_LIBS_$(VENDOR))
+
+# HiSilicon's libraries resolve part of their symbol set from the executable's
+# global scope, so the daemon must export its dynamic symbols whether or not a
+# libc shim is in play. Ten symbols need it, measured on a board: the three
+# uClibc-ABI symbols libsecurec.so wants from a musl userland (__ctype_b,
+# __fgetc_unlocked, _stdlib_mb_cur_max) and six GK_API_* forwarders that eight
+# of the shipped libsns_*.so call. __ctype_b is a data relocation bound eagerly
+# when libsecurec.so loads, which is why this cannot be deferred to a dlopen
+# ordering. SHIM_LIB carries --export-dynamic only on the static-shim path, and
+# that path depends on a shim archive being in the sysroot.
+LDFLAGS_VENDOR_hisilicon := -Wl,--export-dynamic
 
 # System libs for HAL-linked daemons
 # Shim must come BEFORE the vendor SDK libs — symbols must be resolved first.
-LDFLAGS_HAL := $(LDFLAGS_SYSROOT) $(SHIM_LIB) $(VENDOR_LIBS) -lpthread -lrt -lm -ldl -latomic
+LDFLAGS_HAL := $(LDFLAGS_SYSROOT) $(SHIM_LIB) $(VENDOR_LIBS) $(LDFLAGS_VENDOR_$(VENDOR)) \
+               -lpthread -lrt -lm -ldl -latomic
 
 # IVS detection libs
 ifeq ($(IVS_DETECT),1)

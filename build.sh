@@ -6,6 +6,7 @@
 #   ./build.sh t20 /path/to/buildroot/output rvd rsd
 #   ./build.sh t31 /path/to/buildroot/output clean
 #   ./build.sh infinity6e /path/to/openipc-firmware/output rod
+#   ./build.sh hi3516ev300 /path/to/openipc-firmware/output
 
 set -e
 
@@ -52,11 +53,18 @@ case "$platform_lc" in
     infinity6c) PLATFORM=INFINITY6C ;;
     ssc377|ssc377d|ssc377de|ssc377qe|ssc378de|ssc378qe)
         PLATFORM=INFINITY6C; SOC_MODEL=$platform_lc ;;
+    # HiSilicon gen4. No family/part split here: the part IS the platform,
+    # because unlike SigmaStar the chip ID is readable and part-specific
+    # (0x12020EE0 reads 0x3516E300 on an EV300), so nothing has to be passed
+    # in that the board cannot answer for itself.
+    hi3516ev200) PLATFORM=HI3516EV200 ;;
+    hi3516ev300) PLATFORM=HI3516EV300 ;;
     *)
         echo "Usage: $0 <platform> <br_output> [target...]"
         echo ""
         echo "Families: t10 t20 t21 t23 t30 t31 t32 t33 t40 t41 a1"
         echo "          infinity6b0 infinity6e infinity6c"
+        echo "          hi3516ev200 hi3516ev300"
         echo ""
         echo "Parts. Naming one of these instead of its family fills in the"
         echo "per-part encoder ceilings, which a family build leaves unset:"
@@ -73,9 +81,30 @@ case "$platform_lc" in
 esac
 
 # Everything above is Ingenic and mipsel; the Infinity6 families are SigmaStar
-# and ARM. That splits both the sysroot tuple and the compiler prefix, so
-# neither can stay hardcoded below.
+# and ARM, and the Hi3516 parts are HiSilicon and ARM. That splits both the
+# sysroot tuple and the compiler prefix, so neither can stay hardcoded below.
 case "$PLATFORM" in
+    HI3516EV200|HI3516EV300)
+        # Soft-float, and note the tuples: musleabi, NOT musleabihf. This is
+        # the one ARM family here that is not hard-float, so it gets its own
+        # arm rather than a label on Infinity6E's.
+        #
+        # Measured rather than assumed: Tag_ABI_VFP_args is absent from every
+        # binary on a stock OpenIPC hi3516ev300 image -- libmpi, libisp,
+        # libsecurec, the six lib_hi*.so algorithm libraries, all 34
+        # libsns_*.so, and majestic itself -- while Tag_FP_arch reads VFPv4.
+        # The FPU is used; the calling convention is not.
+        #
+        # Getting this wrong is not a link error. A hard-float daemon links,
+        # loads and runs, and hands garbage to every float argument crossing
+        # into MPI. raptor-hal's v4_common.h carries a #error on __ARM_PCS_VFP
+        # so it cannot survive a compile either.
+        SYSROOT_TUPLES="arm-openipc-linux-musleabi arm-buildroot-linux-musleabi \
+                        arm-thingino-linux-musleabi"
+        CROSS_CANDIDATES="arm-openipc-linux-musleabi- arm-buildroot-linux-musleabi- \
+                          arm-linux-musleabi-"
+        CROSS_GLOB="arm"
+        ;;
     INFINITY6E)
         SYSROOT_TUPLES="arm-buildroot-linux-gnueabihf arm-openipc-linux-gnueabihf \
                         arm-thingino-linux-gnueabihf arm-buildroot-linux-musleabihf"

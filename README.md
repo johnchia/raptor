@@ -1,9 +1,9 @@
 # Raptor Streaming System (RSS)
 
-A modular microservice camera streamer for Ingenic and SigmaStar SoCs. Raptor
-replaces the traditional monolithic streamer with independent daemons that
-communicate through POSIX shared-memory ring buffers and Unix domain control
-sockets.
+A modular microservice camera streamer for Ingenic, SigmaStar and HiSilicon
+SoCs. Raptor replaces the traditional monolithic streamer with independent
+daemons that communicate through POSIX shared-memory ring buffers and Unix
+domain control sockets.
 
 ## Why Raptor
 
@@ -186,7 +186,9 @@ toolchain release and an Ingenic SDK version map, neither of which has a
 SigmaStar counterpart. For `infinity6e`, build against an existing Buildroot
 output with `./build.sh infinity6e /path/to/buildroot/output`, or build the
 whole image, which packages raptor itself. Which output, and the overrides that
-tree may need, are in `docs/sigmastar.md`.
+tree may need, are in `docs/sigmastar.md`. The same applies to `hi3516ev200`
+and `hi3516ev300`, whose output tree and toolchain are in
+`docs/hisilicon.md`.
 
 First run downloads the toolchain and all dependencies automatically.
 Output binaries go to `build/`. Options: `--no-tls`, `--no-aac`,
@@ -407,6 +409,7 @@ clocks must be NTP-synced.
 | T41 | IMPVI         | Supported |
 | A1  | VDEC/VENC     | RFS only (no ISP HAL) |
 | SSC30KQ (Infinity6E) | SigmaStar MI | Supported — H.264/H.265 main+sub, audio, OSD, IR-cut day/night |
+| HI3516EV200/EV300 | HiSilicon HiMPP V4 | In progress — full VI→ISP→VPSS→VENC pipeline written, **not yet run on hardware**. No ISP tuning, audio or OSD. See [docs/hisilicon.md](docs/hisilicon.md) |
 
 Platform differences are handled by raptor-hal, which abstracts the SDK
 generations behind a common API. The `PLATFORM` build variable selects the
@@ -419,6 +422,15 @@ rather than another IMP generation: SigmaStar's MI API (`libmi_sys`, `libmi_vpe`
 one binary runs against whichever vendor libraries the image ships. See
 [docs/sigmastar.md](docs/sigmastar.md) for what is implemented, what is
 deliberately stubbed, and what is untested.
+
+`HI3516EV200` and `HI3516EV300` add a third SDK family, HiSilicon's HiMPP V4.0,
+reached the same way: `dlopen` on `libmpi.so`, `libisp.so` and the sensor
+drivers, with no vendor headers at build time and nothing linked. The two parts
+share one backend because they share one MPP build — an EV300 board reports the
+EV200 version string — so the code guards on the generation and never on the
+part. It is also the one ARM platform here whose ABI is **soft-float**:
+`arm-openipc-linux-musleabi`, not `musleabihf`. See
+[docs/hisilicon.md](docs/hisilicon.md).
 
 ## License
 
