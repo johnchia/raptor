@@ -46,6 +46,8 @@ configured 25 on both, with no dropped or reset frames and no errors.
 | VENC | H.264, H.265, MJPEG (JPEG rides it — PT_JPEG refuses the attr set and divinus never uses it); CBR/VBR/FIXQP; bind, poll, collect, IDR, runtime bitrate/GOP/fps |
 | Snapshots | duty-cycled MJPEG channel: receive and bind live in `enc_start`/`enc_stop`, because an idle-but-bound destination queues VPSS pictures until VB pool 0 is gone. Quality is the FIXQP qfactor via `enc_set_jpeg_qp` |
 | Orientation | `hflip` / `vflip` at the sensor, through `pfnMirrorFlip` |
+| ISP tuning | `/etc/sensors/iq/<sensor>.ini` applied on the first encoded frame — the static sections plus the dynamic ones at their daylight column, via get-modify-set on `HI_MPI_ISP_Set*`. `$RSS_ISP_TUNING` overrides the path. `static_3dnr` (VPSS NRX) and the per-ISO engines are deferred; `hal_isp.c` says why |
+| Audio | one AI device against the inner codec: `HI_MPI_AI_*` for capture, `/dev/acodec` ioctls for volume/gain/mute. rad encodes in software; VQE/AENC/AO stay absent with reasons in `hal_audio.c` |
 
 ## Not written yet
 
@@ -53,8 +55,10 @@ Not decisions — unwritten phases. Each returns `RSS_ERR_NOTSUP` through
 `RSS_HAL_CALL`'s NULL guard, so rvd starts, reports what it cannot do, and
 carries on rather than failing partway into a stage that does not exist.
 
-- **ISP tuning** (Phase 3), **audio** (Phase 4), **OSD** (Phase 5),
-  **thermal** (Phase 6).
+- **OSD** (Phase 5), **thermal** (Phase 6). (ISP tuning and audio landed
+  with Phases 3 and 4; the ISP *knob* ops — brightness, contrast, the
+  gain ceilings — remain deferred until the tuning baseline is proven on
+  the board.)
 
 ## Deliberately absent
 
