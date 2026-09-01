@@ -853,13 +853,17 @@ int rvd_pipeline_init(rvd_state_t *st)
 	 * demanding a value nothing reads would put fiction in every config.
 	 * A backend that needs them fails in init with its own error.
 	 */
+	/* Named generically rather than after the /proc/jz/sensor registry:
+	 * that registry is Ingenic's, and on a platform without one the
+	 * message would send a reader looking for a path that cannot exist.
+	 * The procfs read, where there is a procfs, already happened above. */
 	if (!multi_cfg.sensors[0].name[0])
-		RSS_WARN("sensor name not in config and not in "
-			 "/proc/jz/sensor/sensor0/name -- the backend must supply it");
+		RSS_WARN("sensor name not in [sensor] and not auto-detected -- "
+			 "the backend must supply it");
 
 	if (multi_cfg.sensors[0].i2c_addr == 0)
-		RSS_WARN("i2c_addr not in config and not in "
-			 "/proc/jz/sensor/sensor0/i2c_addr -- the backend must not need it");
+		RSS_WARN("i2c_addr not in [sensor] and not auto-detected -- "
+			 "the backend must not need it");
 
 	for (int s = 0; s < multi_cfg.sensor_count; s++) {
 		RSS_DEBUG("sensor%d: %s i2c=0x%02x bus=%d id=%d mclk=%d vin=%d boot=%d", s,
