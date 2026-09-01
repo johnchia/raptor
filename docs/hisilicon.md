@@ -58,9 +58,12 @@ against a second structure, which `hisi_enc_apply_rc_param` now makes after
 `CreateChn` and after every attribute rewrite.
 
 Until it did, the driver's own bounds applied: **24..51**, read back from the
-board. That let I-frames run away (1 MB each at `gop = 100`, against a 625 KB
-whole-second budget at 5 Mbps/20 fps) and P-frames collapse to pay for them,
-giving a picture that was *worst* at every keyframe and recovered over the GOP.
+board. Under those, raptor's I-frames ran away (1 MB each at `gop = 100`, against
+a 625 KB whole-second budget at 5 Mbps/20 fps) and its P-frames collapsed to pay
+for them, giving a picture that was *worst* at every keyframe and recovered over
+the GOP. Setting the bounds removes that -- but see "a mitigation, not the root
+cause" below before reading the wide bounds as the *reason*: majestic runs fine
+on them.
 
 Two things about the structure are worth knowing before touching it:
 
@@ -102,9 +105,36 @@ over 200 frames gives:
 - **bounded:** 5 keyframes, at 21 / 61 / 101 / 141 / 181 -- singles, exactly 40
   apart.
 
-Why bounding the QP suppresses the duplicate is not isolated; the correlation is
-reproducible in both directions and `stSceneChangeDetect` is still the thing to
-rule out first.
+### The bounds are a mitigation, not the root cause
+
+Running the same experiment on majestic settles what the numbers above do not.
+Majestic was reconfigured to raptor's *unbounded* condition on the same board
+and scene -- `minQp: 24`, `maxQp: 51`, and `maxIp` loosened from its shipped 2
+to the driver's 20 -- and it did not care:
+
+| majestic | minQp..maxQp | maxIp | bitrate | I-frame | peak | sawtooth | I-frames/20s |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| shipped | 28..42 | 2 | 5.37 Mbps | 16.88 | 17.34 | 1.02x | 11 |
+| loose QP | 24..51 | 2 | 5.29 Mbps | 16.96 | 17.65 | 1.03x | 11 |
+| loose both | 24..51 | 20 | 5.34 Mbps | 17.42 | 17.93 | 1.03x | 11 |
+| shipped | 28..42 | 2 | 5.16 Mbps | 17.57 | 17.82 | 1.01x | 11 |
+
+Flat at every setting, and never a duplicate keyframe -- 11 I-frames in 20 s at
+`gop = 40`/20 fps is the expected 10, where unbounded raptor gave 19.
+
+So the QP bounds are **not** why raptor sawtoothed. Raptor is sensitive to loose
+bounds and majestic is not, which means something else in raptor's encoder setup
+makes the controller unstable and the bounds merely constrain it enough that the
+difference stops showing. Writing them is still correct -- a configured bound
+that goes nowhere is its own bug, and the measured improvement is real -- but it
+closed the symptom, not the cause.
+
+This also rules out `u32MaxIprop` as the missing lever: majestic is flat at 20,
+the same value raptor runs at.
+
+The leading candidate is `stat_time`, the rate controller's statistics window.
+raptor writes 1 where majestic uses 4, in `hisi_enc_fill_rc`. That is the next
+thing to test, and it is a one-line change.
 
 The same structure carries `u32MinIprop`/`u32MaxIprop` (the driver defaults to
 `1..20` — a direct cap on I-frame size relative to P) and `stSceneChangeDetect`
