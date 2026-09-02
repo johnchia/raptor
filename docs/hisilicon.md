@@ -132,17 +132,34 @@ closed the symptom, not the cause.
 This also rules out `u32MaxIprop` as the missing lever: majestic is flat at 20,
 the same value raptor runs at.
 
-The leading candidate is `stat_time`, the rate controller's statistics window.
-raptor writes 1 where majestic uses 4, in `hisi_enc_fill_rc`. That is the next
-thing to test, and it is a one-line change.
+### The cause was `stat_time`
+
+`stat_time` is the rate controller's statistics window in seconds, in the
+channel attribute rather than the RC parameters. `hisi_enc_fill_rc` wrote 1,
+the vendor sample's value; majestic writes 4. Same board, same scene, bounds
+left unwritten so the driver's 24..51 applies, `gop = 40` at 20 fps:
+
+| `stat_time` | bounds | bitrate | I-frame | peak | sawtooth | I-frames/20 s | IDR pattern (ring, no consumer) |
+|---|---|---|---|---|---|---|---|
+| 1 | driver 24..51 | 5.12 Mbps | 12.14 | 17.43 | **1.64x** | 19 | pairs: 48,49 89,90 130,131 ... |
+| 4 | driver 24..51 | 5.32 Mbps | 17.38 | 17.87 | **1.02x** | 11 | singles 40 apart |
+| 4 | 28..42 | 3.94 Mbps | 17.28 | 17.42 | **1.01x** | 11 | singles 40 apart |
+| 4 | driver 24..51 | 5.36 Mbps | 18.09 | 18.54 | **1.02x** | 11 | singles 40 apart |
+| 1 | driver 24..51 | 5.05 Mbps | 13.11 | 18.73 | **1.71x** | 20 | pairs: 51,52 92,93 133,134 ... |
+
+Both defects -- the sawtooth and the doubled IDRs -- go with the one change,
+and come back when it is reverted. `hisi_enc_fill_rc` now writes 4. The
+`/proc/umap/rc` `IPRatio` column reads 2-4 with `stat_time = 1` and 39-57 with
+4, which fits a window (1 s) shorter than the GOP (2 s) never letting the
+controller account a whole GOP; that mechanism is plausible, not proven -- a
+`gop = 20` cell at `stat_time = 1` would test it.
 
 The same structure carries `u32MinIprop`/`u32MaxIprop` (the driver defaults to
 `1..20` — a direct cap on I-frame size relative to P) and `stSceneChangeDetect`
 (default `bDetectSceneChange = 1`, `bAdaptiveInsertIDRFrame = 0`). Neither is
-written yet. The `Iprop` pair is the next lever if I-frames still overshoot; the
-scene-change pair is what to rule out against a second, separate defect, where a
-short GOP emits two or three IDRs per boundary with no consumer requesting them
-(`gop = 40` and `60` do, `gop = 100` does not).
+written; neither is needed for the defects above. The bounded channel runs at a
+lower bitrate than the unbounded one (3.9 against 5.3 Mbps in the table) because
+the QP floor of 28 leaves bits unspent, which is the trade the bound makes.
 
 ## Not written yet
 
