@@ -392,5 +392,17 @@ The HAL half needs no sysroot at all, because the backend links nothing:
 make -C raptor-hal PLATFORM=HI3516EV300 CROSS_COMPILE=arm-openipc-linux-musleabi-
 ```
 
+The ABI transcriptions in `v4_*.h` pin their offsets with `_Static_assert`, but
+those describe 32-bit ARM EABI and the host test suite defines them away, so
+they only run on a cross-compile. To run them on purpose, with no SDK and no
+sysroot:
+
+```sh
+make -C raptor-hal/tests abi-check-hisi CROSS_COMPILE=arm-openipc-linux-musleabi-
+```
+
+A pass says the headers agree with the offsets probed on the board; unlike the
+SigmaStar checks there is no vendor header to agree with.
+
 `build-standalone.sh` rejects HiSilicon, exactly as it rejects SigmaStar: there
 is no self-contained dependency set for these platforms.
