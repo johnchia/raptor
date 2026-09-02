@@ -48,7 +48,7 @@ configured 25 on both, with no dropped or reset frames and no errors.
 | Orientation | `hflip` / `vflip` at the sensor, through `pfnMirrorFlip` |
 | Frame rate | VI needs seven VB blocks in pool 0 at 5 MP; with six it loses ~5% of frames to `VbFail` and the pipe drops to 25-26 fps, which VPSS's source/destination ratio then scales again — that is what made a request of 20 fps produce 17. With seven, VI holds 30 and 20 fps means 19.7. Watch `/proc/umap/vi`'s `LostFrame`/`VbFail`, not just `/proc/umap/vb` |
 | ISP tuning | `/etc/sensors/iq/<sensor>.ini` applied on the first encoded frame — the static sections plus the dynamic ones at their daylight column, via get-modify-set on `HI_MPI_ISP_Set*`. `$RSS_ISP_TUNING` overrides the path. `static_3dnr` (VPSS NRX) and the per-ISO engines are deferred; `hal_isp.c` says why |
-| Audio | one AI device against the inner codec: `HI_MPI_AI_*` for capture, `/dev/acodec` ioctls for volume/gain/mute. rad encodes in software; VQE/AENC/AO stay absent with reasons in `hal_audio.c`. Mic gain clamps at 15 — the driver accepts 16 but that value falls out of the 4-bit field and all but mutes the preamp; `v4_aud.h` records the measurement. `/dev/acodec` is exclusive-open, so nothing else can inspect the codec while rad holds it. MPP is one system per SoC and rvd's init tears it down first, so restarting rvd destroys rad's AI device; rad notices after about a second of failed reads and reattaches on its own once rvd is back, about 17 s end to end |
+| Audio | one AI device against the inner codec: `HI_MPI_AI_*` for capture, `/dev/acodec` ioctls for volume/gain/mute. rad encodes in software; VQE/AENC/AO stay absent with reasons in `hal_audio.c`. Mono only: HiMPP returns stereo as two planes and the frame contract carries one, so `chn_count = 2` is refused with `RSS_ERR_NOTSUP` rather than delivering the left channel as if it were both. Mic gain clamps at 15 — the driver accepts 16 but that value falls out of the 4-bit field and all but mutes the preamp; `v4_aud.h` records the measurement. `/dev/acodec` is exclusive-open, so nothing else can inspect the codec while rad holds it. MPP is one system per SoC and rvd's init tears it down first, so restarting rvd destroys rad's AI device; rad notices after about a second of failed reads and reattaches on its own once rvd is back, about 17 s end to end |
 
 ### Encoder quality: QP bounds live in a second structure
 
@@ -153,6 +153,13 @@ and come back when it is reverted. `hisi_enc_fill_rc` now writes 4. The
 4, which fits a window (1 s) shorter than the GOP (2 s) never letting the
 controller account a whole GOP; that mechanism is plausible, not proven -- a
 `gop = 20` cell at `stat_time = 1` would test it.
+
+`-1` on either side of `set-qp-bounds` puts the driver's value back on that
+side, and `-1` on both restores the P and I pairs as the driver held them
+before raptor's first write. The values are captured at the first apply per RC
+mode; on this board a fresh rvd reads 24..51 after the teardown in `hal_init`.
+Out-of-range values are refused with `RSS_ERR_INVAL` at runtime, where a config
+value is clamped -- a config is a wish, a control call is an instruction.
 
 The same structure carries `u32MinIprop`/`u32MaxIprop` (the driver defaults to
 `1..20` — a direct cap on I-frame size relative to P) and `stSceneChangeDetect`
