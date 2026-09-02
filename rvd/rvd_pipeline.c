@@ -1323,6 +1323,7 @@ int rvd_pipeline_init(rvd_state_t *st)
 			 * boundary rather than absolute, so this is not ours to
 			 * refuse outright.
 			 */
+			int jpeg_chn = jpeg_chn_base + st->jpeg_count;
 			bool jpeg_def = true;
 			if (caps && caps->max_jpeg_pixels > 0 &&
 			    (uint64_t)st->streams[v].enc_cfg.width *
@@ -1334,8 +1335,32 @@ int rvd_pipeline_init(rvd_state_t *st)
 					 sect, st->streams[v].enc_cfg.width,
 					 st->streams[v].enc_cfg.height, caps->max_jpeg_pixels);
 			}
+			/*
+			 * Snapshot channels are encoder channels, numbered after the
+			 * video streams, and a part with three encoder channels has
+			 * one left for two video streams. The driver refuses the
+			 * fourth (INVALID_CHNID at CreateChn) and the whole pipeline
+			 * init failed on it, so the default moves here as well. The
+			 * number is a driver module parameter on some parts, so a
+			 * config that asks anyway is still allowed to try -- and told
+			 * why it is about to fail if the driver agrees with caps.
+			 */
+			if (caps && caps->max_enc_channels > 0 &&
+			    jpeg_chn >= caps->max_enc_channels) {
+				jpeg_def = false;
+				RSS_INFO("%s: its snapshot channel would be encoder channel %d "
+					 "and this part has %d, so no snapshot channel unless "
+					 "asked for",
+					 sect, jpeg_chn, caps->max_enc_channels);
+			}
 			if (!rss_config_get_bool(cfg, sect, "jpeg", jpeg_def))
 				continue;
+			if (caps && caps->max_enc_channels > 0 &&
+			    jpeg_chn >= caps->max_enc_channels)
+				RSS_WARN("%s: jpeg asked for on encoder channel %d of %d -- "
+					 "expect the create to fail unless the driver was loaded "
+					 "with more channels than the HAL publishes",
+					 sect, jpeg_chn, caps->max_enc_channels);
 
 			int quality = rss_config_get_int(cfg, sect, "jpeg_quality", def_quality);
 			if (quality < 1)
@@ -1347,7 +1372,6 @@ int rvd_pipeline_init(rvd_state_t *st)
 				fps = 1;
 
 			int ji = st->stream_count;
-			int jpeg_chn = jpeg_chn_base + st->jpeg_count;
 
 			st->streams[ji].enc_cfg = (rss_video_config_t){
 				.codec = RSS_CODEC_JPEG,

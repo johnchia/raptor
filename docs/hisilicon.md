@@ -390,13 +390,21 @@ same-generation `libisp.so`; better still,
 `ref/openhisilicon/libraries/sensor/hi3516ev200/` builds 30 of them from source
 under the same licence as raptor.
 
-**There is no `/proc/jz/sensor` equivalent, and there cannot be one**: the
-sensor's identity *is* whichever `libsns_*.so` gets dlopened. So there is nothing
-for the backend to auto-detect and **`[sensor] name` is required in
-`/etc/raptor.conf`**; rvd warns and lets the backend fail if it is missing. On a stock OpenIPC board the name to use is the one three
-other places already agree on — `isp.sensorConfig` in `/etc/majestic.yaml`, the
-`DllFile=` line inside the INI it points at, and U-Boot's `sensor=` environment
-variable.
+**There is no `/proc/jz/sensor` equivalent**: the sensor's identity *is*
+whichever `libsns_*.so` gets dlopened, and the kernel never probes the bus. What
+the kernel side does keep is the name its module loader was given:
+`sys_config.ko` takes a `sensors=` parameter (the vendor's `load3516ev300` and
+OpenIPC's `load_hisilicon` both pass it, OpenIPC from U-Boot's `sensor=`
+variable, which its own autodetect wrote), and a module parameter reads back
+from `/sys/module/<module>/parameters/sensors`. When `[sensor] name` is absent
+from `/etc/raptor.conf` the backend reads that — any module ending in
+`sys_config`, first name of the list, `unknown` counts as none — and logs where
+the name came from. A configured name always wins. With neither, init fails and
+says so; rvd's own warning that the name was not auto-detected still prints
+first, because rvd's detection is the Ingenic procfs read and this one happens
+in the backend. On a stock OpenIPC board the same name is in
+`isp.sensorConfig` in `/etc/majestic.yaml`, the `DllFile=` line inside the INI
+it points at, and U-Boot's `sensor=` variable.
 
 ## The trampolines, and why they live where they do
 
@@ -461,7 +469,13 @@ the SigmaStar side is not.
 From `/proc/umap` on a live 5 MP pipeline, and these are what
 `caps_hisilicon.inc` publishes rather than guesses:
 
-- `VencMaxChnNum = 3` — a driver-level cap, below `RVD_MAX_STREAMS`.
+- `VencMaxChnNum = 3` — a driver-level cap (a module parameter; OpenIPC's
+  `load_hisilicon` passes 3), below `RVD_MAX_STREAMS`. Snapshot channels are
+  encoder channels too, so two video streams leave room for one: rvd defaults
+  `stream1`'s `jpeg` off with a log line saying why, and `/snap.jpg` serves
+  from the main stream's channel. A fourth channel asked for explicitly is
+  refused by the driver with INVALID_CHNID at CreateChn and the pipeline does
+  not start.
 - `VPSS_MAX_PHY_CHN_NUM = 3`, of which **two** can carry a stream. Channel 0 is
   spent on the group's input: `HI_MPI_SYS_Bind` overwrites the destination
   channel with 0 whenever the destination is VPSS, so the VI edge always lands
