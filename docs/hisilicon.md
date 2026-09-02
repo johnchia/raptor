@@ -279,6 +279,15 @@ carries on rather than failing partway into a stage that does not exist.
   temperature would need a vendor register the SDK does not document.
 - The ISP *knob* ops — brightness, contrast, the gain ceilings — remain
   deferred until the tuning baseline is proven on the board.
+- **The night bitrate gap against majestic is open.** With every section of
+  `imx335.ini` applied and the dynamic ones tracking ISO, raptor still
+  spends 7.9 Mbps at QP 42 where majestic spends 5.5 Mbps at QP 29 on the
+  same scene at the same ISO (the tables under "3DNR follows the ISO
+  ladder"). What `/proc/umap/isp` still shows different is not in the file:
+  Bayer-NR `CoarseStr`, parts of the sharpen table, and a DRC strength of
+  300 against the file's 200. Closing it means choosing values majestic
+  carries in its own defaults, not reading them from the INI, and nothing
+  here does that yet.
 
 ## Deliberately absent
 
