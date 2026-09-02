@@ -48,6 +48,7 @@ configured 25 on both, with no dropped or reset frames and no errors.
 | Orientation | `hflip` / `vflip` at the sensor, through `pfnMirrorFlip` |
 | Frame rate | VI needs seven VB blocks in pool 0 at 5 MP; with six it loses ~5% of frames to `VbFail` and the pipe drops to 25-26 fps, which VPSS's source/destination ratio then scales again — that is what made a request of 20 fps produce 17. With seven, VI holds 30 and 20 fps means 19.7. Watch `/proc/umap/vi`'s `LostFrame`/`VbFail`, not just `/proc/umap/vb` |
 | ISP tuning | `/etc/sensors/iq/<sensor>.ini` applied on the first encoded frame — the static sections plus the dynamic ones at their daylight column, via get-modify-set on `HI_MPI_ISP_Set*`. `$RSS_ISP_TUNING` overrides the path. The per-ISO engines for the ISP sections are deferred; `hal_isp.c` says why. `static_3dnr` is not: see the 3DNR section below |
+| OSD | RGN overlays, ARGB1555, attached to the *VENC* channel so each stream carries its own — the region record holds the channel, which is the fix for divinus's every-region-on-channel-0 defect. Registered and attached are separate states: rvd sets attributes before the channel exists, so attach is deferred to the bind, and destroy detaches first (HiMPP refuses to destroy a channel that still carries regions), so a region survives an encoder restart. Eight overlays per channel. No privacy cover: the vendor gives VENC no COVER budget, so `RSS_OSD_COVER` is `NOTSUP` and rvd degrades. `/proc/umap/rgn` shows what is attached where |
 | Audio | one AI device against the inner codec: `HI_MPI_AI_*` for capture, `/dev/acodec` ioctls for volume/gain/mute. rad encodes in software; VQE/AENC/AO stay absent with reasons in `hal_audio.c`. Mono only: HiMPP returns stereo as two planes and the frame contract carries one, so `chn_count = 2` is refused with `RSS_ERR_NOTSUP` rather than delivering the left channel as if it were both. Mic gain clamps at 15 — the driver accepts 16 but that value falls out of the 4-bit field and all but mutes the preamp; `v4_aud.h` records the measurement. `/dev/acodec` is exclusive-open, so nothing else can inspect the codec while rad holds it. MPP is one system per SoC and rvd's init tears it down first, so restarting rvd destroys rad's AI device; rad notices after about a second of failed reads and reattaches on its own once rvd is back, about 17 s end to end |
 
 ### Encoder quality: QP bounds live in a second structure
@@ -205,10 +206,10 @@ Not decisions — unwritten phases. Each returns `RSS_ERR_NOTSUP` through
 `RSS_HAL_CALL`'s NULL guard, so rvd starts, reports what it cannot do, and
 carries on rather than failing partway into a stage that does not exist.
 
-- **OSD** (Phase 5), **thermal** (Phase 6). (ISP tuning and audio landed
-  with Phases 3 and 4; the ISP *knob* ops — brightness, contrast, the
-  gain ceilings — remain deferred until the tuning baseline is proven on
-  the board.)
+- **Thermal** (Phase 6). (ISP tuning, audio and OSD landed with Phases
+  3, 4 and 5; the ISP *knob* ops — brightness, contrast, the gain
+  ceilings — remain deferred until the tuning baseline is proven on the
+  board.)
 
 ## Deliberately absent
 
