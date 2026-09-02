@@ -206,10 +206,13 @@ Not decisions — unwritten phases. Each returns `RSS_ERR_NOTSUP` through
 `RSS_HAL_CALL`'s NULL guard, so rvd starts, reports what it cannot do, and
 carries on rather than failing partway into a stage that does not exist.
 
-- **Thermal** (Phase 6). (ISP tuning, audio and OSD landed with Phases
-  3, 4 and 5; the ISP *knob* ops — brightness, contrast, the gain
-  ceilings — remain deferred until the tuning baseline is proven on the
-  board.)
+- **Thermal: unsupported.** The EV300 kernel exposes no thermal zone and
+  no hwmon device (`/sys/class/thermal` and `/sys/class/hwmon` are empty),
+  so there is nothing for the generic reader to read; the `%soc_temp%`
+  OSD variable renders `--` here. Dropped rather than deferred: a chip
+  temperature would need a vendor register the SDK does not document.
+- The ISP *knob* ops — brightness, contrast, the gain ceilings — remain
+  deferred until the tuning baseline is proven on the board.
 
 ## Deliberately absent
 
