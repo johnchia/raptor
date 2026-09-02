@@ -33,6 +33,34 @@
 /* Synthetic audio clock: sample-count advance slewed toward
  * CLOCK_MONOTONIC. Control law and its history live in rad_clock.c. */
 
+/*
+ * AI read-failure recovery.
+ *
+ * A read that fails without timing out means the device is gone, not that
+ * the capture is quiet. On HiSilicon gen4 that has one dominant cause: MPP's
+ * SYS and VB state is kernel-global, and rvd's video init runs the global
+ * HI_MPI_SYS_Exit/SYS_Init pair, which destroys the AI device rad created in
+ * its own process. Every HI_MPI_AI_GetFrame afterwards returns 0xa0158005
+ * forever -- measured on a Hi3516EV300 -- while a freshly started rad works,
+ * so the device only has to be created again from inside this process.
+ *
+ * The first attempt waits for a burst rather than firing on one bad read: a
+ * single failure can be a hiccup, and tearing the device down for it would
+ * turn a lost chunk into a real gap. RAD_AI_RECOVER_FAILS failures at the
+ * 10ms failure sleep is about a second of silence, which is also about how
+ * long rvd's own init takes -- attempting inside that window would just race
+ * it. After an attempt the retries back off, because the common reason a
+ * reinit does not stick is that the other process is still mid-init.
+ *
+ * The nap between retries is capped well below the backoff so the control
+ * socket, which this same loop polls, keeps answering while the device is
+ * down: `raptorctl rad status` must not block for ten seconds.
+ */
+#define RAD_AI_RECOVER_FAILS	  100	   /* ~1s at the 10ms failure sleep */
+#define RAD_AI_RECOVER_BACKOFF_US 1000000  /* first retry 1s after an attempt */
+#define RAD_AI_RECOVER_MAX_US	  10000000 /* ...doubling to a 10s ceiling */
+#define RAD_AI_RECOVER_POLL_US	  200000   /* nap cap: keeps ctrl responsive */
+
 /* ── AO thread context (needed by ctrl handler for ao-enable/ao-disable) ── */
 
 typedef struct {
@@ -105,6 +133,87 @@ static int rad_fmt_result(char *buf, int bufsz, int ret)
 	char reason[64];
 	snprintf(reason, sizeof(reason), "failed (%d)", ret);
 	return rss_ctrl_resp_error(buf, bufsz, reason);
+}
+
+/*
+ * Assemble the AI config from the live ctrl context.
+ *
+ * One copy for every caller that brings the device up -- ai-enable,
+ * audio-restart and the read loop's recovery -- because the fields that are
+ * easy to forget (the dmic pair) are exactly the ones a board notices.
+ */
+static void rad_audio_cfg_fill(const rad_ctrl_ctx_t *ctx, int sample_rate, rss_audio_config_t *cfg)
+{
+	*cfg = (rss_audio_config_t){
+		.sample_rate = sample_rate,
+		.samples_per_frame = sample_rate / 50, /* 20ms frames */
+		.chn_count = 1,
+		.frame_depth = 20,
+		.ai_vol = ctx->volume,
+		.ai_gain = ctx->gain,
+		.input_type = ctx->input_type,
+		.dmic_count = rss_config_get_int(ctx->cfg, "audio", "dmic_count", 1),
+		.dmic_aec_id = rss_config_get_int(ctx->cfg, "audio", "dmic_aec_id", 0),
+	};
+}
+
+/* Re-apply the analog controls and the effect chain after an audio_init.
+ * audio_init resets the device, so none of this survives one. */
+static void rad_audio_apply_settings(rad_ctrl_ctx_t *ctx)
+{
+	RSS_HAL_CALL(ctx->ops, audio_set_volume, ctx->hal_ctx, ctx->ai_dev, 0, ctx->volume);
+	RSS_HAL_CALL(ctx->ops, audio_set_gain, ctx->hal_ctx, ctx->ai_dev, 0, ctx->gain);
+
+#ifdef RAPTOR_AUDIO_EFFECTS
+	if (ctx->ns_enabled) {
+		int ns_level = rss_config_get_int(ctx->cfg, "audio", "ns_level", RSS_NS_MODERATE);
+		RSS_HAL_CALL(ctx->ops, audio_enable_ns, ctx->hal_ctx, (rss_ns_level_t)ns_level);
+	}
+	if (ctx->hpf_enabled)
+		RSS_HAL_CALL(ctx->ops, audio_enable_hpf, ctx->hal_ctx);
+	if (ctx->agc_enabled) {
+		rss_agc_config_t agc_cfg = {
+			.target_level_dbfs =
+				rss_config_get_int(ctx->cfg, "audio", "agc_target_dbfs", 10),
+			.compression_gain_db =
+				rss_config_get_int(ctx->cfg, "audio", "agc_compression_db", 0),
+		};
+		RSS_HAL_CALL(ctx->ops, audio_enable_agc, ctx->hal_ctx, &agc_cfg);
+	}
+	if (ctx->aec_enabled && ctx->ao_enabled)
+		RSS_HAL_CALL(ctx->ops, audio_enable_aec, ctx->hal_ctx, ctx->ai_dev, 0, 0, 0);
+#endif
+}
+
+/*
+ * Recreate the AI device at the current format: deinit, init, re-apply.
+ * Same three steps audio-restart runs, minus everything that only a format
+ * change needs.
+ *
+ * The codec, the ring and the synthetic clock are deliberately left alone.
+ * Nothing about the stream changed, so consumers keep the ring they are
+ * attached to, and the timeline stays continuous: rad_clock_stamp's own hard
+ * resync inserts a gap of exactly the audio that was lost, once reads are
+ * live-paced again. audio-restart leaves the clock alone for the same reason;
+ * only ai-enable, where the user asked for the silence, restarts it.
+ *
+ * Runs on the read-loop thread. So does rad_ctrl_handler -- the loop polls
+ * the control socket itself via rss_ctrl_accept_and_handle -- so this cannot
+ * race a ctrl-driven audio-restart or ai-disable, and needs no lock. The AO
+ * thread is the only other thread and touches only the AO ops.
+ */
+static int rad_audio_hal_reinit(rad_ctrl_ctx_t *ctx)
+{
+	rss_audio_config_t audio_cfg;
+	rad_audio_cfg_fill(ctx, ctx->sample_rate, &audio_cfg);
+
+	RSS_HAL_CALL(ctx->ops, audio_deinit, ctx->hal_ctx);
+	int ret = RSS_HAL_CALL(ctx->ops, audio_init, ctx->hal_ctx, &audio_cfg);
+	if (ret != RSS_OK)
+		return ret;
+
+	rad_audio_apply_settings(ctx);
+	return RSS_OK;
 }
 
 static int rad_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_size, void *userdata)
@@ -301,47 +410,14 @@ static int rad_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 			return rss_ctrl_resp_ok(resp_buf, resp_buf_size);
 
 		/* Reinit HAL audio input */
-		rss_audio_config_t audio_cfg = {
-			.sample_rate = ctx->sample_rate,
-			.samples_per_frame = ctx->sample_rate / 50,
-			.chn_count = 1,
-			.frame_depth = 20,
-			.ai_vol = ctx->volume,
-			.ai_gain = ctx->gain,
-			.input_type = ctx->input_type,
-			.dmic_count = rss_config_get_int(ctx->cfg, "audio", "dmic_count", 1),
-			.dmic_aec_id = rss_config_get_int(ctx->cfg, "audio", "dmic_aec_id", 0),
-		};
+		rss_audio_config_t audio_cfg;
+		rad_audio_cfg_fill(ctx, ctx->sample_rate, &audio_cfg);
 		int ret = RSS_HAL_CALL(ctx->ops, audio_init, ctx->hal_ctx, &audio_cfg);
 		if (ret != RSS_OK)
 			return rss_ctrl_resp_error(resp_buf, resp_buf_size, "audio_init failed");
 
-		RSS_HAL_CALL(ctx->ops, audio_set_volume, ctx->hal_ctx, ctx->ai_dev, 0, ctx->volume);
-		RSS_HAL_CALL(ctx->ops, audio_set_gain, ctx->hal_ctx, ctx->ai_dev, 0, ctx->gain);
-
-		/* Re-apply audio effects */
-#ifdef RAPTOR_AUDIO_EFFECTS
-		if (ctx->ns_enabled) {
-			int ns_level =
-				rss_config_get_int(ctx->cfg, "audio", "ns_level", RSS_NS_MODERATE);
-			RSS_HAL_CALL(ctx->ops, audio_enable_ns, ctx->hal_ctx,
-				     (rss_ns_level_t)ns_level);
-		}
-		if (ctx->hpf_enabled)
-			RSS_HAL_CALL(ctx->ops, audio_enable_hpf, ctx->hal_ctx);
-		if (ctx->agc_enabled) {
-			rss_agc_config_t agc_cfg = {
-				.target_level_dbfs = rss_config_get_int(ctx->cfg, "audio",
-									"agc_target_dbfs", 10),
-				.compression_gain_db = rss_config_get_int(ctx->cfg, "audio",
-									  "agc_compression_db", 0),
-			};
-			RSS_HAL_CALL(ctx->ops, audio_enable_agc, ctx->hal_ctx, &agc_cfg);
-		}
-		if (ctx->aec_enabled && ctx->ao_enabled)
-			RSS_HAL_CALL(ctx->ops, audio_enable_aec, ctx->hal_ctx, ctx->ai_dev, 0, 0,
-				     0);
-#endif
+		/* Volume, gain and the effect chain */
+		rad_audio_apply_settings(ctx);
 
 		/* Reinit codec */
 		const rad_codec_ops_t *ops = rad_codec_find(ctx->codec_str);
@@ -639,17 +715,8 @@ static int rad_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 		/* 3. Reinit HAL audio (sample rate may have changed) */
 		RSS_HAL_CALL(ctx->ops, audio_deinit, ctx->hal_ctx);
 
-		rss_audio_config_t audio_cfg = {
-			.sample_rate = new_sample_rate,
-			.samples_per_frame = new_sample_rate / 50,
-			.chn_count = 1,
-			.frame_depth = 20,
-			.ai_vol = ctx->volume,
-			.ai_gain = ctx->gain,
-			.input_type = ctx->input_type,
-			.dmic_count = rss_config_get_int(ctx->cfg, "audio", "dmic_count", 1),
-			.dmic_aec_id = rss_config_get_int(ctx->cfg, "audio", "dmic_aec_id", 0),
-		};
+		rss_audio_config_t audio_cfg;
+		rad_audio_cfg_fill(ctx, new_sample_rate, &audio_cfg);
 		int ret = RSS_HAL_CALL(ctx->ops, audio_init, ctx->hal_ctx, &audio_cfg);
 		if (ret != RSS_OK) {
 			RSS_ERROR("audio-restart: audio_init at %dHz failed: %d, restoring %dHz",
@@ -664,32 +731,8 @@ static int rad_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 			return rss_ctrl_resp_error(resp_buf, resp_buf_size, "audio_init failed");
 		}
 
-		RSS_HAL_CALL(ctx->ops, audio_set_volume, ctx->hal_ctx, ctx->ai_dev, 0, ctx->volume);
-		RSS_HAL_CALL(ctx->ops, audio_set_gain, ctx->hal_ctx, ctx->ai_dev, 0, ctx->gain);
-
-		/* 4. Re-apply audio effects */
-#ifdef RAPTOR_AUDIO_EFFECTS
-		if (ctx->ns_enabled) {
-			int ns_level =
-				rss_config_get_int(ctx->cfg, "audio", "ns_level", RSS_NS_MODERATE);
-			RSS_HAL_CALL(ctx->ops, audio_enable_ns, ctx->hal_ctx,
-				     (rss_ns_level_t)ns_level);
-		}
-		if (ctx->hpf_enabled)
-			RSS_HAL_CALL(ctx->ops, audio_enable_hpf, ctx->hal_ctx);
-		if (ctx->agc_enabled) {
-			rss_agc_config_t agc_cfg = {
-				.target_level_dbfs = rss_config_get_int(ctx->cfg, "audio",
-									"agc_target_dbfs", 10),
-				.compression_gain_db = rss_config_get_int(ctx->cfg, "audio",
-									  "agc_compression_db", 0),
-			};
-			RSS_HAL_CALL(ctx->ops, audio_enable_agc, ctx->hal_ctx, &agc_cfg);
-		}
-		if (ctx->aec_enabled && ctx->ao_enabled)
-			RSS_HAL_CALL(ctx->ops, audio_enable_aec, ctx->hal_ctx, ctx->ai_dev, 0, 0,
-				     0);
-#endif
+		/* 4. Volume, gain and the effect chain */
+		rad_audio_apply_settings(ctx);
 
 		/* 5. Init new codec — restore old on failure */
 		bool codec_switched = true;
@@ -701,15 +744,8 @@ static int rad_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 			/* Restore HAL to old sample rate before restoring codec */
 			if (new_sample_rate != old_sample_rate) {
 				RSS_HAL_CALL(ctx->ops, audio_deinit, ctx->hal_ctx);
-				rss_audio_config_t restore_cfg = {
-					.sample_rate = old_sample_rate,
-					.samples_per_frame = old_sample_rate / 50,
-					.chn_count = 1,
-					.frame_depth = 20,
-					.ai_vol = ctx->volume,
-					.ai_gain = ctx->gain,
-					.input_type = ctx->input_type,
-				};
+				rss_audio_config_t restore_cfg;
+				rad_audio_cfg_fill(ctx, old_sample_rate, &restore_cfg);
 				if (RSS_HAL_CALL(ctx->ops, audio_init, ctx->hal_ctx,
 						 &restore_cfg) != RSS_OK) {
 					RSS_FATAL("audio-restart: HAL restore to %dHz failed",
@@ -1301,6 +1337,12 @@ int main(int argc, char **argv)
 	uint64_t frame_count = 0;
 	int64_t last_stats = rss_timestamp_us();
 
+	/* AI read-failure recovery state -- see the RAD_AI_RECOVER_* block */
+	int ai_fail_count = 0;	     /* consecutive non-timeout read failures */
+	bool ai_in_recovery = false; /* an attempt has been made, none has stuck */
+	int64_t ai_backoff_us = RAD_AI_RECOVER_BACKOFF_US;
+	int64_t ai_next_attempt_us = 0;
+
 	while (*dctx.running) {
 		/* Check control socket (non-blocking) */
 		if (ctrl) {
@@ -1317,6 +1359,12 @@ int main(int argc, char **argv)
 		}
 
 		if (ctrl_ctx.ai_disabled) {
+			/* The user asked for silence, so a dead device is the
+			 * expected state: no reads, and no recovery either.
+			 * Clear the burst state so ai-enable starts fresh. */
+			ai_fail_count = 0;
+			ai_in_recovery = false;
+			ai_backoff_us = RAD_AI_RECOVER_BACKOFF_US;
 			usleep(50000);
 			continue;
 		}
@@ -1326,10 +1374,67 @@ int main(int argc, char **argv)
 		if (ret != RSS_OK) {
 			if (ret == RSS_ERR_TIMEOUT)
 				continue;
-			RSS_WARN("audio_read_frame failed: %d", ret);
-			usleep(10000);
+
+			/* Warn on the leading edge only. The old per-failure
+			 * warn wrote a hundred identical lines a second for as
+			 * long as the device stayed dead, which on gen4 is
+			 * until someone restarts rad. */
+			if (ai_fail_count == 0)
+				RSS_WARN("audio_read_frame failed: %d", ret);
+			ai_fail_count++;
+
+			/* First attempt on the failure burst; every attempt
+			 * after that on the backoff clock, because a reinit
+			 * that returned OK is not proof that reads work. */
+			int64_t fail_now = rss_timestamp_us();
+			bool attempt_due = ai_in_recovery ? fail_now >= ai_next_attempt_us
+							  : ai_fail_count >= RAD_AI_RECOVER_FAILS;
+			if (attempt_due) {
+				if (!ai_in_recovery) {
+					RSS_WARN("audio input dead: %d consecutive read failures "
+						 "(last %d), reinitialising",
+						 ai_fail_count, ret);
+					ai_in_recovery = true;
+				}
+
+				int rret = rad_audio_hal_reinit(&ctrl_ctx);
+
+				int64_t wait_us = ai_backoff_us;
+				ai_next_attempt_us = rss_timestamp_us() + wait_us;
+				ai_backoff_us *= 2;
+				if (ai_backoff_us > RAD_AI_RECOVER_MAX_US)
+					ai_backoff_us = RAD_AI_RECOVER_MAX_US;
+
+				if (rret == RSS_OK) {
+					RSS_INFO("audio input reinitialised at %d Hz",
+						 ctrl_ctx.sample_rate);
+					continue; /* read again straight away */
+				}
+				RSS_ERROR("audio input reinit failed: %d, retry in %d ms", rret,
+					  (int)(wait_us / 1000));
+			}
+
+			/* Idle until the next attempt is due rather than
+			 * hammering a device that is gone -- but in naps short
+			 * enough that the control socket above stays served. */
+			if (ai_in_recovery) {
+				int64_t nap_us = ai_next_attempt_us - rss_timestamp_us();
+				if (nap_us > RAD_AI_RECOVER_POLL_US)
+					nap_us = RAD_AI_RECOVER_POLL_US;
+				if (nap_us > 0)
+					usleep((useconds_t)nap_us);
+			} else {
+				usleep(10000);
+			}
 			continue;
 		}
+
+		if (ai_in_recovery) {
+			RSS_INFO("audio capture resumed after %d failed reads", ai_fail_count);
+			ai_in_recovery = false;
+		}
+		ai_fail_count = 0;
+		ai_backoff_us = RAD_AI_RECOVER_BACKOFF_US;
 
 		int samples = frame.length / 2;
 		int max_samples = ctrl_ctx.sample_rate / 50; /* 20ms */
