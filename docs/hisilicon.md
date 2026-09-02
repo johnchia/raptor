@@ -195,10 +195,31 @@ scene, a minute apart:
 
 The driver's view of what landed is `/proc/umap/vpss`, "VPSS GPR0 3DNR PARAM".
 
-The night control is not like-for-like yet: on the same scene majestic
-streamed 1.9 Mbps against raptor's 14 Mbps over 20 s, but majestic had let AE
-drop the sensor to 10 fps (slow shutter) where raptor held 30. That fps policy
-is a separate item.
+The night control, like for like. Majestic's default lets AE slow the shutter
+(`slowShutter: low`, 10 fps at 13.5k lines); with `slowShutter: disabled` it
+holds the sensor at 30 fps and one frame of exposure, which is what raptor does,
+and the two land on the same ISO. Same scene, 20 s each, 2592x1944 H.265 VBR
+5 Mbps:
+
+| | sensor fps | lines | ISO | bitrate | QP |
+|---|---|---|---|---|---|
+| majestic, slowShutter disabled | 30 | 4492 | 12058 | 5.5 Mbps | 29 |
+| raptor | 30 | 4492 | 11733 | 12.3 Mbps | 42 (ceiling) |
+
+So the 3DNR ladder closed most of the gap and not all of it: raptor still needs
+twice the bits at its QP ceiling. A diff of `/proc/umap/isp` under the two says
+where to look next. The 3DNR rung is the same ladder rung. DRC strength is 512
+under raptor and 300 under majestic; raptor applies `dynamic_linear_drc` at its
+daylight column, and 512 is that column, where the file's ISO 12800 column is
+lower. The sharpen and Bayer-NR values differ as well, and not as one table read
+at another ISO. Which of these carries the bitrate is not measured. The engine
+that now tracks ISO for 3DNR is the natural place to drive the dynamic ISP
+sections too.
+
+Majestic's AE ceiling, for the record: the shipped route runs to 83 ms, and
+raptor applies it, yet raptor's AE stops at one frame; the one exposure field
+raptor never writes is the exposure attribute's time range, left at the driver's
+default. Slow shutter is out of scope here.
 
 ## Not written yet
 
