@@ -469,13 +469,19 @@ the SigmaStar side is not.
 From `/proc/umap` on a live 5 MP pipeline, and these are what
 `caps_hisilicon.inc` publishes rather than guesses:
 
-- `VencMaxChnNum = 3` — a driver-level cap (a module parameter; OpenIPC's
-  `load_hisilicon` passes 3), below `RVD_MAX_STREAMS`. Snapshot channels are
-  encoder channels too, so two video streams leave room for one: rvd defaults
-  `stream1`'s `jpeg` off with a log line saying why, and `/snap.jpg` serves
-  from the main stream's channel. A fourth channel asked for explicitly is
-  refused by the driver with INVALID_CHNID at CreateChn and the pipeline does
-  not start.
+- `VencMaxChnNum = 3` — a driver-level cap, below `RVD_MAX_STREAMS`, and a
+  module parameter: OpenIPC's `load_hisilicon` passes 3, the vendor's load
+  script passes nothing, and the driver creates a fourth channel without
+  complaint when loaded with 4 (measured: main, sub and a snapshot channel
+  for each, all four created). The HAL reads the parameter back from
+  `/sys/module/<venc module>/parameters/VencMaxChnNum` in `hal_init` and
+  publishes that as `max_enc_channels`, so caps say what this image loaded.
+  Snapshot channels are encoder channels too, and with 3 two video streams
+  leave room for one: rvd defaults `stream1`'s `jpeg` off with a log line
+  saying why, and `/snap.jpg` serves from the main stream's channel. A fourth
+  channel asked for explicitly on a 3-channel load is refused by the driver
+  with INVALID_CHNID at CreateChn and the pipeline does not start. The
+  openipc-raptor image loads the module with 4.
 - `VPSS_MAX_PHY_CHN_NUM = 3`, of which **two** can carry a stream. Channel 0 is
   spent on the group's input: `HI_MPI_SYS_Bind` overwrites the destination
   channel with 0 whenever the destination is VPSS, so the VI edge always lands
