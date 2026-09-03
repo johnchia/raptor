@@ -51,7 +51,7 @@ configured 25 on both, with no dropped or reset frames and no errors.
 | Image knobs | `brightness` and `contrast` on the CSC (`ISP_CSC_ATTR_S` luma/contrast, 0..100, 50 is unity); `ae_comp` on `stAuto.u8Compensation` (0..255, neutral is whatever the tuning left, learned at each load); `drc_strength` pins `ISP_DRC_ATTR_S` in manual mode (0..1023) and holds the `[dynamic_linear_drc]` engine's column while pinned, `auto` handing it back. Every set is re-applied after each tuning load, because the load rewrites the attributes two of them live in. `isp_get_knob_caps` reports the units and neutrals; `raptorctl rvd get-isp` shows them |
 | Sensor rate | `[sensor] fps` overrides the mode INI's `Isp_FrameRate`: `isp_set_sensor_fps` is a get-modify-set of the ISP public attribute's `f32FrameRate` on the running pipe (the sensor driver's fps callback reprograms VMAX from it), and `isp_get_sensor_fps` reads it back. The 5 MP IMX335 INI said 30; the EV300 encodes 5 MP at 20, and at 30 VI lost ~9% of frames to `VbFail` even with the stream at 25. OpenIPC's `imx335_i2c_5M.ini` now says 20 (and `raw_bitness=10`, which is what the sensor has always sent), so the override is a preference rather than a correction |
 | Frame rate | VI needs seven VB blocks in pool 0 at 5 MP; with six it loses ~5% of frames to `VbFail` and the pipe drops to 25-26 fps, which VPSS's source/destination ratio then scales again — that is what made a request of 20 fps produce 17. With seven, VI holds 30 and 20 fps means 19.7. Watch `/proc/umap/vi`'s `LostFrame`/`VbFail`, not just `/proc/umap/vb` |
-| ISP tuning | `/usr/share/raptor/iq/<sensor>.ini` (an override; raptor installs nothing there) or else the image's `/etc/sensors/iq/<sensor>.ini`, applied on the first encoded frame — the static sections (`static_saturation` included, through lib_hiawb's `HI_MPI_ISP_SetSaturationAttr`) via get-modify-set on `HI_MPI_ISP_Set*`, the dynamic ones (`dynamic_linear_drc`, `dynamic_dehaze`, `dynamic_gamma`) and `static_3dnr` by engines that follow AE's ISO once a second (`hal_dyn.c`, `hal_nrx.c`). `$RSS_ISP_TUNING` overrides the path. See the three ISO sections below |
+| ISP tuning | `/usr/share/raptor/iq/<sensor>.ini` (an override; raptor installs nothing there) or else the image's `/etc/sensors/iq/<sensor>.ini`, applied on the first encoded frame — the static sections (`static_saturation` included, through lib_hiawb's `HI_MPI_ISP_SetSaturationAttr`) via get-modify-set on `HI_MPI_ISP_Set*`, the dynamic ones (`dynamic_linear_drc`, `dynamic_dehaze`, `dynamic_gamma`) by engines that follow AE's ISO once a second (`hal_dyn.c`), and `static_3dnr` by handing the whole ladder to the VPSS driver to select from per frame, or the same once-a-second engine where it will not take one (`hal_nrx.c`). `$RSS_ISP_TUNING` overrides the path. See the three ISO sections below |
 | OSD | RGN overlays, ARGB1555, attached to the *VENC* channel so each stream carries its own — the region record holds the channel, which is the fix for divinus's every-region-on-channel-0 defect. Registered and attached are separate states: rvd sets attributes before the channel exists, so attach is deferred to the bind, and destroy detaches first (HiMPP refuses to destroy a channel that still carries regions), so a region survives an encoder restart. Eight overlays per channel. No privacy cover: the vendor gives VENC no COVER budget, so `RSS_OSD_COVER` is `NOTSUP` and rvd degrades. `/proc/umap/rgn` shows what is attached where |
 | Audio | one AI device against the inner codec: `HI_MPI_AI_*` for capture, `/dev/acodec` ioctls for volume/gain/mute. rad encodes in software; VQE/AENC/AO stay absent with reasons in `hal_audio.c`. Mono only: HiMPP returns stereo as two planes and the frame contract carries one, so `chn_count = 2` is refused with `RSS_ERR_NOTSUP` rather than delivering the left channel as if it were both. Mic gain clamps at 15 — the driver accepts 16 but that value falls out of the 4-bit field and all but mutes the preamp; `v4_aud.h` records the measurement. `/dev/acodec` is exclusive-open, so nothing else can inspect the codec while rad holds it. MPP is one system per SoC and rvd's init tears it down first, so restarting rvd destroys rad's AI device; rad notices after about a second of failed reads and reattaches on its own once rvd is back, about 17 s end to end |
 
@@ -175,17 +175,53 @@ the QP floor of 28 leaves bits unspent, which is the trade the bound makes.
 
 ### 3DNR follows the ISO ladder
 
-`[static_3dnr]` is not an ISP section. It is nine blocks of VPSS 3DNR
-parameters in HiSilicon's X-param text, one per ISO step from 100 to 12800,
-written to the VPSS group through `HI_MPI_VPSS_SetGrpNRXParam` -- the same
+`[static_3dnr]` is not an ISP section. It is a ladder of VPSS 3DNR parameter
+blocks in HiSilicon's X-param text, one per ISO step -- nine of them in the
+imx307 file, twelve in the image's imx335 -- written to the VPSS group through `HI_MPI_VPSS_SetGrpNRXParam` -- the same
 text PQTools prints and the SDK's `scene_auto` sample reads. `hal_nrx.c` parses
 it with a tag-driven tokenizer (the sample's one big `sscanf` breaks on two tags
-majestic's files add), lays each rung over the driver's own structure, and picks
-the rung by the ISO AE reports, interpolating between neighbours in the sample's
-stop space. The driver's own AUTO form, which would do the picking in the
-kernel, is refused on the EV300 with `0xa0078003`; the sample never uses it
-either. The pick runs once a second off the encoder's frame hook and logs when
-it crosses a rung.
+the shipped files add), and lays each rung over the driver's own structure.
+
+The whole ladder then goes in at once, in the parameter's AUTO form, and the
+driver does the selecting: `VPSS_DRV_PrepareNRxV3Param` reads the ISO from the
+ISP itself and interpolates between the two rungs either side of it, per frame.
+Its rules are param count 1..16, every threshold in 100..3276800, and strictly
+ascending; a ladder that breaks one of them, or a driver that will not take the
+form, falls back to the SDK sample's arrangement -- raptor reads the ISO from AE
+once a second off the encoder's frame hook, blends the two neighbouring rungs in
+the sample's stop space, and writes MANUAL, logging when it crosses a rung.
+
+AUTO used to be refused on the EV300 with `0xa0078003`, and the conclusion drawn
+was that the driver did not implement it. It does. `open_vpss`'s
+`VPSS_NRX_V3_S` is 932 bytes where the SDK header's is 924 -- its `NRc` is 12
+bytes on a 4-byte alignment, the header's 6 on a 1-byte one -- so `stNRXAuto`
+sits at +936 and raptor was writing it at +928. The driver read the
+`pastNRXParam` pointer as `u32ParamNum`, found it outside 1..16, and said
+`ILLEGAL_PARAM`. The eight bytes cost a second thing quietly: `NRc` moved from
++918 to +920, so the file's `TRC` was landing in the driver's `SFC` and its
+`TPC` in the driver's `TFC`, while the file's own `SFC` and `TFC` went into
+padding. `v4_vpss.h` now carries the driver's layout with the disassembly it was
+read from, and `-mode` and `-presfc` -- tags the SDK header does not name in its
+`sscanf` -- have fields to land in.
+
+Measured on the EV300 at ISO 105, same scene, three frames each, on the twelve
+rungs the board's `imx335.ini` carries. The control is the identical binary
+built with the old offsets; the middle column is the fixed binary with AUTO
+held off by a deliberately out-of-range first threshold, so it and the control
+differ only in where `NRc` sits:
+
+| | old offsets, MANUAL | fixed, MANUAL | fixed, AUTO |
+|---|---|---|---|
+| `SetGrpNRXParam` in AUTO | `0xa0078003` | (not attempted) | accepted |
+| Laplacian variance | 4079 | 4236 (+3.9%) | 4360 |
+| mean gradient | 15.51 | 15.82 (+2.0%) | 16.17 |
+
+The first two columns are the `NRc` realignment alone: the rung's `SFC` is 5,
+and the old build was feeding the driver's `SFC` the rung's `TRC` instead,
+over-smoothing a daylight frame. The third is not a clean like-for-like against
+the second -- it ran on the unmodified ladder, whose first threshold is 100 and
+not the 50 that forced the fallback -- so read it as "AUTO lands in the same
+place", not as a measurement of AUTO against MANUAL.
 
 Why it matters is the night. VPSS 3DNR has been on since bring-up, but on the
 driver's default strength. At ISO 12.6k that left the encoder with this, same
