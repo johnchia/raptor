@@ -51,7 +51,7 @@ configured 25 on both, with no dropped or reset frames and no errors.
 | Image knobs | `brightness` and `contrast` on the CSC (`ISP_CSC_ATTR_S` luma/contrast, 0..100, 50 is unity); `ae_comp` on `stAuto.u8Compensation` (0..255, neutral is whatever the tuning left, learned at each load); `drc_strength` pins `ISP_DRC_ATTR_S` in manual mode (0..1023) and holds the `[dynamic_linear_drc]` engine's column while pinned, `auto` handing it back. Every set is re-applied after each tuning load, because the load rewrites the attributes two of them live in. `isp_get_knob_caps` reports the units and neutrals; `raptorctl rvd get-isp` shows them |
 | Sensor rate | `[sensor] fps` overrides the mode INI's `Isp_FrameRate`: `isp_set_sensor_fps` is a get-modify-set of the ISP public attribute's `f32FrameRate` on the running pipe (the sensor driver's fps callback reprograms VMAX from it), and `isp_get_sensor_fps` reads it back. The 5 MP IMX335 INI says 30; the EV300 encodes 5 MP at 20, and at 30 VI lost ~9% of frames to `VbFail` even with the stream at 25 |
 | Frame rate | VI needs seven VB blocks in pool 0 at 5 MP; with six it loses ~5% of frames to `VbFail` and the pipe drops to 25-26 fps, which VPSS's source/destination ratio then scales again — that is what made a request of 20 fps produce 17. With seven, VI holds 30 and 20 fps means 19.7. Watch `/proc/umap/vi`'s `LostFrame`/`VbFail`, not just `/proc/umap/vb` |
-| ISP tuning | `/etc/sensors/iq/<sensor>.ini` applied on the first encoded frame — the static sections via get-modify-set on `HI_MPI_ISP_Set*`, the dynamic ones (`dynamic_linear_drc`, `dynamic_dehaze`, `dynamic_gamma`) and `static_3dnr` by engines that follow AE's ISO once a second (`hal_dyn.c`, `hal_nrx.c`). `$RSS_ISP_TUNING` overrides the path. See the two ISO sections below |
+| ISP tuning | `/usr/share/raptor/iq/<sensor>.ini` (raptor's own, from `config/iq/hisilicon`) or else the image's `/etc/sensors/iq/<sensor>.ini`, applied on the first encoded frame — the static sections (`static_saturation` included, through lib_hiawb's `HI_MPI_ISP_SetSaturationAttr`) via get-modify-set on `HI_MPI_ISP_Set*`, the dynamic ones (`dynamic_linear_drc`, `dynamic_dehaze`, `dynamic_gamma`) and `static_3dnr` by engines that follow AE's ISO once a second (`hal_dyn.c`, `hal_nrx.c`). `$RSS_ISP_TUNING` overrides the path. See the three ISO sections below |
 | OSD | RGN overlays, ARGB1555, attached to the *VENC* channel so each stream carries its own — the region record holds the channel, which is the fix for divinus's every-region-on-channel-0 defect. Registered and attached are separate states: rvd sets attributes before the channel exists, so attach is deferred to the bind, and destroy detaches first (HiMPP refuses to destroy a channel that still carries regions), so a region survives an encoder restart. Eight overlays per channel. No privacy cover: the vendor gives VENC no COVER budget, so `RSS_OSD_COVER` is `NOTSUP` and rvd degrades. `/proc/umap/rgn` shows what is attached where |
 | Audio | one AI device against the inner codec: `HI_MPI_AI_*` for capture, `/dev/acodec` ioctls for volume/gain/mute. rad encodes in software; VQE/AENC/AO stay absent with reasons in `hal_audio.c`. Mono only: HiMPP returns stereo as two planes and the frame contract carries one, so `chn_count = 2` is refused with `RSS_ERR_NOTSUP` rather than delivering the left channel as if it were both. Mic gain clamps at 15 — the driver accepts 16 but that value falls out of the 4-bit field and all but mutes the preamp; `v4_aud.h` records the measurement. `/dev/acodec` is exclusive-open, so nothing else can inspect the codec while rad holds it. MPP is one system per SoC and rvd's init tears it down first, so restarting rvd destroys rad's AI device; rad notices after about a second of failed reads and reattaches on its own once rvd is back, about 17 s end to end |
 
@@ -270,6 +270,69 @@ defaults against the driver's. Majestic's 300 DRC strength is not in the file
 either -- the ISO 12800 column is 200 -- which reads as majestic's own IR-mode
 term (the sample adds one) rather than a different column.
 
+### The night, second pass: the ladder was the file's
+
+2026-09-02, the same EV300 + IMX335 at ISO 15k to 22k under street light,
+against majestic on the same board and an SSC377QE + IMX335 beside it. The
+picture had "detail obliterated, noise low", and the first question was
+whether the HAL was doing that. It was not: at ISO 15k `/proc/umap/vpss` held
+the file's ISO 12800 rung field for field, and above 12800 the nine-rung ladder
+has nowhere to go. The smearing was `imx335.ini`'s own top rung.
+
+What majestic runs turned out to be a different file. Its log reads `Loading
+IQ profile /etc/sensors/iq/default.ini`, and `default.ini` is a symlink to
+`imx307.ini`. Its live 3DNR at ISO 3335 is imx307's ISO 3200 rung to the
+number, and at ISO 16130 the interpolation between imx307's 12800 and 25600
+rungs -- twelve rungs to ISO 204800, lighter spatial strengths, motion
+thresholds that keep climbing. Its sharpen, LDCI, Bayer NR and DRC-off match
+neither file nor the driver's defaults; they are its own, and so is the grey:
+the driver's saturation does not fall with ISO, and majestic's picture is
+monochrome at ISO 16k with `colorToGray` off. Majestic is closed, so that is
+as far as the reading goes.
+
+Measured on JPEG snapshots, 900x700 crops, high-pass luma standard deviation
+("hp", detail and grain together) and chroma standard deviation on a flat wall:
+
+| run | ISO | wall hp | wall Cb / Cr |
+|---|---|---|---|
+| stock imx335.ini | 15468 | 27.5 | 9.4 / 6.0 |
+| stock, majestic's SFS/TFS/MATH in rung 8 | 16454 | 26.1 | 10.1 / 6.3 |
+| imx307 ladder alone, every other module at driver defaults | 22617 | 19.4 | 7.4 / 5.2 |
+| imx335 file with the imx307 ladder | 21341 | 24.9 | 9.8 / 6.3 |
+| majestic, colour on, slow shutter off | 15637 | 14.4 | 2.1 / 1.8 |
+| majestic default (slow shutter, ~8 fps) | 3335 | 15.0 | 2.3 / 1.8 |
+
+Two conclusions. The imx307 ladder is the better night ladder for this sensor,
+and the imx335 file's static sections add noise over the driver's defaults at
+night (an ablation to say which was cut short: the fourth rvd restart in a row
+OOM-killed the outgoing rvd mid-teardown, the ISP driver left CMA pages "still
+in use", and the board needed a reboot; restarts are not free here). The
+chroma gap is saturation, and the file format has a section for it that the
+shipped file lacks.
+
+So raptor now carries `config/iq/hisilicon/imx335.ini`: the shipped file with
+imx307's `[static_3dnr]` and a `[static_saturation]` AutoSat table that fades
+from ISO 3200 and reaches zero at 25600. The loader reads the section (new)
+and looks in `/usr/share/raptor/iq` before `/etc/sensors/iq` (new). Same
+scene, one restart apart:
+
+| run | ISO | wall hp | wall Cb / Cr | grass hp |
+|---|---|---|---|---|
+| stock imx335.ini | 22535 | 25.7 | 9.0 / 6.2 | 8.2 |
+| raptor's imx335.ini | 20318 | 24.0 | 4.9 / 3.3 | 10.6 |
+
+The roof tiles resolve, the colour blotches are gone, and the grass shows
+more grain -- the lighter ladder's trade, the same one majestic makes. Still
+open, in order of what it would buy: the imx335 static sections that cost
+noise at night (sharpen was the one measured: hp 26.3 to 22.7 without it),
+sensor rate at night (`[ircut] night_fps` exists and is the slow-shutter
+lever majestic's default uses for a 4.6x lower ISO), and the AutoSat curve's
+shape at dusk.
+
+The raptor-streaming package has to install the file for the first path to
+exist on an image; until it does, `RSS_ISP_TUNING` or a copy under
+`/usr/share/raptor/iq/` on the board selects it.
+
 ## Not written yet
 
 Not decisions — unwritten phases. Each returns `RSS_ERR_NOTSUP` through
@@ -286,15 +349,12 @@ carries on rather than failing partway into a stage that does not exist.
   antiflicker — have no op yet. Saturation and sharpness would go the way
   of DRC (a pin over a per-gain curve the tuning owns) and need the same
   argument SigmaStar's backend makes before they are worth a knob.
-- **The night bitrate gap against majestic is open.** With every section of
-  `imx335.ini` applied and the dynamic ones tracking ISO, raptor still
-  spends 7.9 Mbps at QP 42 where majestic spends 5.5 Mbps at QP 29 on the
-  same scene at the same ISO (the tables under "3DNR follows the ISO
-  ladder"). What `/proc/umap/isp` still shows different is not in the file:
-  Bayer-NR `CoarseStr`, parts of the sharpen table, and a DRC strength of
-  300 against the file's 200. Closing it means choosing values majestic
-  carries in its own defaults, not reading them from the INI, and nothing
-  here does that yet.
+- **The rest of the night gap against majestic.** The ladder and the
+  saturation are now the file's ("The night, second pass"). What
+  `/proc/umap/isp` still shows different is majestic's own: Bayer-NR
+  `CoarseStr` 80 on the green channels against the driver's 152, a sharpen
+  table twice as strong, LDCI at sigma 58 / BlcCtrl 200, DRC off. None of
+  it is in a file, and nothing here invents values.
 
 ## Deliberately absent
 
