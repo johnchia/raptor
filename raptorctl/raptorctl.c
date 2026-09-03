@@ -26,6 +26,56 @@
 const char *daemons[] = {"rvd", "rsd", "rad", "rod", "rhd", "ric", "rmr",     "rmd", "rwd",
 			 "rwc", "rfs", "rsp", "rsr", "rmq", "rcd", "rsd-555", NULL};
 
+/*
+ * `rvd restart`, routed through rcd instead of sent.
+ *
+ * rvd owns the SoC's media state: on HiMPP its teardown calls
+ * HI_MPI_SYS_Exit, which runs every MPP module's exit including the audio
+ * ones rad is holding, and a module torn down with its buffers still
+ * referenced leaves CMA pages the driver cannot reclaim -- after which no
+ * rvd can configure VB again and the board needs its kernel modules
+ * reloaded. So the restart has to be bracketed: release the other holders,
+ * restart, put them back. rcd does exactly that (rcd_apply.c, restart_rvd)
+ * and has done since the console gained restart-tier settings; sending the
+ * verb straight to rvd's own socket was the one path that skipped it.
+ *
+ * No fallback when rcd is missing. Falling back would be sending the
+ * unbracketed restart -- the thing this exists to stop -- and the operator
+ * has a correct alternative to be told about instead.
+ */
+static int restart_rvd_via_rcd(const char *daemon)
+{
+	char json[96];
+	cJSON *j, *arr;
+	int ok;
+
+	if (rss_daemon_check("rcd") <= 0) {
+		fprintf(stderr,
+			"rcd is not running, and restarting %s without it would leave the "
+			"media drivers holding buffers nothing can free.\n"
+			"Restart the stack instead: /etc/init.d/S95raptor restart\n",
+			daemon);
+		return 1;
+	}
+
+	j = cJSON_CreateObject();
+	if (!j)
+		return 1;
+	cJSON_AddStringToObject(j, "cmd", "restart");
+	arr = cJSON_AddArrayToObject(j, "daemons");
+	if (!arr) {
+		cJSON_Delete(j);
+		return 1;
+	}
+	cJSON_AddItemToArray(arr, cJSON_CreateString(daemon));
+	ok = cJSON_PrintPreallocated(j, json, sizeof(json), 0);
+	cJSON_Delete(j);
+	if (!ok)
+		return 1;
+
+	return send_cmd("rcd", json);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
@@ -169,6 +219,10 @@ int main(int argc, char **argv)
 	const char *daemon = argv[1];
 	const char *cmd = argv[2];
 	char json[512];
+
+	/* The one verb that is ordered rather than sent; see above. */
+	if (strcmp(daemon, "rvd") == 0 && strcmp(cmd, "restart") == 0)
+		return restart_rvd_via_rcd(daemon);
 
 	/* Privacy: send to both RVD (cover) and ROD (text element) */
 	bool is_privacy = strcmp(daemon, "rod") == 0 && strcmp(cmd, "privacy") == 0;

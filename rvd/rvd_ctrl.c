@@ -2811,12 +2811,87 @@ static int handle_config_cmd(const char *cmd, const char *cmd_json, rvd_state_t 
 	return 0;
 }
 
+/* ── Restart, and who else holds the media state ── */
+
+/*
+ * How long to wait for rad to say whether it is still holding audio. Short
+ * because the answer is a field read on an idle daemon, and because a rad
+ * too busy to answer within a second is not one we can coordinate with
+ * anyway -- see the "not answering is not holding" note below.
+ */
+#define RVD_RAD_ASK_MS 1000
+
+/*
+ * rvd's teardown is not process-local. On HiMPP HI_MPI_SYS_Exit runs every
+ * MPP module's exit -- the audio ones rad holds included -- and a module
+ * whose buffers are still referenced leaves CMA pages the driver cannot
+ * reclaim: "N pages are still in use" in dmesg, then HI_ERR_VB_BUSY for
+ * every rvd after it, until the kernel modules are reloaded. Restarting rvd
+ * is therefore an ordered operation, and rcd is what orders it: it releases
+ * rad's input and output first and puts them back afterwards (rcd_apply.c,
+ * restart_rvd).
+ *
+ * This asks the holder rather than the caller. rcd's bracket passes it by
+ * having done the right thing rather than by being recognised, no caller
+ * identity has to be trusted over a socket that grants none, and a restart
+ * sent straight here -- `raptorctl rvd restart` used to be exactly that --
+ * is refused with the reason. raptorctl now routes that verb through rcd.
+ *
+ * Not answering is not holding. A rad that is down, or too wedged to reply,
+ * has nothing live for the driver to trip over, and erring the other way
+ * would let a stopped audio daemon block every restart on the camera.
+ */
+static bool rad_holds_media(char *why, size_t why_len)
+{
+	char resp[768];
+	cJSON *r;
+	bool ai, ao;
+
+	if (rss_ctrl_cmd(RSS_RUN_DIR "/rad.sock", "status", resp, sizeof(resp), RVD_RAD_ASK_MS) < 0)
+		return false;
+
+	r = cJSON_Parse(resp);
+	if (!r)
+		return false;
+
+	ai = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "ai_enabled"));
+	ao = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "ao_enabled"));
+	cJSON_Delete(r);
+
+	if (!ai && !ao)
+		return false;
+
+	snprintf(why, why_len,
+		 "rad still holds audio %s, and rvd's teardown would take the media "
+		 "drivers down under it. Use 'raptorctl config apply', which releases "
+		 "audio around the restart and restores it, or restart the whole stack",
+		 (ai && ao) ? "input and output"
+		 : ai	    ? "input"
+			    : "output");
+	return true;
+}
+
 /* ── Main dispatch ── */
 
 int rvd_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_size, void *userdata)
 {
 	rvd_state_t *st = userdata;
 	int len;
+
+	/*
+	 * Before the common handler, because "restart" is one of the commands
+	 * it serves and serving it is what does the damage.
+	 */
+	char verb[32];
+	if (rss_json_get_str(cmd_json, "cmd", verb, sizeof(verb)) == 0 &&
+	    strcmp(verb, "restart") == 0) {
+		char why[256];
+
+		if (rad_holds_media(why, sizeof(why))) {
+			RSS_WARN("restart refused: %s", why);
+			return rss_ctrl_resp_error(resp_buf, resp_buf_size, why);
+		}
+	}
 
 	int rc =
 		rss_ctrl_handle_common(cmd_json, resp_buf, resp_buf_size, st->cfg, st->config_path);

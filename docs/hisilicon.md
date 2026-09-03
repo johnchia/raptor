@@ -412,6 +412,55 @@ blocks of 0.35 MiB each; sizing it from the streams would give the kernel
 that much more room for movable pages to spill into. The 96 MiB reserve is
 OpenIPC's bootarg, not raptor's.
 
+### Restarting rvd alone
+
+There is a second way to leave the driver holding pages nothing can free,
+and it has nothing to do with memory pressure. rvd's teardown ends in
+`HI_MPI_SYS_Exit`, and on HiMPP that is not process-local: the kernel side
+is `SysIoctl -> CMPI_ExitModules`, which runs *every* registered module's
+exit, the audio ones rad holds included. Tear one down with its buffers
+still referenced and `VB_DestroyPool` trips `free_contig_range` --
+
+```
+WARNING: ... free_contig_range   31 pages are still in use!
+  ... VB_DestroyPool <- AIVbFree <- AiDisableDev <- AI_Exit <- CMPI_ExitModules
+alloc_contig_range: [45fe0, 45fff) PFNs busy
+```
+
+-- after which `HI_MPI_VB_SetConfig` returns `HI_ERR_VB_BUSY` (0xa0018012)
+for every rvd that follows, including ones started long after every process
+involved has exited. Only reloading the kernel modules clears it.
+
+So restarting rvd is an ordered operation, and rcd is what orders it:
+`restart_rvd` in `rcd/rcd_apply.c` releases rad's input and output, restarts
+rvd, and puts them back, with the resume outside the success path because a
+skipped one leaves audio dead while every audio setting still reads
+correctly. `raptorctl config apply` and the console's restart-tier keys have
+always gone that way.
+
+What did not was `raptorctl rvd restart`, which built `{"cmd":"restart"}`
+and sent it to rvd's own socket. Two changes close that:
+
+- raptorctl routes that one verb through rcd
+  (`{"cmd":"restart","daemons":["rvd"]}`) rather than sending it, and
+  refuses -- rather than falling back to the raw send -- when rcd is not
+  running.
+- rvd refuses a restart while rad reports `ai_enabled` or `ao_enabled`
+  (`rvd_ctrl.c`, ahead of the common handler that serves the verb). It asks
+  the holder rather than the caller, so rcd's bracket passes by having
+  released audio rather than by being recognised. A rad that is down or not
+  answering is not holding, and does not block a restart -- measured: with
+  rad stopped the raw path restarts cleanly and MMZ comes back two blocks
+  lighter.
+
+Verified on the EV300 at 2592x1944: bracketed restart, rvd pid moves, 51 MMZ
+blocks before and after, encoders back, rad resumed, nothing in dmesg; raw
+restart refused with the reason and rvd still serving.
+
+What neither covers is rvd being SIGKILLed, or dying between the release and
+the resume -- rcd's own comment says as much. rad re-attaching by itself when
+rvd's ring reappears is the fix for that, and is not written.
+
 ## Not written yet
 
 Not decisions — unwritten phases. Each returns `RSS_ERR_NOTSUP` through
