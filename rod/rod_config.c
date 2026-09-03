@@ -100,6 +100,22 @@ void load_config(rod_state_t *st)
 		}
 	}
 
+	/* [image] rotate: a stream turned 90 or 270 degrees is encoded with
+	 * its width and height swapped (rvd_pipeline.c), and the overlay is
+	 * placed on the encoded picture. */
+	{
+		int rotate = rss_config_get_int(cfg, "image", "rotate", 0);
+
+		if (rotate == 90 || rotate == 270) {
+			for (int s = 0; s < st->stream_count; s++) {
+				int w = st->stream_w[s];
+
+				st->stream_w[s] = st->stream_h[s];
+				st->stream_h[s] = w;
+			}
+		}
+	}
+
 	st->detect_enabled = rss_config_get_bool(cfg, "motion", "enabled", false);
 	gethostname(st->hostname, sizeof(st->hostname));
 	st->hostname[sizeof(st->hostname) - 1] = '\0';

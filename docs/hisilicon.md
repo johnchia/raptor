@@ -45,7 +45,8 @@ configured 25 on both, with no dropped or reset frames and no errors.
 | VPSS | one group with 3DNR on, channels as framesources |
 | VENC | H.264, H.265, MJPEG (JPEG rides it — PT_JPEG refuses the attr set and divinus never uses it); CBR/VBR/FIXQP; bind, poll, collect, IDR, runtime bitrate/GOP/fps |
 | Snapshots | duty-cycled MJPEG channel: receive and bind live in `enc_start`/`enc_stop`, because an idle-but-bound destination queues VPSS pictures until VB pool 0 is gone. Quality is the FIXQP qfactor via `enc_set_jpeg_qp` |
-| Orientation | `hflip` / `vflip` at the sensor, through `pfnMirrorFlip` |
+| Orientation | `hflip` / `vflip` as every VPSS channel's `bMirror` / `bFlip`: seeded from `[image]` before the channels are created and rewritten live by `isp_set_hflip` / `isp_set_vflip`. Not the sensor's `pfnMirrorFlip`, which the OpenIPC sensor libraries leave out, and not the VI channel's bits: VI mirror stalls the channel on the EV300 (flip alone streams) |
+| Rotation | `[image] rotate` of 90, 180 or 270 through `HI_MPI_VPSS_SetChnRotation`, per VPSS channel. The channel keeps the configured size and emits it turned, so rvd creates the encoder (and the snapshot channel sharing the framesource) with width and height swapped for 90 and 270, and rod places the overlay on the turned picture |
 | Exposure readback | `isp_get_exposure` from `HI_MPI_ISP_QueryExposureInfo`: exposure time in µs, the sensor's analogue and digital gains and the ISP's digital gain multiplied into one 1024-per-unit `total_gain`, and the AE's average luma. This is what the OSD's `%total_gain%` and `%ae_luma%`, the console's exposure and gain lines and ric's day/night decision read |
 | Image knobs | `brightness` and `contrast` on the CSC (`ISP_CSC_ATTR_S` luma/contrast, 0..100, 50 is unity); `ae_comp` on `stAuto.u8Compensation` (0..255, neutral is whatever the tuning left, learned at each load); `drc_strength` pins `ISP_DRC_ATTR_S` in manual mode (0..1023) and holds the `[dynamic_linear_drc]` engine's column while pinned, `auto` handing it back. Every set is re-applied after each tuning load, because the load rewrites the attributes two of them live in. `isp_get_knob_caps` reports the units and neutrals; `raptorctl rvd get-isp` shows them |
 | Sensor rate | `[sensor] fps` overrides the mode INI's `Isp_FrameRate`: `isp_set_sensor_fps` is a get-modify-set of the ISP public attribute's `f32FrameRate` on the running pipe (the sensor driver's fps callback reprograms VMAX from it), and `isp_get_sensor_fps` reads it back. The 5 MP IMX335 INI says 30; the EV300 encodes 5 MP at 20, and at 30 VI lost ~9% of frames to `VbFail` even with the stream at 25 |
@@ -309,8 +310,9 @@ implementing anything listed here as missing.
   published reference survives `ReleaseStream`. The SigmaStar backend
   measured the equivalent on MI and found it does not. Anyone implementing
   these has to measure first. See `hal_encoder.c`.
-- **Rotation.** VPSS has no rotate on gen4. Mirror and flip are channel
-  attributes; 90 degrees is not available at any stage.
+- **Rotation at runtime.** `[image] rotate` is read at pipeline init only: a
+  turn of 90 or 270 changes the encoder geometry, which means recreating the
+  encoder channel, and there is no ctrl command for that yet.
 - **The QP knobs and RC options.** gen4 puts them in `VENC_RC_PARAM_S`, a
   separate structure from the channel attribute with a per-codec union of its
   own. They are a coherent group and belong in one commit that transcribes

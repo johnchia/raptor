@@ -97,6 +97,12 @@ struct rvd_state {
 	rvd_stream_t streams[RVD_MAX_STREAMS];
 	int stream_count;
 
+	/* [image] rotate, in degrees: 0, 90, 180 or 270. Applied to every
+	 * framesource as it is created; for 90 and 270 the encoders are
+	 * created with width and height swapped, since that is the picture
+	 * the framesource then emits. */
+	int rotate;
+
 	/* Deferred full pipeline reinit (T20 save bayer: the old-SDK VBM
 	 * pool does not survive a RAW flip in place; respond first, then
 	 * the frame loop rebuilds everything) */
@@ -130,7 +136,7 @@ struct rvd_state {
 	/* OSD */
 	bool osd_enabled;
 	bool osd_unsupported; /* backend publishes no OSD ops; latched so we stop retrying */
-	bool use_isp_osd; /* true = ISP OSD (no bind chain), false = IPU OSD */
+	bool use_isp_osd;     /* true = ISP OSD (no bind chain), false = IPU OSD */
 	rvd_osd_region_t osd_regions[RVD_MAX_STREAMS][RVD_OSD_MAX_REGIONS];
 	int osd_region_count[RVD_MAX_STREAMS];
 	int osd_retry_counter;

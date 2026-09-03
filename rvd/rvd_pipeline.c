@@ -317,10 +317,8 @@ static void rvd_apply_image_defaults(rvd_state_t *st)
 	ISP_IF_ASKED(img, "contrast", RSS_HAL_CALL(st->ops, isp_set_contrast, st->hal_ctx, v));
 	ISP_IF_ASKED(img, "saturation", RSS_HAL_CALL(st->ops, isp_set_saturation, st->hal_ctx, v));
 	ISP_IF_ASKED(img, "sharpness", RSS_HAL_CALL(st->ops, isp_set_sharpness, st->hal_ctx, v));
-	ISP_IF_ASKED(img, "sinter",
-		     RSS_HAL_CALL(st->ops, isp_set_sinter_strength, st->hal_ctx, v));
-	ISP_IF_ASKED(img, "temper",
-		     RSS_HAL_CALL(st->ops, isp_set_temper_strength, st->hal_ctx, v));
+	ISP_IF_ASKED(img, "sinter", RSS_HAL_CALL(st->ops, isp_set_sinter_strength, st->hal_ctx, v));
+	ISP_IF_ASKED(img, "temper", RSS_HAL_CALL(st->ops, isp_set_temper_strength, st->hal_ctx, v));
 	ISP_IF_ASKED(img, "hue", RSS_HAL_CALL(st->ops, isp_set_hue, st->hal_ctx, v));
 	ISP_IF_ASKED(img, "ae_comp", RSS_HAL_CALL(st->ops, isp_set_ae_comp, st->hal_ctx, v));
 	ISP_IF_ASKED(img, "dpc_strength",
@@ -1326,8 +1324,7 @@ int rvd_pipeline_init(rvd_state_t *st)
 			int jpeg_chn = jpeg_chn_base + st->jpeg_count;
 			bool jpeg_def = true;
 			if (caps && caps->max_jpeg_pixels > 0 &&
-			    (uint64_t)st->streams[v].enc_cfg.width *
-					    st->streams[v].enc_cfg.height >
+			    (uint64_t)st->streams[v].enc_cfg.width * st->streams[v].enc_cfg.height >
 				    (uint64_t)caps->max_jpeg_pixels) {
 				jpeg_def = false;
 				RSS_INFO("%s: %ux%u is past this part's JPEG ceiling of %u "
@@ -1448,6 +1445,26 @@ int rvd_pipeline_init(rvd_state_t *st)
 		}
 	}
 
+	/*
+	 * [image] rotate. The framesource is turned as soon as it exists, and
+	 * an encoder is sized for what comes out of it -- so for 90 and 270
+	 * the stream's configured width x height (the picture as the sensor
+	 * sees it) becomes height x width at the encoder, and at the snapshot
+	 * channel that shares the framesource. The swap waits for the backend
+	 * to say yes: a framesource it could not turn keeps its geometry, and
+	 * a mismatch there would be an encoder taking the wrong-sized frame.
+	 */
+	st->rotate = rss_config_get_int(cfg, "image", "rotate", 0);
+	if (st->rotate != 0 && st->rotate != 90 && st->rotate != 180 && st->rotate != 270) {
+		RSS_WARN("[image] rotate = %d is not 0, 90, 180 or 270; not rotating", st->rotate);
+		st->rotate = 0;
+	}
+	if (st->rotate && caps && !caps->has_rotation) {
+		RSS_WARN("[image] rotate = %d ignored: this backend cannot turn the picture",
+			 st->rotate);
+		st->rotate = 0;
+	}
+
 	/* ── 5. Create framesource channels ── */
 	/* JPEG shares framesource with its video stream — skip FS creation for it */
 	for (int i = 0; i < st->stream_count; i++) {
@@ -1459,6 +1476,32 @@ int rvd_pipeline_init(rvd_state_t *st)
 		if (ret != RSS_OK) {
 			RSS_FATAL("fs_create_channel(%d) failed: %d", fsc, ret);
 			return ret;
+		}
+		if (st->rotate) {
+			ret = RSS_HAL_CALL(st->ops, fs_set_rotation, st->hal_ctx, fsc, st->rotate);
+			if (ret != RSS_OK) {
+				RSS_WARN("%s: could not turn framesource %d by %d degrees: %d; "
+					 "encoding it as configured",
+					 st->streams[i].cfg_sect, fsc, st->rotate, ret);
+			} else if (st->rotate == 90 || st->rotate == 270) {
+				for (int j = 0; j < st->stream_count; j++) {
+					rss_video_config_t *e = &st->streams[j].enc_cfg;
+					uint32_t w;
+
+					if (st->streams[j].fs_chn != fsc)
+						continue;
+					w = e->width;
+					e->width = e->height;
+					e->height = w;
+					RSS_INFO("%s%s: turned %d degrees, so encoding %ux%u",
+						 st->streams[i].cfg_sect,
+						 st->streams[j].is_jpeg ? " snapshot" : "",
+						 st->rotate, e->width, e->height);
+				}
+			} else {
+				RSS_INFO("%s: turned %d degrees", st->streams[i].cfg_sect,
+					 st->rotate);
+			}
 		}
 		{
 			rss_fs_config_t *fs = &st->streams[i].fs_cfg;
