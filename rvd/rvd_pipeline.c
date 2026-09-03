@@ -1174,8 +1174,24 @@ int rvd_pipeline_init(rvd_state_t *st)
 	/* ── 4. Load stream configs (per sensor) ── */
 	int def_w = sensor_w > 0 ? sensor_w : 1920;
 	int def_h = sensor_h > 0 ? sensor_h : 1080;
+	/*
+	 * The sub-stream default is the main picture at 640 wide, not a fixed
+	 * 640x360.
+	 *
+	 * Clamping the two axes independently produced 640x360 for every
+	 * sensor larger than that, which is only the right shape for a 16:9
+	 * one. On a 4:3 5 MP sensor (2592x1944) it asked the scaler for a
+	 * 16:9 channel out of a 4:3 picture, and a scaler stretches rather
+	 * than letterboxes -- so the default sub-stream came out anamorphic,
+	 * a third too wide for its height, on every 4:3 board.
+	 *
+	 * Deriving the height from the width keeps the shape. Aligned to 8,
+	 * which is what the buffer geometry rounds to anyway; the usual
+	 * sensors land on it exactly and are unchanged (1920x1080 and
+	 * 2560x1440 still give 640x360, 2592x1944 now gives 640x480).
+	 */
 	int sub_w = def_w > 640 ? 640 : def_w / 2;
-	int sub_h = def_h > 360 ? 360 : def_h / 2;
+	int sub_h = def_w > 640 ? (int)(((long)def_h * 640 / def_w) & ~7L) : def_h / 2;
 	st->stream_count = 0;
 	int enc_grp_counter = 0; /* sequential encoder group assignment */
 

@@ -409,12 +409,33 @@ used:
   `HISI_ISP_JOIN_TIMEOUT_MS` (2000) -- takes a 1.5 s teardown past the old
   limit, and a SIGKILL there is the same driver state as the OOM one.
 
-What would widen the margin itself, not done: pool 1 is sized for 1920x1080
-(`HISI_VB_STREAM_MAX_W/H`) because `hal_init` is not told the streams, and
-on a config whose sub-stream is 640x360 that is 12 MiB of CMA holding four
-blocks of 0.35 MiB each; sizing it from the streams would give the kernel
-that much more room for movable pages to spill into. The 96 MiB reserve is
-OpenIPC's bootarg, not raptor's.
+What widened the margin itself, since done: VB's second common pool is gone.
+It existed to hold the VPSS channel outputs, and because `hal_init` is not
+told the streams -- `rss_multi_sensor_config_t` carries sensors, not streams
+-- its blocks could only be a guess, the sensor's geometry capped at
+1920x1080. On this board that guess was wrong twice over. The main stream
+runs at the sensor's own 2592x1944, does not fit a 3,110,400-byte block, and
+fell back to pool 0 to compete with VI for the seven blocks measured to keep
+`VbFail` at zero. The sub-stream, its only remaining user, was handed one of
+those blocks per 640x480 frame: `/proc/umap/vb` showed a single VENC-held
+block, 11.9 MiB of CMA reserved to carry 1.8 MiB of pictures, with pool 0 at
+`MinFree 0` beside it.
+
+With the pool dropped, every channel shares pool 0's seven blocks. Three
+minutes with both streams pulled over RTSP: VI at 20 fps, `LostFrame` and
+`VbFail` both 0 across 10,888 frames, pool 0 steady at 2 free of 7. MemFree
+went from 1.4 MiB to 13.2 MiB and MemAvailable from 6.1 to 18.0, which is
+the movable-page headroom the OOM story above is about. The 96 MiB reserve
+is OpenIPC's bootarg, not raptor's.
+
+The other half of the fix is written and does nothing here.
+`hal_fs_create_channel` *is* handed the stream geometry, so
+`hisi_fs_pool_acquire` cuts a VB pool to a small channel's own frame with
+`HI_MPI_VB_CreatePool` and points the channel at it with
+`HI_MPI_VPSS_AttachVbPool` -- the pool is created fine, and the attach
+returns 0xa0078008, VPSS / `EN_ERR_NOT_SUPPORT`, whether it is called before
+`EnableChn` or after. This driver has no such operation; the code probes
+once, says so at INFO, and leaves the channels on the common pool.
 
 ### Restarting rvd alone
 
@@ -695,8 +716,10 @@ From `/proc/umap` on a live 5 MP pipeline, and these are what
   can be set at all. `VI_ONLINE_VPSS_OFFLINE` would save the raw round trip
   through DDR and is the vendor's own single-sensor default, but the driver
   refuses it at 2592x1944.
-- VB is two pools — sensor-sized for VI and the group, stream-sized for the
-  channel outputs — and the block counts are bounded by CMA, not by the zone.
+- VB is one pool of sensor-sized blocks, shared by VI, the group and the
+  channel outputs, and its block count is bounded by CMA, not by the zone.
+  The second, stream-sized pool it used to have was a guess `hal_init` had no
+  way to make well; see the memory section above for what removing it bought.
   This board runs `mmz_allocator=cma`, so a pool is one contiguous allocation:
   six sensor blocks (45 MiB) succeed and seven (53 MiB) fail with VB / NOMEM on
   a 96 MiB zone reporting 95 MiB free. The board's own majestic fails the same
