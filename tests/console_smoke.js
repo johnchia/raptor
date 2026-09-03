@@ -201,7 +201,9 @@ const ISP_STATE = {
 		sharpness: {min: 0, max: 127, neutral: 40, auto: true, enabled: true},
 		temper: {min: 0, max: 7, neutral: 1, auto: false, enabled: true},
 		ae_comp: {min: -20, max: 20, neutral: 0, auto: false, enabled: true},
-		drc_strength: {min: 0, max: 255, neutral: 128, auto: true, enabled: true},
+		/* Ten bits, as HiSilicon publishes it -- wider than the span a
+		 * slider is drawn for, and still a knob with an auto. */
+		drc_strength: {min: 0, max: 1023, neutral: 418, auto: true, enabled: true},
 		defog_strength: {min: 0, max: 255, neutral: 128, auto: true, enabled: true},
 	},
 };
@@ -558,6 +560,14 @@ try {
 	 * nothing to hand back and nothing to offer. */
 	if (rowFor("temper").querySelector(".autobtn"))
 		fail("temporal denoise has no auto mode on this camera and the page offered one");
+	/* And the offer does not depend on how wide the range happens to be.
+	 * DRC is ten bits here, which is over the span the slider is drawn
+	 * for; the number widget the page would otherwise fall to has no
+	 * button, so the knob would lose its auto for having more resolution. */
+	if (!autoBtn("drc_strength"))
+		fail("drc is ten bits and the page dropped its auto with the slider");
+	if (!sliderIn(rowFor("drc_strength")))
+		fail("drc has an auto to offer and the page did not draw it as a slider");
 
 	/*
 	 * And a knob the camera sends caps but no value for has to land on the

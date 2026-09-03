@@ -711,6 +711,13 @@ function widgetFor(k) {
   if (span === 1) return "switch";
   if (isIdentifier(k)) return "number";
   if (span <= 4) return "seg";
+  /* A knob the tuning can drive has to be drawn as one that offers it back:
+     the auto button lives on the slider, so a range wide enough to fall past
+     the ceiling below would quietly take auto away with it. DRC on HiSilicon
+     is ten bits -- 1023, twenty-three over -- and no less a quantity to sweep
+     for the extra resolution. The ceiling is there to keep ports and byte
+     rates off a two-hundred-pixel track, and none of those has a tuning. */
+  if (b.auto) return "slider";
   if (span <= 1000) return "slider";
   return "number";
 }
