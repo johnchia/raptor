@@ -308,14 +308,12 @@ night (an ablation to say which was cut short: the fourth rvd restart in a row
 OOM-killed the outgoing rvd mid-teardown, the ISP driver left CMA pages "still
 in use", and the board needed a reboot; the section after this one is about
 why, and what changed so that it cannot recur that way). The
-chroma gap is saturation, and the file format has a section for it that the
-shipped file lacks.
+chroma gap is saturation: at those gains raptor was still carrying colour
+that majestic had already given up on.
 
 So raptor now carries `config/iq/hisilicon/imx335.ini`: the shipped file with
-imx307's `[static_3dnr]` and a `[static_saturation]` AutoSat table that fades
-from ISO 3200 and reaches zero at 25600. The loader reads the section (new)
-and looks in `/usr/share/raptor/iq` before `/etc/sensors/iq` (new). Same
-scene, one restart apart:
+imx307's `[static_3dnr]`. The loader looks in `/usr/share/raptor/iq` before
+`/etc/sensors/iq` (new). Same scene, one restart apart:
 
 | run | ISO | wall hp | wall Cb / Cr | grass hp |
 |---|---|---|---|---|
@@ -323,12 +321,26 @@ scene, one restart apart:
 | raptor's imx335.ini | 20318 | 24.0 | 4.9 / 3.3 | 10.6 |
 
 The roof tiles resolve, the colour blotches are gone, and the grass shows
-more grain -- the lighter ladder's trade, the same one majestic makes. Still
-open, in order of what it would buy: the imx335 static sections that cost
-noise at night (sharpen was the one measured: hp 26.3 to 22.7 without it),
-sensor rate at night (`[ircut] night_fps` exists and is the slow-shutter
-lever majestic's default uses for a 4.6x lower ISO), and the AutoSat curve's
-shape at dusk.
+more grain -- the lighter ladder's trade, the same one majestic makes.
+
+Both runs above also carried a `[static_saturation]` AutoSat fade -- 128 flat
+to ISO 800, zero from 25600 -- so most of that chroma drop is the fade and not
+the ladder. The section came out again on 2026-09-03, because saturation was
+never a gap in the tuning. `libsns_imx335.so` registers `cmos_get_awb_default`
+with lib_hiawb and hands it `AWB_SENSOR_DEFAULT_S.stAgcTbl`: a calibrated
+sixteen-column per-gain saturation table, 128 at unity down to 56 from 1024x,
+with a separate WDR variant picked off the mode file's `Mode=`. AutoSat
+overrides that table rather than filling an empty one, and Sony's numbers for
+this module beat a curve fitted by eye on one night. The loader still applies
+the section when a file carries one -- imx307.ini does, and its AutoSat is
+close to a copy of its own cmos table.
+
+Still open, in order of what it would buy: the imx335 static sections that
+cost noise at night (sharpen was the one measured: hp 26.3 to 22.7 without
+it), sensor rate at night (`[ircut] night_fps` exists and is the slow-shutter
+lever majestic's default uses for a 4.6x lower ISO), and whether the sensor
+library's saturation table wants any override at high gain -- measured
+against it, not fitted by eye.
 
 The raptor-streaming package has to install the file for the first path to
 exist on an image; until it does, `RSS_ISP_TUNING` or a copy under
