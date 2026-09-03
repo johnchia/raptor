@@ -46,6 +46,8 @@ configured 25 on both, with no dropped or reset frames and no errors.
 | VENC | H.264, H.265, MJPEG (JPEG rides it — PT_JPEG refuses the attr set and divinus never uses it); CBR/VBR/FIXQP; bind, poll, collect, IDR, runtime bitrate/GOP/fps |
 | Snapshots | duty-cycled MJPEG channel: receive and bind live in `enc_start`/`enc_stop`, because an idle-but-bound destination queues VPSS pictures until VB pool 0 is gone. Quality is the FIXQP qfactor via `enc_set_jpeg_qp` |
 | Orientation | `hflip` / `vflip` at the sensor, through `pfnMirrorFlip` |
+| Exposure readback | `isp_get_exposure` from `HI_MPI_ISP_QueryExposureInfo`: exposure time in µs, the sensor's analogue and digital gains and the ISP's digital gain multiplied into one 1024-per-unit `total_gain`, and the AE's average luma. This is what the OSD's `%total_gain%` and `%ae_luma%`, the console's exposure and gain lines and ric's day/night decision read |
+| Image knobs | `brightness` and `contrast` on the CSC (`ISP_CSC_ATTR_S` luma/contrast, 0..100, 50 is unity); `ae_comp` on `stAuto.u8Compensation` (0..255, neutral is whatever the tuning left, learned at each load); `drc_strength` pins `ISP_DRC_ATTR_S` in manual mode (0..1023) and holds the `[dynamic_linear_drc]` engine's column while pinned, `auto` handing it back. Every set is re-applied after each tuning load, because the load rewrites the attributes two of them live in. `isp_get_knob_caps` reports the units and neutrals; `raptorctl rvd get-isp` shows them |
 | Sensor rate | `[sensor] fps` overrides the mode INI's `Isp_FrameRate`: `isp_set_sensor_fps` is a get-modify-set of the ISP public attribute's `f32FrameRate` on the running pipe (the sensor driver's fps callback reprograms VMAX from it), and `isp_get_sensor_fps` reads it back. The 5 MP IMX335 INI says 30; the EV300 encodes 5 MP at 20, and at 30 VI lost ~9% of frames to `VbFail` even with the stream at 25 |
 | Frame rate | VI needs seven VB blocks in pool 0 at 5 MP; with six it loses ~5% of frames to `VbFail` and the pipe drops to 25-26 fps, which VPSS's source/destination ratio then scales again — that is what made a request of 20 fps produce 17. With seven, VI holds 30 and 20 fps means 19.7. Watch `/proc/umap/vi`'s `LostFrame`/`VbFail`, not just `/proc/umap/vb` |
 | ISP tuning | `/etc/sensors/iq/<sensor>.ini` applied on the first encoded frame — the static sections via get-modify-set on `HI_MPI_ISP_Set*`, the dynamic ones (`dynamic_linear_drc`, `dynamic_dehaze`, `dynamic_gamma`) and `static_3dnr` by engines that follow AE's ISO once a second (`hal_dyn.c`, `hal_nrx.c`). `$RSS_ISP_TUNING` overrides the path. See the two ISO sections below |
@@ -278,8 +280,11 @@ carries on rather than failing partway into a stage that does not exist.
   so there is nothing for the generic reader to read; the `%soc_temp%`
   OSD variable renders `--` here. Dropped rather than deferred: a chip
   temperature would need a vendor register the SDK does not document.
-- The ISP *knob* ops — brightness, contrast, the gain ceilings — remain
-  deferred until the tuning baseline is proven on the board.
+- The ISP knob ops beyond brightness, contrast, `ae_comp` and
+  `drc_strength` — saturation, sharpness, the gain ceilings, defog,
+  antiflicker — have no op yet. Saturation and sharpness would go the way
+  of DRC (a pin over a per-gain curve the tuning owns) and need the same
+  argument SigmaStar's backend makes before they are worth a knob.
 - **The night bitrate gap against majestic is open.** With every section of
   `imx335.ini` applied and the dynamic ones tracking ISO, raptor still
   spends 7.9 Mbps at QP 42 where majestic spends 5.5 Mbps at QP 29 on the
