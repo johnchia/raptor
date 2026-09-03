@@ -662,7 +662,9 @@ static const ha_control_t controls[] = {
 	ISP_NUM("max_again", "Max analog gain", "mdi:signal", 160),
 	ISP_NUM("max_dgain", "Max digital gain", "mdi:signal-variant", 160),
 	ISP_NUM("dpc_strength", "Dead pixel correction", "mdi:grain", 255),
-	ISP_NUM("drc_strength", "Dynamic range compression", "mdi:gradient-vertical", 255),
+	/* 10 bits on HiSilicon, 8 elsewhere; the wider one, for the same
+	 * reason rcd's table takes it -- see rcd_schema.c. */
+	ISP_NUM("drc_strength", "Dynamic range compression", "mdi:gradient-vertical", 1023),
 	ISP_NUM("defog_strength", "Defog", "mdi:weather-fog", 255),
 	ISP_NUM("highlight_depress", "Highlight depression", "mdi:white-balance-sunny", 255),
 	ISP_NUM("backlight_comp", "Backlight compensation", "mdi:brightness-4", 10),

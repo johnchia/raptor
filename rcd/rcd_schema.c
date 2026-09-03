@@ -346,7 +346,20 @@ static const rcd_key_t keys[] = {
 	{"image", "max_again", V_INT, 0, 160, NULL, LIVE("set-max-again")},
 	{"image", "max_dgain", V_INT, 0, 160, NULL, LIVE("set-max-dgain")},
 	{"image", "dpc_strength", V_INT, 0, 255, NULL, LIVE_ISP("set-dpc")},
-	{"image", "drc_strength", V_INT, 0, 255, NULL, LIVE_ISP("set-drc")},
+	/*
+	 * The one image knob whose scale is not 0-255 everywhere: HiSilicon's
+	 * DRC strength is a 10-bit field and its tuning files use the whole of
+	 * it -- the shipped imx335 ladder sits around 420. This table is one
+	 * table for every platform and cannot know which is underneath, and
+	 * the camera's own range arrives beside the value in `state`'s caps,
+	 * which is what the console draws the control from. So the bound here
+	 * is the widest any backend takes, and rejects the absurd and nothing
+	 * else; a number this camera will not have is refused by the knob,
+	 * with its range in the answer. At 255 the console offered a scale to
+	 * 1023 and rcd refused everything above a quarter of it -- including
+	 * the tuning's own value, which the same row was displaying.
+	 */
+	{"image", "drc_strength", V_INT, 0, 1023, NULL, LIVE_ISP("set-drc")},
 	{"image", "defog_strength", V_INT, 0, 255, NULL, LIVE_ISP("set-defog-strength")},
 	{"image", "highlight_depress", V_INT, 0, 255, NULL, LIVE_ISP("set-highlight-depress")},
 	{"image", "backlight_comp", V_INT, 0, 10, NULL, LIVE_ISP("set-backlight-comp")},
