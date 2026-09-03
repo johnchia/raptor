@@ -306,7 +306,8 @@ Two conclusions. The imx307 ladder is the better night ladder for this sensor,
 and the imx335 file's static sections add noise over the driver's defaults at
 night (an ablation to say which was cut short: the fourth rvd restart in a row
 OOM-killed the outgoing rvd mid-teardown, the ISP driver left CMA pages "still
-in use", and the board needed a reboot; restarts are not free here). The
+in use", and the board needed a reboot; the section after this one is about
+why, and what changed so that it cannot recur that way). The
 chroma gap is saturation, and the file format has a section for it that the
 shipped file lacks.
 
@@ -332,6 +333,72 @@ shape at dusk.
 The raptor-streaming package has to install the file for the first path to
 exist on an image; until it does, `RSS_ISP_TUNING` or a copy under
 `/usr/share/raptor/iq/` on the board selects it.
+
+### Restarts, the OOM killer, and the 24 MiB the kernel actually has
+
+The wedge above was read at the time as "restarts leak MMZ". Measured
+afterwards, a clean restart leaks nothing: rvd's teardown takes 1.5 s,
+`/proc/media-mem` goes from 76 MiB used to 32 KiB, and five
+`S95raptor restart`s in a row with a snapshot between each came back to the
+same 76524 KiB every time. What went wrong the first time was one SIGKILL --
+the OOM killer's -- in the middle of that teardown, and everything after it
+(the "1 pages are still in use!" warnings, the next rvd blocked in
+`down_interruptible` inside `mmz_mmb_free`) was the ISP driver's state after
+a process died mid-ioctl. The question is why the kernel was out of memory
+on a 128 MiB board whose `free` showed 15 MiB free.
+
+The bootargs say `mmz_allocator=cma mmz=anonymous,0,0x42000000,96M`: 96 of
+the 128 MiB is a CMA reserve, and `/proc/zoneinfo` puts the managed total at
+120.8 MiB, so what the kernel has outside the reserve is 24.8 MiB. CMA pages
+can hold *movable* allocations (page cache, anon, tmpfs) while MMZ is not
+using them, and the kernel counts them in MemFree, but it cannot put its own
+allocations there -- slab, page tables, driver kmallocs, the squashfs
+decompressor -- and it does not fill them first either: a movable page takes
+a non-CMA free page while one exists and spills into CMA only after. So the
+steady state with rvd running is a non-CMA region that is full. From
+`/proc/pagetypeinfo`, 8 non-CMA pageblocks against 24 CMA ones, zero free
+pages of type Movable at every order, and MemFree minus CmaFree -- the
+number that decides whether the next kernel allocation succeeds -- between
+1.5 and 2.3 MiB over 190 s of sampling, restarts included. `min_free_kbytes`
+is 632. The system lives on reclaiming the daemons' own text pages out of
+that region and faulting them back (`workingset_refault` 1791 two hours into
+a boot), and one bad moment is an OOM.
+
+At 2592x1944 RAW12, the mode the ablation ran in, MMZ held 12 MiB more than
+at 2592x1520 (the VB pool alone is 63.8 MiB against 52.5), which leaves
+about 8 MiB of CMA for movable pages to spill into instead of 14 to 21. That
+is the difference between "restarts are fine" and "the fourth one dies", and
+it is a difference of margin, not of mechanism.
+
+When the kernel does pick a victim it picks by resident size, and rvd's
+resident size includes every shared ring its consumers map: score 58 here,
+306 on an SSC333 that hit the same thing on 2026-08-23, the largest process
+in both tables. It is the one process whose death frees nothing, because the
+pipeline's buffers are the kernel's, and the one whose death by SIGKILL
+costs a reboot. Two changes, neither of which touches how much memory is
+used:
+
+- rvd writes -1000 to `/proc/self/oom_score_adj` at startup
+  (`rvd_main.c`). The OOM killer now takes rsd, rhd, rod or whichever
+  consumer is largest, which costs a stream until the next `S95raptor
+  restart`, and leaves the kernel-side pipeline intact. With nothing
+  killable left the kernel panics and `panic=20` in the bootargs reboots the
+  board, which is the recovery the wedge needed anyway. rvd also logs one
+  line at startup with the number above in it (`mem: 120 MiB, 96 MiB of it a
+  CMA reserve; outside the reserve 24 MiB with 3 MiB free`), so the next
+  report of this kind can be read against it.
+- The init script gives rvd ten seconds before SIGKILL instead of three
+  (`config/S31raptor`). The HAL's own worst case -- the 3A thread not
+  returning from `HI_MPI_ISP_Run` and being abandoned after
+  `HISI_ISP_JOIN_TIMEOUT_MS` (2000) -- takes a 1.5 s teardown past the old
+  limit, and a SIGKILL there is the same driver state as the OOM one.
+
+What would widen the margin itself, not done: pool 1 is sized for 1920x1080
+(`HISI_VB_STREAM_MAX_W/H`) because `hal_init` is not told the streams, and
+on a config whose sub-stream is 640x360 that is 12 MiB of CMA holding four
+blocks of 0.35 MiB each; sizing it from the streams would give the kernel
+that much more room for movable pages to spill into. The 96 MiB reserve is
+OpenIPC's bootarg, not raptor's.
 
 ## Not written yet
 
