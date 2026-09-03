@@ -192,17 +192,33 @@ once a second off the encoder's frame hook, blends the two neighbouring rungs in
 the sample's stop space, and writes MANUAL, logging when it crosses a rung.
 
 AUTO used to be refused on the EV300 with `0xa0078003`, and the conclusion drawn
-was that the driver did not implement it. It does. `open_vpss`'s
-`VPSS_NRX_V3_S` is 932 bytes where the SDK header's is 924 -- its `NRc` is 12
-bytes on a 4-byte alignment, the header's 6 on a 1-byte one -- so `stNRXAuto`
-sits at +936 and raptor was writing it at +928. The driver read the
+was that the driver did not implement it. It does. The headers raptor was
+transcribed from are accurate but the wrong version: the board runs MPP
+**V1.0.1.2** and the SDK we hold is **V1.0.1.0**, and `NRc` grew between them
+from four bytes to twelve (an `HI_BOOL` and a `PRESFC` appended, taking the
+struct to a 4-byte alignment). `VPSS_NRX_V3_S` is therefore 932 bytes, not 922,
+so `stNRXAuto` sits at +936 and raptor was writing it at +928. The driver read the
 `pastNRXParam` pointer as `u32ParamNum`, found it outside 1..16, and said
 `ILLEGAL_PARAM`. The eight bytes cost a second thing quietly: `NRc` moved from
 +918 to +920, so the file's `TRC` was landing in the driver's `SFC` and its
 `TPC` in the driver's `TFC`, while the file's own `SFC` and `TFC` went into
 padding. `v4_vpss.h` now carries the driver's layout with the disassembly it was
-read from, and `-mode` and `-presfc` -- tags the SDK header does not name in its
-`sscanf` -- have fields to land in.
+read from, and `-mode` and `-presfc` -- tags the V1.0.1.0 header does not have
+fields for -- have somewhere to land.
+
+Nothing else on the surface moved, which was the obvious next question. Every
+`libmpi` wrapper bulk-copies its caller's struct into an ioctl, so the ioctl's
+`_IOC_SIZE` *is* that struct's size: across the 351 MPI functions present in
+both V1.0.1.0 and V1.0.1.2, exactly one changed, this one (944 -> 952).
+`ISP_MOD_PARAM_S` also went 8 -> 12, and `hal_common.c` forwards it as a
+`void *`, so raptor never sees its shape. The ISP, AE and AWB attributes do not
+cross an ioctl one for one -- the libraries walk the caller's struct field by
+field into a shared context -- so there the check is the set of offsets each
+function reaches through its argument pointer; all 27 this backend calls are
+identical between the two versions, and only `SetStatisticsConfig` differs, by
+no longer reading two fields it used to. The gap the sweeps leave is a field
+moving *inside* a struct whose total size did not change; nothing suggests one
+did.
 
 Measured on the EV300 at ISO 105, same scene, three frames each, on the twelve
 rungs the board's `imx335.ini` carries. The control is the identical binary
