@@ -732,6 +732,51 @@ INI, both plain text:
 - `/etc/sensors/iq/<sensor>.ini` — the IQ proper: `[static_ae]`, the
   `[static_aerouteex]` gain ladder, the metering grid. 1398 lines for an IMX335.
 
+### `[module_state]` says which of a file's own sections count
+
+A tuning file may open with `[module_state]`, a list of `bStaticXxx` /
+`bDynamicXxx` flags. It is not decoration: the vendor's own loader — the SDK's
+`scene_auto` sample, `src/core/hi_scene_setparam.c` — opens every
+`HI_SCENE_SetXxx` with the matching flag and returns without touching the ISP
+when it is clear. A section sitting in the file under a `"0"` is documentation,
+not tuning, and applying it anyway rewrites a module the author meant to leave
+alone.
+
+The shipped `imx307.ini` is exactly that file: it carries a full
+`[static_sharpen]`, `[static_ldci]`, `[static_drc]`, `[static_nr]`,
+`[static_dehaze]`, `[static_dpc]` and `[static_saturation]`, and turns every one
+of them off. It is also the only OpenIPC IQ file that carries the section at
+all; `imx335.ini` and the rest have none, and a file without one means all of
+its sections, which is what this loader did before the mask existed.
+
+The map from flag to section is the vendor's, surprises included:
+
+- `[static_aerouteex]` has no flag of its own. `HI_SCENE_SetStaticAE` writes the
+  route and the exposure attributes together, under `bStaticAE`.
+- the AE weight table is nested inside that same function, which reaches
+  `SetAeWeightTab` only if `bAeWeightTab`, so `[static_aeweight]` needs both
+  flags.
+- the 3DNR ladder answers to `bDyanamic3DNR` — the vendor's spelling, typo and
+  all. `HI_SCENE_SetStatic3DNR` is `#if 0`'d out of the SDK (it is the old
+  VI-pipe NRX V1 path), so `bStatic3DNR` gates nothing; the live consumer of
+  `[static_3dnr]` is `HI_SCENE_SetDynamic3DNR`, which interpolates the ladder by
+  ISO the way `hal_nrx.c` does. That is how `imx307.ini` carries
+  `bStatic3DNR = "0"` and still has a working 3DNR ladder.
+
+Inside a `[module_state]` that is present, a flag that is not listed is off: the
+vendor's parser writes only the flags it finds into a struct that started
+zeroed. The mask is read in a pass of its own before anything is applied, so it
+holds wherever in the file it sits, and the load summary names what it turned
+off:
+
+```
+isp tuning: <file>: 8 modules applied; [module_state] off: static_drc static_dehaze static_sharpen static_dpc
+```
+
+On `imx307.ini` the mask leaves four modules: the exposure attributes and the
+AE route, which `bStaticAE` carries together, plus the gamma curves and the
+3DNR ladder.
+
 Binary tuning does also exist, produced by the Windows PQTools; the board's
 `/usr/sbin/pqtools` fetches the PC application and an on-target agent from
 `github.com/openipc/pqtools`. The lite images ship INI only. Phase 3 does the
