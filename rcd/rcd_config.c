@@ -296,7 +296,7 @@ void rcd_save_flush(rcd_state_t *st)
 		 * so several daemons saving the same file cannot revert each
 		 * other, and a daemon with nothing dirty does not write.
 		 */
-		if (!rcd_ask_ok(rcd_daemon_name((rcd_daemon_t)i), "{\"cmd\":\"config-save\"}"))
+		if (!rcd_ask_ok(rcd_daemon_name((rcd_daemon_t)i), "config-save"))
 			RSS_WARN("save: %s did not answer, its changes stay in memory",
 				 rcd_daemon_name((rcd_daemon_t)i));
 	}
@@ -738,7 +738,7 @@ static void probe_isp(rcd_state_t *st)
 	if (st->isp_settable[0])
 		return;
 
-	cJSON *resp = rcd_ask_json("rvd", "{\"cmd\":\"get-isp\"}");
+	cJSON *resp = rcd_ask_json("rvd", "get-isp");
 	if (!resp)
 		return; /* rvd is down; ask again next time rather than hide */
 
@@ -905,10 +905,7 @@ static cJSON *section_from_daemon(const char *section)
 	if (!daemon)
 		return NULL;
 
-	char req[128];
-	snprintf(req, sizeof(req), "{\"cmd\":\"config-get-section\",\"section\":\"%s\"}", section);
-
-	cJSON *resp = rcd_ask_json(daemon, req);
+	cJSON *resp = rcd_ask_json_str(daemon, "config-get-section", "section", section);
 	if (!resp)
 		return NULL;
 
@@ -1356,7 +1353,7 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 			const char *owner = rcd_daemon_name(rcd_section_owner(k->section));
 
 			if (reset_request(k, req, sizeof(req)) &&
-			    rcd_ask_ok_err(owner, req, notebuf[i], sizeof(notebuf[i]))) {
+			    rcd_ask_req_ok(owner, req, notebuf[i], sizeof(notebuf[i]))) {
 				to_file[i] = true;
 				restored[i] = true;
 				note[i] = "put back to the tuning value";
@@ -1389,7 +1386,7 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		}
 
 		const char *daemon = rcd_daemon_name(rcd_section_owner(k->section));
-		if (rcd_ask_ok_err(daemon, req, notebuf[i], sizeof(notebuf[i]))) {
+		if (rcd_ask_req_ok(daemon, req, notebuf[i], sizeof(notebuf[i]))) {
 			/* The daemon holds the new value and records it in its
 			 * own config, so it -- not rcd -- writes the file. */
 			owe_save(st, rcd_section_owner(k->section));
@@ -1713,7 +1710,7 @@ cJSON *rcd_cmd_action(rcd_state_t *st, const cJSON *root)
 		return action_local(st, a);
 
 	char derr[192];
-	if (!rcd_ask_ok_err(daemon, wire, derr, sizeof(derr)))
+	if (!rcd_ask_req_ok(daemon, wire, derr, sizeof(derr)))
 		return rcd_err(RCD_E_DAEMON, derr);
 
 	if (a && a->persists)

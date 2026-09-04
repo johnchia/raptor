@@ -123,8 +123,8 @@ static void refresh_exposure(rod_state_t *st)
 	st->exp_refresh_ts = now;
 
 	char resp[512];
-	if (rss_ctrl_send_command(RSS_RUN_DIR "/rvd.sock", "{\"cmd\":\"get-exposure\"}", resp,
-				  sizeof(resp), ROD_EXPOSURE_TIMEOUT_MS) < 0) {
+	if (rss_ctrl_cmd(RSS_RUN_DIR "/rvd.sock", "get-exposure", resp, sizeof(resp),
+			 ROD_EXPOSURE_TIMEOUT_MS) < 0) {
 		st->exp_reachable = false;
 		st->exp_ae_luma = 0;
 		st->exp_total_gain = 0;

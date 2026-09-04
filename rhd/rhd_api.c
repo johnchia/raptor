@@ -131,13 +131,43 @@ bool rhd_request_complete(const char *buf, size_t len)
 
 /* ── the route ── */
 
+/*
+ * The api's error body, from the serializer.
+ *
+ * The shape is fixed and the fields are not: `reason` is a sentence somebody
+ * wrote, and at one call site it is rcd's own words relayed through. A quote
+ * in there produced a body no client could parse, so cJSON puts the strings
+ * in. Answers 0 on allocation failure, which the callers send as an empty
+ * body -- already how they report a daemon that said nothing.
+ */
+static int api_error_body(char *buf, size_t cap, const char *code, const char *reason)
+{
+	cJSON *r = cJSON_CreateObject();
+	int n = 0;
+
+	if (!r)
+		return 0;
+	buf[0] = '\0';
+	cJSON_AddNumberToObject(r, "api", 1);
+	cJSON_AddStringToObject(r, "status", "error");
+	cJSON_AddStringToObject(r, "code", code);
+	cJSON_AddStringToObject(r, "reason", reason ? reason : "");
+	/* One byte held back for the newline every one of these has always
+	 * ended with; a reader tailing the socket by line still sees them. */
+	if (cJSON_PrintPreallocated(r, buf, (int)cap - 2, 0)) {
+		n = (int)strlen(buf);
+		buf[n++] = '\n';
+		buf[n] = '\0';
+	}
+	cJSON_Delete(r);
+	return n;
+}
+
 static void api_refuse(rhd_client_t *c, const char *status, const char *code, const char *reason)
 {
 	char body[256];
-	int n = snprintf(body, sizeof(body),
-			 "{\"api\":1,\"status\":\"error\",\"code\":\"%s\","
-			 "\"reason\":\"%s\"}\n",
-			 code, reason);
+	int n = api_error_body(body, sizeof(body), code, reason);
+
 	http_send(c, status, "application/json", body, n);
 }
 
@@ -316,9 +346,9 @@ static api_auth_t api_authenticate(const char *request, const char *host, int *r
  */
 static void api_429(rhd_client_t *c, int retry_sec)
 {
-	static const char body[] = "{\"api\":1,\"status\":\"error\",\"code\":\"auth\","
-				   "\"reason\":\"too many failed attempts; wait and try "
-				   "again\"}\n";
+	char body[256];
+	int blen = api_error_body(body, sizeof(body), "auth",
+				  "too many failed attempts; wait and try again");
 	char header[256];
 	int hlen = snprintf(header, sizeof(header),
 			    "HTTP/1.1 429 Too Many Requests\r\n"
@@ -327,17 +357,17 @@ static void api_429(rhd_client_t *c, int retry_sec)
 			    "Content-Length: %d\r\n"
 			    "Connection: close\r\n"
 			    "\r\n",
-			    retry_sec > 0 ? retry_sec : 1, (int)strlen(body));
+			    retry_sec > 0 ? retry_sec : 1, blen);
 
 	rhd_write(c, header, (size_t)hlen);
-	rhd_write(c, body, strlen(body));
+	rhd_write(c, body, (size_t)blen);
 }
 
 static void api_401(rhd_client_t *c)
 {
-	static const char body[] = "{\"api\":1,\"status\":\"error\",\"code\":\"auth\","
-				   "\"reason\":\"the configuration api needs the system "
-				   "account\"}\n";
+	char body[256];
+	int blen = api_error_body(body, sizeof(body), "auth",
+				  "the configuration api needs the system account");
 	char header[256];
 	int hlen = snprintf(header, sizeof(header),
 			    "HTTP/1.1 401 Unauthorized\r\n"
@@ -346,10 +376,10 @@ static void api_401(rhd_client_t *c)
 			    "Content-Length: %d\r\n"
 			    "Connection: close\r\n"
 			    "\r\n",
-			    (int)strlen(body));
+			    blen);
 
 	rhd_write(c, header, (size_t)hlen);
-	rhd_write(c, body, strlen(body));
+	rhd_write(c, body, (size_t)blen);
 }
 
 bool rhd_api_handle(rhd_server_t *srv, rhd_client_t *c, const char *method, const char *path)
@@ -518,11 +548,10 @@ void rhd_api_poll(rhd_server_t *srv)
 			http_send_async_ex(c, srv->epoll_fd, "application/json", resp,
 					   (uint32_t)strlen(resp), false);
 		} else {
-			char body[192];
-			int n = snprintf(body, sizeof(body),
-					 "{\"api\":1,\"status\":\"error\",\"code\":\"daemon\","
-					 "\"reason\":\"%s\"}\n",
-					 err[0] ? err : "no answer from rcd");
+			char body[256];
+			int n = api_error_body(body, sizeof(body), "daemon",
+					       err[0] ? err : "no answer from rcd");
+
 			http_send_async_ex(c, srv->epoll_fd, "application/json", body, (uint32_t)n,
 					   false);
 		}

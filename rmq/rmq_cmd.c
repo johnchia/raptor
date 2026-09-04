@@ -175,7 +175,7 @@ static void relay(rmq_state_t *st, const char *json, const char *cmd_name, const
 
 	if (st->auto_apply && left_stale(resp)) {
 		RSS_INFO("cmd: auto_apply is on, enacting the saved edits");
-		cJSON *applied = rmq_rcd_call("{\"cmd\":\"apply\"}");
+		cJSON *applied = rmq_rcd_cmd("apply");
 		if (applied)
 			cJSON_AddItemToObject(resp, "applied", applied);
 	}

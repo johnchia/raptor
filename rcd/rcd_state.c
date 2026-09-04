@@ -104,7 +104,7 @@ static void collect_rvd_isp(cJSON *state)
 		NULL,
 	};
 
-	cJSON *resp = rcd_ask_json("rvd", "{\"cmd\":\"get-isp\"}");
+	cJSON *resp = rcd_ask_json("rvd", "get-isp");
 	if (!resp)
 		return;
 
@@ -155,7 +155,7 @@ static void collect_rvd_isp(cJSON *state)
  * the JPEG channels carry no bitrate or GOP worth showing. */
 static void collect_rvd(cJSON *state)
 {
-	cJSON *resp = rcd_ask_json("rvd", "{\"cmd\":\"status\"}");
+	cJSON *resp = rcd_ask_json("rvd", "status");
 	if (!resp)
 		return;
 
@@ -233,7 +233,7 @@ static void collect_rvd(cJSON *state)
 /* rsd: viewer count, listening port and who has to log in. */
 static void collect_rsd(cJSON *state)
 {
-	cJSON *resp = rcd_ask_json("rsd", "{\"cmd\":\"config-show\"}");
+	cJSON *resp = rcd_ask_json("rsd", "config-show");
 	if (!resp)
 		return;
 
@@ -278,7 +278,7 @@ static void collect_rsd(cJSON *state)
  */
 static void collect_rhd(cJSON *state)
 {
-	cJSON *resp = rcd_ask_json("rhd", "{\"cmd\":\"status\"}");
+	cJSON *resp = rcd_ask_json("rhd", "status");
 	if (!resp)
 		return;
 
@@ -297,7 +297,7 @@ static void collect_rhd(cJSON *state)
 /* ric: day/night decision plus the exposure readings behind it. */
 static void collect_ric(cJSON *state)
 {
-	cJSON *resp = rcd_ask_json("ric", "{\"cmd\":\"status\"}");
+	cJSON *resp = rcd_ask_json("ric", "status");
 	if (!resp)
 		return;
 
@@ -344,7 +344,7 @@ static void collect_ric(cJSON *state)
 		NULL,
 	};
 
-	cJSON *th = rcd_ask_json("ric", "{\"cmd\":\"get-thresholds\"}");
+	cJSON *th = rcd_ask_json("ric", "get-thresholds");
 	if (!th)
 		return;
 
@@ -363,7 +363,7 @@ static void collect_ric(cJSON *state)
  */
 static void collect_rad(cJSON *state)
 {
-	cJSON *resp = rcd_ask_json("rad", "{\"cmd\":\"status\"}");
+	cJSON *resp = rcd_ask_json("rad", "status");
 	if (!resp)
 		return;
 
@@ -399,7 +399,7 @@ static void collect_rad(cJSON *state)
 /* rod: whether the overlay is being drawn, and how much of it there is. */
 static void collect_rod(cJSON *state)
 {
-	cJSON *resp = rcd_ask_json("rod", "{\"cmd\":\"config-show\"}");
+	cJSON *resp = rcd_ask_json("rod", "config-show");
 	if (!resp)
 		return;
 

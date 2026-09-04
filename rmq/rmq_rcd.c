@@ -51,9 +51,19 @@ cJSON *rmq_rcd_send(cJSON *req)
 	return resp;
 }
 
+cJSON *rmq_rcd_cmd(const char *cmd)
+{
+	cJSON *req = cJSON_CreateObject();
+
+	if (!req)
+		return NULL;
+	cJSON_AddStringToObject(req, "cmd", cmd);
+	return rmq_rcd_send(req);
+}
+
 bool rmq_rcd_available(void)
 {
-	cJSON *r = rmq_rcd_call("{\"cmd\":\"hello\"}");
+	cJSON *r = rmq_rcd_cmd("hello");
 	bool ok = r != NULL;
 	cJSON_Delete(r);
 	return ok;

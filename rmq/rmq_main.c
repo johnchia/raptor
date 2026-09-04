@@ -309,27 +309,34 @@ static int rmq_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 		return rss_ctrl_resp_error(resp_buf, resp_buf_size, "missing cmd");
 
 	if (strcmp(cmd, "status") == 0 || strcmp(cmd, "config-show") == 0) {
-		return rss_ctrl_resp(resp_buf, resp_buf_size,
-				     "{\"status\":\"ok\",\"connected\":%s,\"host\":\"%s\","
-				     "\"host_discovered\":%s,\"mdns\":%s,"
-				     "\"port\":%d,\"tls\":%s,\"client_id\":\"%s\","
-				     "\"topic_prefix\":\"%s\",\"commands\":%s,"
-				     "\"auto_apply\":%s,\"rcd\":%s}",
-				     rmq_mqtt_connected(st->mqtt) ? "true" : "false", st->host,
-				     st->host_discovered ? "true" : "false",
-				     /* Whether this build could discover a broker, not
-				      * whether it did. A camera stuck on the loopback
-				      * default answers the question here without anyone
-				      * having to still have the boot log. */
-				     rmq_mdns_available() ? "true" : "false", st->port,
-				     st->use_tls ? "true" : "false", st->client_id,
-				     st->topic_prefix, st->commands_enabled ? "true" : "false",
-				     st->auto_apply ? "true" : "false",
-				     /* Whether the daemon every write goes through is
-				      * answering. A bridge that cannot reach it can
-				      * still publish state it has already collected,
-				      * so this is not visible any other way. */
-				     rmq_rcd_available() ? "true" : "false");
+		/* Three of these are strings out of the configuration file --
+		 * the host, the client id, the topic prefix -- and a quote in
+		 * any of them used to produce a reply nobody could parse. The
+		 * serializer escapes them. */
+		cJSON *r = cJSON_CreateObject();
+
+		if (!r)
+			return rss_ctrl_resp_error(resp_buf, resp_buf_size, "json alloc failed");
+		cJSON_AddStringToObject(r, "status", "ok");
+		cJSON_AddBoolToObject(r, "connected", rmq_mqtt_connected(st->mqtt));
+		cJSON_AddStringToObject(r, "host", st->host);
+		cJSON_AddBoolToObject(r, "host_discovered", st->host_discovered);
+		/* Whether this build could discover a broker, not whether it
+		 * did. A camera stuck on the loopback default answers the
+		 * question here without anyone having to still have the boot
+		 * log. */
+		cJSON_AddBoolToObject(r, "mdns", rmq_mdns_available());
+		cJSON_AddNumberToObject(r, "port", st->port);
+		cJSON_AddBoolToObject(r, "tls", st->use_tls);
+		cJSON_AddStringToObject(r, "client_id", st->client_id);
+		cJSON_AddStringToObject(r, "topic_prefix", st->topic_prefix);
+		cJSON_AddBoolToObject(r, "commands", st->commands_enabled);
+		cJSON_AddBoolToObject(r, "auto_apply", st->auto_apply);
+		/* Whether the daemon every write goes through is answering. A
+		 * bridge that cannot reach it can still publish state it has
+		 * already collected, so this is not visible any other way. */
+		cJSON_AddBoolToObject(r, "rcd", rmq_rcd_available());
+		return rss_ctrl_resp_json(resp_buf, resp_buf_size, r);
 	}
 
 	/*
@@ -358,10 +365,14 @@ static int rmq_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_s
 		 * come back alongside a state document rather than ahead of one
 		 * and briefly unavailable. */
 		st->discovery_published = false;
-		return rss_ctrl_resp(resp_buf, resp_buf_size,
-				     "{\"status\":\"ok\",\"cleared\":true,"
-				     "\"republish_within_sec\":%d}",
-				     st->poll_interval_sec);
+		cJSON *r = cJSON_CreateObject();
+
+		if (!r)
+			return rss_ctrl_resp_error(resp_buf, resp_buf_size, "json alloc failed");
+		cJSON_AddStringToObject(r, "status", "ok");
+		cJSON_AddBoolToObject(r, "cleared", true);
+		cJSON_AddNumberToObject(r, "republish_within_sec", st->poll_interval_sec);
+		return rss_ctrl_resp_json(resp_buf, resp_buf_size, r);
 	}
 
 	return rss_ctrl_resp_error(resp_buf, resp_buf_size, "unknown command");

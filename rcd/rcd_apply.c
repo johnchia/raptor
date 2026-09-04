@@ -40,7 +40,7 @@
  */
 static bool rvd_pipeline_up(void)
 {
-	cJSON *r = rcd_ask_json("rvd", "{\"cmd\":\"status\"}");
+	cJSON *r = rcd_ask_json("rvd", "status");
 	if (!r)
 		return false;
 	bool up = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "ready"));
@@ -149,16 +149,16 @@ static void quiesce_rad(quiesce_t *q)
 {
 	memset(q, 0, sizeof(*q));
 
-	cJSON *r = rcd_ask_json("rad", "{\"cmd\":\"status\"}");
+	cJSON *r = rcd_ask_json("rad", "status");
 	if (!r)
 		return; /* not running -- nothing holds MI, nothing to resume */
 
 	bool ao_up = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r, "ao_enabled"));
 	cJSON_Delete(r);
 
-	q->ai = rcd_ask_ok("rad", "{\"cmd\":\"ai-disable\"}");
+	q->ai = rcd_ask_ok("rad", "ai-disable");
 	if (ao_up)
-		q->ao = rcd_ask_ok("rad", "{\"cmd\":\"ao-disable\"}");
+		q->ao = rcd_ask_ok("rad", "ao-disable");
 
 	RSS_INFO("apply: rad quiesced (input %s, output %s)", q->ai ? "released" : "untouched",
 		 q->ao ? "released" : "untouched");
@@ -166,11 +166,11 @@ static void quiesce_rad(quiesce_t *q)
 
 static void resume_rad(const quiesce_t *q, char *err, size_t errsz)
 {
-	if (q->ai && !rcd_ask_ok("rad", "{\"cmd\":\"ai-enable\"}")) {
+	if (q->ai && !rcd_ask_ok("rad", "ai-enable")) {
 		snprintf(err, errsz, "rad did not resume audio input");
 		return;
 	}
-	if (q->ao && !rcd_ask_ok("rad", "{\"cmd\":\"ao-enable\"}")) {
+	if (q->ao && !rcd_ask_ok("rad", "ao-enable")) {
 		/* rad cleared ao_enabled in its own config when it released
 		 * the output, so a failure here is not only silent audio: the
 		 * next save would make it permanent. */
@@ -194,7 +194,7 @@ static void note_error(rcd_state_t *st, const char *msg)
 /* Returns NULL on success, or the failure to report for this daemon. */
 static const char *restart_plain(rcd_state_t *st, const char *daemon, char *msg, size_t msgsz)
 {
-	if (!rcd_ask_ok(daemon, "{\"cmd\":\"restart\"}")) {
+	if (!rcd_ask_ok(daemon, "restart")) {
 		snprintf(msg, msgsz,
 			 "%s refused to restart, its new settings are in the file "
 			 "but not in effect",
@@ -229,7 +229,7 @@ static const char *restart_rvd(rcd_state_t *st, char *msg, size_t msgsz)
 	quiesce_rad(&q);
 
 	unsigned int waited = 0;
-	bool ok = rcd_ask_ok("rvd", "{\"cmd\":\"restart\"}");
+	bool ok = rcd_ask_ok("rvd", "restart");
 	if (ok) {
 		wait_down("rvd");
 		ok = wait_up("rvd", &waited);

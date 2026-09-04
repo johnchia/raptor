@@ -88,7 +88,7 @@ cJSON *rmq_poll_state(struct rmq_state *st, rmq_daemons_t *out)
 {
 	memset(out, 0, sizeof(*out));
 
-	cJSON *state = rmq_rcd_call("{\"cmd\":\"state\"}");
+	cJSON *state = rmq_rcd_cmd("state");
 	if (!state) {
 		/*
 		 * Without rcd there is no state to publish. Reporting an empty

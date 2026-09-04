@@ -32,6 +32,10 @@ cJSON *rmq_rcd_call(const char *request);
 /* As above, from an object the caller built. Takes ownership of `req`. */
 cJSON *rmq_rcd_send(cJSON *req);
 
+/* The bare {"cmd":"..."} request, built by the serializer rather than
+ * written out here -- see tools/conformity/json-gate.sh. */
+cJSON *rmq_rcd_cmd(const char *cmd);
+
 /* Whether rcd is answering. Used at startup to say so once, rather than
  * failing every command with the same message. */
 bool rmq_rcd_available(void);

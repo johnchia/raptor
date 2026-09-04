@@ -4,10 +4,14 @@
 # Structured formats are built by serializers, never string assembly:
 # a "%s" into a JSON literal is one edit away from injection, and the
 # safety of today's literal requires provenance reasoning no reviewer
-# should have to repeat. Two documented exemptions: raptorctl_help.c
-# prints example -j syntax (display text, not construction), and
-# raptor-ipc's transport error frame in rss_ctrl.c (a dependency-free
-# layer emitting a constant shape with one integer).
+# should have to repeat. Three documented exemptions: raptorctl_help.c
+# prints example -j syntax (display text, not construction), raptor-ipc's
+# transport error frame in rss_ctrl.c (a dependency-free layer emitting a
+# constant shape with one integer), and a .cmd_tpl assignment -- a Home
+# Assistant command template, whose value is a Jinja expression rather
+# than a JSON value, so the text is not a document until Home Assistant
+# renders it and no serializer can produce it. Only the template is
+# exempt; the finished payloads beside it in rmq_ha.c are built by cJSON.
 #
 # Single source of truth: test-all.sh stage 0 and the conformity git
 # hooks both call this script, so the rule cannot drift between them.
@@ -23,20 +27,26 @@ MODE=${1:---tree}
 shift || true
 [ $# -ge 1 ] || exit 0
 
-EXEMPT='raptorctl_help\.c|rss_ctrl\.c'
+# Two kinds of exemption, and they are not interchangeable: EXEMPT_FILES
+# excuses a whole file, EXEMPT_LINES excuses one construct wherever it
+# appears. Both modes below apply both, so the hooks and the suite agree
+# about what passes -- the file filter alone used to let a construct
+# through on --tree and flag it on --files.
+EXEMPT_FILES='raptorctl_help\.c|rss_ctrl\.c'
+EXEMPT_LINES='\.cmd_tpl[[:space:]]*='
 EXCLUDE_DIRS='/tests/|/fuzz/|/\.deps/|/build/|/asan-out/|/third_party/'
 
 case "$MODE" in
 --tree)
     HITS=$(/usr/bin/grep -rn '{\\"' --include='*.c' --include='*.h' "$@" 2>/dev/null |
-        grep -vE "$EXCLUDE_DIRS" | grep -vE "$EXEMPT" || true)
+        grep -vE "$EXCLUDE_DIRS" | grep -vE "$EXEMPT_FILES" | grep -vE "$EXEMPT_LINES" || true)
     ;;
 --files)
     FILES=$(printf '%s\n' "$@" | grep -E '\.(c|h)$' |
-        grep -vE "$EXCLUDE_DIRS" | grep -vE "^(tests|fuzz)/" | grep -vE "$EXEMPT" || true)
+        grep -vE "$EXCLUDE_DIRS" | grep -vE "^(tests|fuzz)/" | grep -vE "$EXEMPT_FILES" || true)
     [ -n "$FILES" ] || exit 0
     # shellcheck disable=SC2086
-    HITS=$(/usr/bin/grep -n '{\\"' $FILES 2>/dev/null || true)
+    HITS=$(/usr/bin/grep -n '{\\"' $FILES 2>/dev/null | grep -vE "$EXEMPT_LINES" || true)
     ;;
 *)
     echo "json-gate: unknown mode $MODE" >&2

@@ -374,11 +374,18 @@ typedef struct {
 	const char *value;
 
 	/* What gets published. Number and select build their payload from a
-	 * template; switch and button have no template support in Home
-	 * Assistant, so their payloads are the literal documents to send. */
+	 * template Home Assistant renders, which is Jinja and so cannot come
+	 * from a JSON serializer; switch and button have no template support
+	 * there, so the discovery document has to carry the finished request
+	 * -- assembled by cJSON in ha_payload() from the parts below rather
+	 * than written out here. Three shapes cover every entry: a bare
+	 * command, an action (optionally naming channel 0), and an [image]
+	 * key set to 1 or 0. */
 	const char *cmd_tpl;
-	const char *payload;	 /* switch on, or button press */
-	const char *payload_off; /* switch off */
+	const char *send_cmd;	  /* the request's "cmd" */
+	const char *send_arg;	  /* the action's name, or the [image] key */
+	const char *send_arg_off; /* the action a switch sends when turned off */
+	bool send_channel;	  /* an action that names channel 0 */
 
 	int min, max, step; /* CTRL_NUMBER */
 	const char *unit;
@@ -580,9 +587,8 @@ bool rmq_ha_note_camera(struct rmq_state *st, const cJSON *state)
 	 .owner = RMQ_D_RVD,                                                                       \
 	 .cap = k,                                                                                 \
 	 .value = "image." k,                                                                      \
-	 .payload = "{\"cmd\":\"set\",\"section\":\"image\",\"key\":\"" k "\",\"value\":1}",       \
-	 .payload_off = "{\"cmd\":\"set\",\"section\":\"image\",\"key\":\"" k "\","                \
-			"\"value\":0}",                                                            \
+	 .send_cmd = "set",                                                                        \
+	 .send_arg = k,                                                                            \
 	 .restarts = true}
 
 /*
@@ -607,8 +613,9 @@ static const ha_control_t controls[] = {
 	 .cat = CAT_PRIMARY,
 	 .owner = RMQ_D_ROD,
 	 .value = "osd.enabled",
-	 .payload = "{\"cmd\":\"action\",\"action\":\"osd-enable\"}",
-	 .payload_off = "{\"cmd\":\"action\",\"action\":\"osd-disable\"}"},
+	 .send_cmd = "action",
+	 .send_arg = "osd-enable",
+	 .send_arg_off = "osd-disable"},
 
 	/*
 	 * Enact the saved settings, and nothing else.
@@ -627,7 +634,7 @@ static const ha_control_t controls[] = {
 	 .icon = "mdi:content-save-cog",
 	 .cat = CAT_PRIMARY,
 	 .owner = RMQ_D_COUNT,
-	 .payload = "{\"cmd\":\"apply\"}"},
+	 .send_cmd = "apply"},
 	/* device_class restart is what makes Home Assistant draw it as the
 	 * disruptive action it is rather than as another button. */
 	{.key = "reboot",
@@ -636,14 +643,16 @@ static const ha_control_t controls[] = {
 	 .cat = CAT_PRIMARY,
 	 .owner = RMQ_D_COUNT,
 	 .dev_class = "restart",
-	 .payload = "{\"cmd\":\"reboot\"}"},
+	 .send_cmd = "reboot"},
 	{.key = "request_idr",
 	 .name = "Request keyframe",
 	 .kind = CTRL_BUTTON,
 	 .icon = "mdi:image-refresh",
 	 .cat = CAT_DIAGNOSTIC,
 	 .owner = RMQ_D_RVD,
-	 .payload = "{\"cmd\":\"action\",\"action\":\"request-idr\",\"channel\":0}"},
+	 .send_cmd = "action",
+	 .send_arg = "request-idr",
+	 .send_channel = true},
 
 	/* ---- Image: the ISP tuning ----
 	 *
@@ -732,6 +741,45 @@ static cJSON *make_component(struct rmq_state *st, const ha_entity_t *e)
 		cJSON_AddStringToObject(c, "stat_cla", "measurement");
 
 	return c;
+}
+
+/*
+ * The request a switch or a button press should send, printed into `buf`.
+ *
+ * Home Assistant publishes this verbatim on the command topic, so it has to
+ * be a finished document rather than a template -- but a finished document
+ * is exactly what a serializer is for, and writing it out in the table
+ * instead is what tools/conformity/json-gate.sh exists to catch. Answers
+ * NULL if it could not be built, which the caller leaves out of the
+ * discovery document: an entity with no payload is one Home Assistant will
+ * not draw, which is better than one that sends nothing when pressed.
+ */
+static const char *ha_payload(const ha_control_t *ct, bool on, char *buf, size_t cap)
+{
+	const char *arg = on ? ct->send_arg : ct->send_arg_off;
+	cJSON *o;
+
+	if (!ct->send_cmd)
+		return NULL;
+	o = cJSON_CreateObject();
+	if (!o)
+		return NULL;
+	buf[0] = '\0';
+	cJSON_AddStringToObject(o, "cmd", ct->send_cmd);
+	if (strcmp(ct->send_cmd, "action") == 0) {
+		cJSON_AddStringToObject(o, "action", arg ? arg : "");
+		if (ct->send_channel)
+			cJSON_AddNumberToObject(o, "channel", 0);
+	} else if (strcmp(ct->send_cmd, "set") == 0) {
+		/* Every switch here is an [image] key held at 1 or 0. */
+		cJSON_AddStringToObject(o, "section", "image");
+		cJSON_AddStringToObject(o, "key", ct->send_arg ? ct->send_arg : "");
+		cJSON_AddNumberToObject(o, "value", on ? 1 : 0);
+	}
+	if (!cJSON_PrintPreallocated(o, buf, (int)cap, 0))
+		buf[0] = '\0';
+	cJSON_Delete(o);
+	return buf[0] ? buf : NULL;
 }
 
 /* Build one control entry. */
@@ -829,9 +877,15 @@ static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct)
 			cJSON_AddItemToArray(opts, cJSON_CreateString(ct->options[i]));
 		break;
 	}
-	case CTRL_SWITCH:
-		cJSON_AddStringToObject(c, "pl_on", ct->payload);
-		cJSON_AddStringToObject(c, "pl_off", ct->payload_off);
+	case CTRL_SWITCH: {
+		char on[192], off[192];
+		const char *pon = ha_payload(ct, true, on, sizeof(on));
+		const char *poff = ha_payload(ct, false, off, sizeof(off));
+
+		if (pon)
+			cJSON_AddStringToObject(c, "pl_on", pon);
+		if (poff)
+			cJSON_AddStringToObject(c, "pl_off", poff);
 		/*
 		 * Home Assistant defaults state_on to payload_on, which here is
 		 * a command document the camera has no reason to ever echo. Left
@@ -843,9 +897,15 @@ static cJSON *make_control(struct rmq_state *st, const ha_control_t *ct)
 		cJSON_AddStringToObject(c, "stat_on", "ON");
 		cJSON_AddStringToObject(c, "stat_off", "OFF");
 		break;
-	case CTRL_BUTTON:
-		cJSON_AddStringToObject(c, "pl_prs", ct->payload);
+	}
+	case CTRL_BUTTON: {
+		char press[192];
+		const char *p = ha_payload(ct, true, press, sizeof(press));
+
+		if (p)
+			cJSON_AddStringToObject(c, "pl_prs", p);
 		break;
+	}
 	}
 
 	return c;
