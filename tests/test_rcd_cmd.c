@@ -2918,6 +2918,27 @@ TEST nothing_is_unavailable_until_the_camera_says_so(void)
 	ASSERT(rcd_key_available(&st, rcd_key_find("image", "hflip")));
 	ASSERT(rcd_key_available(&st, rcd_key_find("image", "vflip")));
 
+	/*
+	 * And nothing about this list is limited to the ISP setters, which is
+	 * what it was quietly taken to be. Rotation is an [image] key whose
+	 * setter is on the framesource half of the vtable; it reached the
+	 * schema naming no entry in rvd's settable list and was hidden on
+	 * every camera as a result -- a control nobody could see and no test
+	 * could miss, because nothing tied the two lists together.
+	 *
+	 * Both directions, because the answer is the camera's: a part that can
+	 * turn a picture says so and a part that cannot must not be offered
+	 * the control. The i6c list above is the second case already.
+	 */
+	ASSERT_EQm("a camera that did not publish rotation must not offer it", false,
+		   rcd_key_available(&st, rcd_key_find("image", "rotate")));
+	snprintf(st.isp_settable, sizeof(st.isp_settable),
+		 ",brightness,contrast,saturation,hflip,vflip,ae_comp,drc_strength,rotate,");
+	ASSERTm("a camera that publishes rotation must offer it",
+		rcd_key_available(&st, rcd_key_find("image", "rotate")));
+	ASSERT_EQm("and the same list still hides what it does not name", false,
+		   rcd_key_available(&st, rcd_key_find("image", "sharpness")));
+
 	/* The list answers for [image] and nothing else. */
 	ASSERT(rcd_key_available(&st, rcd_key_find("stream0", "bitrate")));
 	ASSERT(rcd_key_available(&st, rcd_key_find("sensor", "antiflicker")));

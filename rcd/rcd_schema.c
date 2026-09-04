@@ -390,6 +390,13 @@ static const rcd_key_t keys[] = {
 	 * the ISP knobs use -- this table rejects what no platform could take
 	 * and the camera answers for itself.
 	 */
+	/*
+	 * NOTE for anything else added to [image]: rcd_key_available answers
+	 * for this whole section out of the `settable` list rvd builds in
+	 * rvd_ctrl.c, so a key with no name in that list is reported
+	 * unavailable and every client hides it. This one was, for exactly as
+	 * long as it took to flash a camera and look.
+	 */
 	{"image", "rotate", V_ENUM, 0, 0, choices_rotate, SAVED},
 
 	/* -- Snapshots -- */

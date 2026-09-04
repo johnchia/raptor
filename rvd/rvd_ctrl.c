@@ -1582,6 +1582,39 @@ static int handle_isp_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st
 		ISP_CAP(isp_set_backlight_comp, "backlight_comp");
 		ISP_CAP(isp_set_defog_strength, "defog_strength");
 #undef ISP_CAP
+		/*
+		 * And one [image] key that is not an ISP setter.
+		 *
+		 * rcd asks this list whether a key is available, and asks it
+		 * for the whole of [image] rather than only the knobs, so a key
+		 * missing here is hidden from every client. That is what
+		 * happened to rotation the day it reached the schema. The list
+		 * is "the [image] keys this camera can do"; it was the same set
+		 * as the ISP setters until now and the difference never came up.
+		 *
+		 * Not because rotation is applied at pipeline init. So are the
+		 * flips on the SigmaStar backends, and they stay visible --
+		 * isp_set_hflip is in the vtable whether or not a live call
+		 * would be honoured, which is the distinction probe_isp's own
+		 * comment draws. Rotation is absent for two duller reasons: its
+		 * setter is fs_set_rotation, on the framesource half of the
+		 * vtable that ISP_CAP does not scan, and that pointer would be
+		 * the wrong test even if it did. One Ingenic vtable serves nine
+		 * SoCs and only T31 among them can turn a picture, so the
+		 * pointer is non-NULL on eight parts that cannot.
+		 *
+		 * Hence the caps bit -- the same answer rvd's own pipeline gate
+		 * uses before it turns anything. Publishing on any other basis
+		 * would offer a control that rvd goes on to ignore.
+		 */
+		{
+			const rss_hal_caps_t *caps =
+				st->ops->get_caps ? st->ops->get_caps(st->hal_ctx) : NULL;
+
+			if (caps && caps->has_rotation && sl < sizeof(settable) - 1)
+				sl += (size_t)snprintf(settable + sl, sizeof(settable) - sl,
+						       "rotate,");
+		}
 		cJSON_AddStringToObject(r, "settable", settable);
 
 		return rss_ctrl_resp_json(resp, resp_size, r);
