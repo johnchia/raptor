@@ -534,6 +534,42 @@ Verified on the EV300 at 2592x1944: bracketed restart, rvd pid moves, 51 MMZ
 blocks before and after, encoders back, rad resumed, nothing in dmesg; raw
 restart refused with the reason and rvd still serving.
 
+Both guards are on the word `restart`. `raptorctl rvd stop` followed by
+`raptorctl rvd start` reaches the same place and neither guard sees it --
+2026-09-03, swapping a test binary, which wedged the camera exactly as above
+and cost a reboot. Extending rvd's refusal to `stop` would close it; the
+argument against is that `stop` is also how you deliberately take video down,
+and refusing that because audio is up would be its own surprise. Unresolved,
+and written here so the next person swapping a binary brackets it by hand:
+
+```
+raptorctl rad ai-disable && raptorctl rvd restart && raptorctl rad ai-enable
+```
+
+### Reading a wedged VB
+
+`HI_MPI_VB_SetConfig` returning `0xa0018012` now prints what is standing, so
+the state above is a diagnosis rather than a dead end. `hisi_vb_report_holders`
+in `hisi_v4/hal_common.c` reads `/proc/umap/vb` and logs each pool -- common
+or private, size, block count, free -- and the modules still holding blocks,
+then the line that matters: everything listed has already outlived
+`hisi_reclaim_pipeline`, `SYS_Exit` and `VB_Exit`, so a reboot is the way
+out.
+
+The `Owner` column is not the signal it looks like. A healthy EV300
+mid-stream reports `Owner -2` on all seven of its private pools, so a
+negative owner says nothing about whether a process is alive to free the
+pool; the conclusion comes from the call site, which holds regardless.
+
+**The reclaim, if this recurs.** `HI_MPI_VB_DestroyPool` over every private
+pool left standing at that point is the obvious next step, and is deliberately
+not taken: a pool still holding a block may refuse to be destroyed, and a
+destroy that half-succeeds leaves a worse state than the one it was called
+from -- which is the same `free_contig_range` warning above, from a second
+direction. Worth building if the wedge turns out to happen often enough to
+justify proving it on the bench. Until then the report plus a reboot is the
+whole of the answer.
+
 What neither covers is rvd being SIGKILLed, or dying between the release and
 the resume -- rcd's own comment says as much. Deliberately: rad would have to
 watch for rvd's ring and re-attach to itself, and the recovery for a camera
