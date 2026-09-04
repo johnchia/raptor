@@ -168,8 +168,22 @@ function reply(body) {
 			results: [{section: e.section, key: e.key, value: e.value,
 				   applied: "live"}]};
 	}
+	/*
+	 * Readings, not just modes. The sidebar had no fixture at all, so the
+	 * status box was drawn on every run and asserted on never.
+	 *
+	 * 7680 of 61440 kB is an eighth left -- the middle band, so the class
+	 * the page picks is neither of the two easy ones. Gain 1080 is 1.05x
+	 * to the multiplier and the raw figure the ircut thresholds are
+	 * written in, which is the pair the Gain line has to show.
+	 */
 	if (cmd === "state") return {api: 1, status: "ok", up: {}, daemons_up: 6,
-				    ir: {mode: "auto", state: "day"}, image: ISP_STATE};
+				    uptime: 3 * 3600 + 20 * 60,
+				    mem: {total_kb: 61440, avail_kb: 7680,
+					  avail_from: "MemAvailable"},
+				    ir: {mode: "auto", state: "day",
+					 total_gain: 1080, ae_luma: 47},
+				    image: ISP_STATE};
 	return {api: 1, status: "ok"};
 }
 
@@ -616,6 +630,58 @@ try {
 	if (set.edits[0].key !== "sharpness" || set.edits[0].value !== 127)
 		fail("sharpness 200 was sent as " + JSON.stringify(set.edits[0].value) +
 		     ", where the camera's ceiling is 127");
+
+	/*
+	 * The status sidebar. Every line here is a reading an operator uses to
+	 * answer a question the page cannot answer for them -- why the camera
+	 * has not gone to night, whether the leak they are chasing is real --
+	 * so the assertions are about what each line has to carry, not about
+	 * its wording.
+	 */
+	const stats = nodes.status.querySelectorAll(".stat");
+	const statAt = name => stats.find(d => d.querySelector(".k").textContent === name);
+	const statVal = name => (statAt(name) ? statAt(name).querySelector(".v").textContent : null);
+
+	const mem = statAt("Memory");
+	if (!mem) fail("the sidebar drew no memory line");
+	/* Before uptime, where it was asked for: a monitor read at a glance
+	 * wants to be with the other health lines, not after the inventory. */
+	if (stats.indexOf(mem) > stats.indexOf(statAt("Uptime")))
+		fail("the memory line was drawn after uptime, not before it");
+	if (!/7\.5 MB free \(13%\)/.test(statVal("Memory")))
+		fail("memory read " + JSON.stringify(statVal("Memory")) +
+		     ", not the free figure and the share of the total");
+	/* An eighth left is the middle band. Drawing it green would be the
+	 * failure that matters -- a monitor that only ever reads good. */
+	const memCls = mem.querySelector(".v").className;
+	if (!/\bbad\b/.test(memCls))
+		fail("an eighth of memory left was drawn as " + JSON.stringify(memCls));
+
+	/* The multiplier is what a person reads; the raw figure is what the
+	 * ircut thresholds are written in, so a page showing only one of them
+	 * makes the operator convert in their head to use the other tab. */
+	if (statVal("Gain") !== "1.05\u00d7 (1080)")
+		fail("gain read " + JSON.stringify(statVal("Gain")) +
+		     ", not the multiplier and the raw figure together");
+
+	if (statVal("AE luma") !== "47")
+		fail("the sidebar drew no AE luma, which is half of the night rule");
+
+	/*
+	 * Rotation is four degrees, not a range: a labelled integer cannot
+	 * name 0, 90, 180 and 270, so the schema sends it as an enum and the
+	 * page has to draw the four rather than a slider from 0 to 270.
+	 */
+	p.setActive("image");
+	p.render();
+	await settle();
+	const rot = rowFor("rotate");
+	if (!rot) fail("the image tab drew no rotation row");
+	if (sliderIn(rot)) fail("rotation was drawn as a slider over its degrees");
+	if (rot.querySelectorAll(".seg").length !== 1)
+		fail("rotation has four settings and the page did not draw them as one choice");
+	if (!/270/.test(rot.textContent))
+		fail("the rotation control did not offer every angle the camera takes");
 
 	console.log("ok  " + p.TABS.length + " tabs, " + drawn + " groups, " + undos +
 		    " reset controls, " + staged + " redrawn with a reset staged, " +

@@ -2752,6 +2752,35 @@ TEST exposure_compensation_goes_both_ways(void)
 }
 
 /*
+ * Rotation is four angles, not a range, and what lands in the file has to be
+ * degrees: rvd reads [image] rotate with rss_config_get_int, so an index would
+ * mean 90 where 1 was asked for and would do it silently, on the next start.
+ * A numeric enum writes its own spelling, which is the whole reason it is one
+ * rather than a labelled integer -- and a labels array could not name 0, 90,
+ * 180 and 270 anyway, labelling min + i.
+ */
+TEST rotation_is_degrees_and_only_right_angles(void)
+{
+	rcd_edit_t e[RCD_EDITS_MAX];
+	int n = 0;
+
+	ASSERT_SET_OK("{\"section\":\"image\",\"key\":\"rotate\",\"value\":270}", e, &n);
+	ASSERT_STR_EQm("a number has to reach the file as the same number", "270", e[0].rendered);
+	n = 0;
+	ASSERT_SET_OK("{\"section\":\"image\",\"key\":\"rotate\",\"value\":\"90\"}", e, &n);
+	ASSERT_STR_EQm("and so does the same value spelled as a string", "90", e[0].rendered);
+
+	/* The VPSS has no setting for an angle off the quarter turns, and a
+	 * value it would ignore is worse stored than refused: the file would
+	 * say the picture is turned and the picture would not be. */
+	n = 0;
+	ASSERTm("45 is not an angle this hardware turns to",
+		validate_set("{\"section\":\"image\",\"key\":\"rotate\",\"value\":45}", e, &n) !=
+			0);
+	PASS();
+}
+
+/*
  * And the word survives the round trip. Read as a number it is 0 -- in range,
  * on the scale, and wrong: a knob following the tuning would be reported as
  * one pinned at its floor, and a client writing that value back would pin it
@@ -3546,6 +3575,7 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(the_schema_says_which_keys_reset_live);
 	RUN_TEST(the_schema_says_which_keys_take_auto);
 	RUN_TEST(exposure_compensation_goes_both_ways);
+	RUN_TEST(rotation_is_degrees_and_only_right_angles);
 	RUN_TEST(a_knob_left_on_auto_reads_back_as_auto);
 	RUN_TEST(refuses_more_edits_than_a_request_may_carry);
 	RUN_TEST(state_leaves_out_an_isp_knob_rvd_could_not_read);

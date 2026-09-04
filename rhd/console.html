@@ -71,6 +71,10 @@ main{display:flex;flex-direction:column;min-width:0;min-height:100vh}
          word-break:break-word}
 .stat .v.good{color:var(--ok)}
 .stat .v.bad{color:var(--amber)}
+/* A third level, for a reading that is not "worth a look" but "wrong now".
+   Red is what this page already means by that -- the pipeline chip, the error
+   banner, the danger button -- so a monitor claiming it has to earn it. */
+.stat .v.crit{color:var(--red)}
 
 /* Collapsed by default: it is a diagnostic, and a page that opens showing its
    own network traffic looks like something has gone wrong. */
@@ -397,6 +401,7 @@ const L = {
  "image.backlight_comp":["Backlight compensation"],
  "image.hflip":["Mirror horizontally","","Some platforms take this at channel creation, and then it needs an apply."],
  "image.vflip":["Flip vertically"],
+ "image.rotate":["Rotation","","Turns the whole picture, in degrees clockwise. 90 and 270 swap the encoder's width and height, so this is read once when the pipeline is built and needs an apply. Backends that cannot turn the picture ignore it."],
  "stream0.width":["Width","px"],"stream0.height":["Height","px"],
  "stream0.codec":["Video codec","","H.265 halves the bitrate for the same picture; some clients cannot decode it."],
  "stream0.profile":["H.264 profile"],
@@ -1834,6 +1839,29 @@ function statLine(box, k, v, cls, title) {
   if (title) d.title = title;
   d.append(ke, ve); box.append(d);
 }
+/*
+ * Free memory, as a monitor rather than a readout: the colour is the point,
+ * because the number alone means nothing to anyone who has not memorised this
+ * camera's total.
+ *
+ * MemAvailable, which rcd picks over MemFree and says which it sent. On a
+ * camera MemFree is always alarming -- the frame buffers and the page cache
+ * hold most of it and give it back on demand -- so a monitor built on MemFree
+ * would cry wolf on a healthy box and be ignored by the time it mattered.
+ *
+ * A tenth left is the line. Below it the allocator is into the cache and the
+ * next big buffer is the one that fails, which on this camera is a stream
+ * restart; a fifth is where that stops being comfortable.
+ */
+function memLine(box, m) {
+  if (!m || !m.total_kb) return;
+  const pct = Math.round(m.avail_kb * 100 / m.total_kb);
+  const mb = k => (k / 1024).toFixed(k < 10240 ? 1 : 0) + " MB";
+  statLine(box, "Memory", mb(m.avail_kb) + " free (" + pct + "%)",
+           pct < 10 ? "crit" : pct < 20 ? "bad" : "good",
+           (m.avail_from || "MemAvailable") + " " + m.avail_kb + " kB of " +
+           m.total_kb + " kB");
+}
 function hhmm(secs) {
   secs = Math.max(0, Math.floor(secs));
   const d = Math.floor(secs / 86400), h = Math.floor(secs % 86400 / 3600),
@@ -1856,6 +1884,7 @@ async function loadState() {
 
   statLine(box, "Pipeline", up.rvd ? "running" : "down", up.rvd ? "good" : "bad");
   statLine(box, "Daemons", running.length + " up");
+  memLine(box, s.mem);
   if (s.uptime !== undefined) statLine(box, "Uptime", hhmm(s.uptime));
   ["stream0", "stream1"].forEach((k, i) => {
     const st = s[k];
@@ -1888,7 +1917,20 @@ async function loadState() {
   if (ir.exposure_us)
     statLine(box, "Exposure", shutter(ir.exposure_us), "", ir.exposure_us + " \u00b5s");
   if (ir.total_gain)
-    statLine(box, "Gain", gain(ir.total_gain), "", "raw " + ir.total_gain + " (1024 = 1\u00d7)");
+    statLine(box, "Gain", gain(ir.total_gain) + " (" + ir.total_gain + ")", "",
+             "The multiplier, and the raw figure the thresholds are written in: " +
+             "1024 = 1\u00d7");
+  /*
+   * The luma the AE settled on, which is the other half of the night rule --
+   * the switch is luma below a threshold OR gain above one, and an operator
+   * asking why the camera has not gone to night is asking about whichever of
+   * the two is short. It reads 0 on a sensor that has not produced a frame,
+   * and rvd leaves it out entirely where the backend cannot report it, so an
+   * explicit test rather than a truthiness one: 0 is a reading.
+   */
+  if (ir.ae_luma !== undefined)
+    statLine(box, "AE luma", String(ir.ae_luma), "",
+             "The frame's mean luminance as the AE measures it, 0-255");
 }
 
 /*

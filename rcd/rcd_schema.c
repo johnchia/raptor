@@ -186,6 +186,16 @@ static const char *const choices_algorithm[] = {"move", "base_move", "persondet"
 static const char *const choices_recmode[] = {"continuous", "motion", "both", NULL};
 
 /*
+ * Degrees, spelled out, and a V_ENUM rather than a labelled V_INT because the
+ * four legal values are not consecutive: a labels array names `min + i` and
+ * has no way to say 0, 90, 180, 270. A numeric enum writes its own spelling,
+ * so the file gets `rotate = 90` and rvd's rss_config_get_int reads 90 --
+ * audio.sample_rate is the same shape and the reason enum validation accepts a
+ * number as well as a string.
+ */
+static const char *const choices_rotate[] = {"0", "90", "180", "270", NULL};
+
+/*
  * Integer keys whose values are names rather than magnitudes.
  *
  * The array labels the value `min + i` and is display only: what reaches the
@@ -367,6 +377,20 @@ static const rcd_key_t keys[] = {
 	 * "either way" for the sensor to be reading out. */
 	{"image", "hflip", V_INT, 0, 1, NULL, LIVE("set-hflip")},
 	{"image", "vflip", V_INT, 0, 1, NULL, LIVE("set-vflip")},
+	/*
+	 * Rotation is the restart tier and the flips are not, which looks
+	 * inconsistent beside them and is not: rvd reads [image] rotate once,
+	 * during pipeline init, because 90 and 270 swap the encoder's width and
+	 * height and an encoder is created at its size. The flips are a bit in
+	 * a channel attribute and can be flipped under a running stream.
+	 *
+	 * Offered on every platform, refused by the one underneath: rvd checks
+	 * caps.has_rotation and logs that it is ignoring the key on a backend
+	 * that cannot turn the picture, which is the same division of labour
+	 * the ISP knobs use -- this table rejects what no platform could take
+	 * and the camera answers for itself.
+	 */
+	{"image", "rotate", V_ENUM, 0, 0, choices_rotate, SAVED},
 
 	/* -- Snapshots -- */
 	{"jpeg", "enabled", V_BOOL, 0, 0, NULL, SAVED},

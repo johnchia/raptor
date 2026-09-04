@@ -416,6 +416,54 @@ static void collect_rod(cJSON *state)
 	cJSON_Delete(resp);
 }
 
+/*
+ * How much of this camera's RAM is left, from /proc/meminfo.
+ *
+ * MemAvailable rather than MemFree, and the difference is the whole point on a
+ * camera: the frame buffers and the page cache make MemFree look alarming on a
+ * box that is perfectly healthy, where MemAvailable is the kernel's own
+ * estimate of what a new allocation could actually get. MemFree is the
+ * fallback only for a kernel too old to publish it, and the client is told
+ * which it got rather than left to guess -- an operator watching for a leak is
+ * watching a number whose meaning has to be stable.
+ *
+ * Absent, like every other reading here, when the file cannot be read.
+ */
+static void collect_memory(cJSON *state)
+{
+	int len = 0;
+	char *mi = rss_read_file("/proc/meminfo", &len);
+	long total = 0, avail = 0, free_kb = 0;
+	cJSON *o;
+
+	if (!mi)
+		return;
+
+	for (const char *l = mi; *l;) {
+		const char *nl = strchr(l, '\n');
+
+		if (!strncmp(l, "MemTotal:", 9))
+			total = strtol(l + 9, NULL, 10);
+		else if (!strncmp(l, "MemAvailable:", 13))
+			avail = strtol(l + 13, NULL, 10);
+		else if (!strncmp(l, "MemFree:", 8))
+			free_kb = strtol(l + 8, NULL, 10);
+		if (!nl)
+			break;
+		l = nl + 1;
+	}
+	free(mi);
+
+	if (total <= 0)
+		return;
+	o = cJSON_AddObjectToObject(state, "mem");
+	if (!o)
+		return;
+	cJSON_AddNumberToObject(o, "total_kb", (double)total);
+	cJSON_AddNumberToObject(o, "avail_kb", (double)(avail > 0 ? avail : free_kb));
+	cJSON_AddStringToObject(o, "avail_from", avail > 0 ? "MemAvailable" : "MemFree");
+}
+
 static void collect_system(cJSON *state)
 {
 	int len = 0;
@@ -426,6 +474,7 @@ static void collect_system(cJSON *state)
 		cJSON_AddNumberToObject(state, "uptime", (double)(long)secs);
 		free(up);
 	}
+	collect_memory(state);
 
 	/*
 	 * Whether this camera still has to be told which network to join --
