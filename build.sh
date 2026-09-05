@@ -225,23 +225,162 @@ fi
 
 export PATH="$TOOLCHAIN:$PATH"
 
-MAKE_ARGS="PLATFORM=$PLATFORM CROSS_COMPILE=$CROSS_COMPILE SYSROOT=$SYSROOT AAC=1 OPUS=1 MP3=1"
+MAKE_ARGS="PLATFORM=$PLATFORM CROSS_COMPILE=$CROSS_COMPILE SYSROOT=$SYSROOT"
 [ -n "${SOC_MODEL:-}" ] && MAKE_ARGS="$MAKE_ARGS SOC_MODEL=$SOC_MODEL"
 
-# Auto-detect TLS support
-if [ -f "$SYSROOT/usr/lib/libmbedtls.so" ] || [ -f "$SYSROOT/lib/libmbedtls.so" ]; then
+# AUDIO CODECS, ASKED FOR RATHER THAN ASSERTED
+#
+# AAC=1 OPUS=1 MP3=1 used to be unconditional, which is a claim about every
+# sysroot this script can be pointed at. It is not true of an OpenIPC one:
+# general/package has helix-aac and no helix-mp3 at all, so MP3=1 reached rac
+# as
+#
+#   rac_play.c:18: fatal error: mp3dec.h: No such file or directory
+#
+# with every other daemon already built. Each switch is now asked of the
+# sysroot the way TLS is below, so a codec the image does not ship costs that
+# codec rather than the build.
+#
+# The headers are what is tested, not the libraries: they arrive together from
+# one package, and the header is the name the source actually reaches for.
+#
+# AAC is two libraries under one switch -- faac to encode, helix-aac to decode
+# -- and rsd's backchannel decodes, so both have to be present for the switch
+# to be honest.
+CODECS=""
+if [ -f "$SYSROOT/usr/include/faac.h" ] && [ -f "$SYSROOT/usr/include/aacdec.h" ]; then
+    MAKE_ARGS="$MAKE_ARGS AAC=1"
+    CODECS="$CODECS aac"
+fi
+if [ -f "$SYSROOT/usr/include/opus/opus.h" ]; then
+    MAKE_ARGS="$MAKE_ARGS OPUS=1"
+    CODECS="$CODECS opus"
+fi
+if [ -f "$SYSROOT/usr/include/mp3dec.h" ]; then
+    MAKE_ARGS="$MAKE_ARGS MP3=1"
+    CODECS="$CODECS mp3"
+fi
+
+# TLS, AND WHICH MBEDTLS THAT MEANS
+#
+# rss_tls.c is written against the 3.x API -- mbedtls_pk_parse_keyfile takes
+# an RNG there and does not in 2.x -- so "is there an mbedtls" is the wrong
+# question to gate on. An OpenIPC sysroot answers yes twice: Majestic pins
+# the end-of-life 2.25 at the shared usr/include and usr/lib, and
+# mbedtls3-openipc installs 3.6 under its own usr/mbedtls3 prefix precisely
+# so the two can coexist. This used to find the 2.25 and set TLS=1 against
+# its headers, and the build stopped at
+#
+#   rss_tls.c:109: error: too many arguments to function mbedtls_pk_parse_keyfile
+#
+# with rvd already cleaned and never relinked. Nothing was wrong with the
+# sysroot; the detection was asking about the wrong library.
+#
+# So look for a 3.x tree, private prefix first, and build HTTP-only when
+# there is none rather than starting a build that cannot finish. This is the
+# same choice general/package/raptor-streaming/raptor-streaming.mk makes for
+# the firmware image, by hand, with MBEDTLS3_OPENIPC_CFLAGS and _LIBS.
+mbedtls_major() {
+    sed -n 's/^#define MBEDTLS_VERSION_STRING  *"\([0-9][0-9]*\)\..*/\1/p' "$1" 2> /dev/null
+}
+
+TLS_CFLAGS=""
+TLS_LDFLAGS=""
+for prefix in "$SYSROOT/usr/mbedtls3" "$SYSROOT/usr" "$SYSROOT"; do
+    [ -f "$prefix/lib/libmbedtls.so" ] || continue
+    # 3.x moved the version defines out of version.h and into build_info.h,
+    # which 2.x does not have at all, so both are read and the first answer
+    # wins.
+    major=$(mbedtls_major "$prefix/include/mbedtls/build_info.h")
+    [ -n "$major" ] || major=$(mbedtls_major "$prefix/include/mbedtls/version.h")
+    [ "${major:-0}" -ge 3 ] 2> /dev/null || continue
+    TLS_CFLAGS="-I$prefix/include"
+    # Whole library paths rather than -lmbedtls, because this is appended
+    # after the Makefile's -L$SYSROOT/usr/lib and that directory holds
+    # 2.25's libraries. Left to the linker's search order the link pairs
+    # 3.x headers with 2.x code and says nothing about it -- the symptom is
+    # libmbedtls.so.13 in DT_NEEDED, found only by looking.
+    TLS_LDFLAGS="$prefix/lib/libmbedtls.so $prefix/lib/libmbedx509.so $prefix/lib/libmbedcrypto.so"
     MAKE_ARGS="$MAKE_ARGS TLS=1 WEBTORRENT=1"
+    break
+done
+
+# COMPY, FROM THE SYSROOT WHEN IT IS THERE
+#
+# raptor's Makefile defaults LIB_COMPY_FILE to ../compy/build-$ARCH/libcompy.a,
+# a CMake tree somebody built by hand at some point. That artefact outlives the
+# toolchain that made it, and LTO turns the mismatch into a hard stop rather
+# than a quiet one:
+#
+#   lto1: fatal error: bytecode stream in .../libcompy.a generated with LTO
+#         version 16.0 instead of the expected 13.1
+#
+# -- an August build with thingino's gcc 16, linked by OpenIPC's gcc 13.3.
+#
+# A Buildroot output carrying the compy package already has a libcompy.a built
+# by the very compiler found above, with the four header dependencies
+# (slice99, datatype99, interface99, metalang99) installed beside it. Prefer
+# it, and fall back to the sibling checkout when the sysroot has none, which is
+# what a non-OpenIPC tree will do.
+#
+# COMPY_HAS_TLS has to be spelled out here even though the Makefile adds it
+# under TLS=1: COMPY_CFLAGS becomes a command-line variable below and so beats
+# the Makefile's +=, losing anything it would have appended. This is the same
+# note raptor-streaming.mk carries for the same reason, and the same coupling
+# -- it is only correct while the compy being linked was itself built with
+# TLS, which the package's COMPY_TLS_MBEDTLS=ON makes true.
+COMPY_LIB=""
+COMPY_CFLAGS_VAL=""
+if [ -f "$SYSROOT/usr/lib/libcompy.a" ] && [ -d "$SYSROOT/usr/include/compy" ]; then
+    COMPY_LIB="$SYSROOT/usr/lib/libcompy.a"
+    COMPY_CFLAGS_VAL="-I$SYSROOT/usr/include"
+    [ -n "$TLS_CFLAGS" ] && COMPY_CFLAGS_VAL="$COMPY_CFLAGS_VAL -DCOMPY_HAS_TLS"
 fi
 
 echo "Building for $PLATFORM"
 echo "  Output:  $br_output"
 echo "  Sysroot: $SYSROOT"
 echo "  Cross:   $CROSS_COMPILE"
+if [ -n "$TLS_CFLAGS" ]; then
+    echo "  TLS:     ${TLS_CFLAGS#-I}"
+else
+    echo "  TLS:     none -- no mbedtls 3.x in the sysroot, rhd builds HTTP-only"
+fi
+if [ -n "$COMPY_LIB" ]; then
+    echo "  compy:   $COMPY_LIB"
+else
+    echo "  compy:   ../compy/build-<arch> (none in the sysroot)"
+fi
+echo "  Codecs: ${CODECS:- none}"
+
+# A function rather than more words in MAKE_ARGS: these values carry paths and
+# more than one of them per variable, and MAKE_ARGS is deliberately unquoted so
+# the rest of it splits into separate arguments. They cannot share a slot.
+#
+# All of them are command-line assignments, which is what makes them stick --
+# the Makefile spells LDFLAGS_TLS with := inside its TLS=1 arm and EXTRA_CFLAGS
+# with ?=, and a command-line variable beats either.
+#
+# The TLS pair is passed unconditionally: with no 3.x in the sysroot both are
+# empty, which is exactly what the Makefile would have used. The compy set is
+# not, because an empty COMPY_CFLAGS would override the include paths the
+# sibling-checkout fallback needs rather than leaving them alone.
+run_make() {
+    if [ -n "$COMPY_LIB" ]; then
+        # shellcheck disable=SC2086
+        make $MAKE_ARGS EXTRA_CFLAGS="$TLS_CFLAGS" LDFLAGS_TLS="$TLS_LDFLAGS" \
+            COMPY_CFLAGS="$COMPY_CFLAGS_VAL" \
+            LIB_COMPY_FILE="$COMPY_LIB" LIB_COMPY="$COMPY_LIB" "$@"
+    else
+        # shellcheck disable=SC2086
+        make $MAKE_ARGS EXTRA_CFLAGS="$TLS_CFLAGS" LDFLAGS_TLS="$TLS_LDFLAGS" "$@"
+    fi
+}
 
 if [ $# -eq 0 ]; then
-    make $MAKE_ARGS distclean
-    make -j$(nproc) $MAKE_ARGS rvd rsd rad rhd rod ric rmr rmd rwd raptorctl ringdump rac
-    exec make $MAKE_ARGS build
+    run_make distclean
+    run_make -j$(nproc) rvd rsd rad rhd rod ric rmr rmd rwd raptorctl ringdump rac
+    run_make build
 else
-    exec make -j$(nproc) $MAKE_ARGS "$@"
+    run_make -j$(nproc) "$@"
 fi
