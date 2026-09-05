@@ -280,8 +280,15 @@ fi
 # there is none rather than starting a build that cannot finish. This is the
 # same choice general/package/raptor-streaming/raptor-streaming.mk makes for
 # the firmware image, by hand, with MBEDTLS3_OPENIPC_CFLAGS and _LIBS.
+
+# Answers with the major version, or with nothing, and SUCCEEDS EITHER WAY.
+# The `|| true` is load-bearing: sed exits 2 on a header that is not there,
+# 2.x has no build_info.h at all, and under `set -e` a failing command
+# substitution in an assignment kills the script. It did -- every sysroot
+# carrying only mbedtls 2.x, which is every one of them except the 6C's,
+# exited 2 before printing a single line.
 mbedtls_major() {
-    sed -n 's/^#define MBEDTLS_VERSION_STRING  *"\([0-9][0-9]*\)\..*/\1/p' "$1" 2> /dev/null
+    sed -n 's/^#define MBEDTLS_VERSION_STRING  *"\([0-9][0-9]*\)\..*/\1/p' "$1" 2> /dev/null || true
 }
 
 TLS_CFLAGS=""
@@ -377,9 +384,27 @@ run_make() {
     fi
 }
 
+# rwd only where there is a 3.x mbedtls to build it against. Unlike rhd, which
+# degrades to HTTP-only and is worth having either way, rwd cannot be built at
+# all without one: its link rule hardcodes -DRSS_HAS_TLS and
+# -DMBEDTLS_ALLOW_PRIVATE_ACCESS, and rwd_dtls.c is 3.x source throughout --
+# mbedtls_ssl_set_export_keys_cb, the MBEDTLS_PRIVATE accessors, the 5-argument
+# mbedtls_pk_parse_keyfile. Against 2.25 headers it produces sixteen errors and
+# takes the whole build down with it, which is what a gen4 build did.
+#
+# Asking for it unconditionally was survivable only while every sysroot in use
+# carried 3.x. The HiSilicon ones do not. Note that the firmware image never
+# built it either -- raptor-streaming.mk's DAEMONS list is rvd rsd rad rod ric
+# rmq rhd rcd -- so this is a dev-build gap, not an image regression.
+DEFAULT_TARGETS="rvd rsd rad rhd rod ric rmr rmd raptorctl ringdump rac"
+if [ -n "$TLS_CFLAGS" ]; then
+    DEFAULT_TARGETS="$DEFAULT_TARGETS rwd"
+fi
+
 if [ $# -eq 0 ]; then
     run_make distclean
-    run_make -j$(nproc) rvd rsd rad rhd rod ric rmr rmd rwd raptorctl ringdump rac
+    # shellcheck disable=SC2086
+    run_make -j$(nproc) $DEFAULT_TARGETS
     run_make build
 else
     run_make -j$(nproc) "$@"
