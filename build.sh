@@ -59,12 +59,25 @@ case "$platform_lc" in
     # in that the board cannot answer for itself.
     hi3516ev200) PLATFORM=HI3516EV200 ;;
     hi3516ev300) PLATFORM=HI3516EV300 ;;
+    # HiSilicon gen5 (HiMPP V5), and here the family/part split IS needed,
+    # unlike gen4 above: OpenIPC builds one hi3516cv6xx image for two dies and
+    # its MPP answers "HI3516CV610_MPP_V1.0.2.0 B051" on both, so the platform
+    # is the ABI and the die is a part to name. Whether the chip ID separates
+    # them on a running board has not been checked; until it has, the die comes
+    # from the build the way SigmaStar's does.
+    #
+    # The family spelling is OpenIPC's BR2_OPENIPC_SOC_FAMILY and the part
+    # spellings are its BR2_OPENIPC_SOC_MODEL values, so a defconfig can pass
+    # either straight through.
+    hi3516cv6xx) PLATFORM=HI3516CV610 ;;
+    hi3516cv608|hi3516cv610)
+        PLATFORM=HI3516CV610; SOC_MODEL=$platform_lc ;;
     *)
         echo "Usage: $0 <platform> <br_output> [target...]"
         echo ""
         echo "Families: t10 t20 t21 t23 t30 t31 t32 t33 t40 t41 a1"
         echo "          infinity6b0 infinity6e infinity6c"
-        echo "          hi3516ev200 hi3516ev300"
+        echo "          hi3516ev200 hi3516ev300 hi3516cv6xx"
         echo ""
         echo "Parts. Naming one of these instead of its family fills in the"
         echo "per-part encoder ceilings, which a family build leaves unset:"
@@ -73,6 +86,7 @@ case "$platform_lc" in
         echo "               ssc338d ssc338q ssc338g ssc339g"
         echo "  infinity6c   ssc377 ssc377d ssc377de ssc377qe"
         echo "               ssc378de ssc378qe"
+        echo "  hi3516cv6xx  hi3516cv608 hi3516cv610"
         echo ""
         echo "  <br_output> is the buildroot output directory containing"
         echo "  host/ with the cross-compiler and sysroot."
@@ -84,9 +98,9 @@ esac
 # and ARM, and the Hi3516 parts are HiSilicon and ARM. That splits both the
 # sysroot tuple and the compiler prefix, so neither can stay hardcoded below.
 case "$PLATFORM" in
-    HI3516EV200|HI3516EV300)
-        # Soft-float, and note the tuples: musleabi, NOT musleabihf. This is
-        # the one ARM family here that is not hard-float, so it gets its own
+    HI3516EV200|HI3516EV300|HI3516CV610)
+        # Soft-float, and note the tuples: musleabi, NOT musleabihf. These are
+        # the ARM parts here that are not hard-float, so they get their own
         # arm rather than a label on Infinity6E's.
         #
         # Measured rather than assumed: Tag_ABI_VFP_args is absent from every
@@ -99,6 +113,11 @@ case "$PLATFORM" in
         # loads and runs, and hands garbage to every float argument crossing
         # into MPI. raptor-hal's v4_common.h carries a #error on __ARM_PCS_VFP
         # so it cannot survive a compile either.
+        #
+        # Gen5 is the same answer measured again on its own libraries rather
+        # than inherited: OpenIPC's hi3516cv6xx set (MPP V1.0.2.0 B051) carries
+        # no Tag_ABI_VFP_args either, with Tag_FP_arch VFPv4. Same toolchain
+        # tuple, same trap.
         SYSROOT_TUPLES="arm-openipc-linux-musleabi arm-buildroot-linux-musleabi \
                         arm-thingino-linux-musleabi"
         CROSS_CANDIDATES="arm-openipc-linux-musleabi- arm-buildroot-linux-musleabi- \

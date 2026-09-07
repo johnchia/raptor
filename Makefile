@@ -36,10 +36,16 @@ COMPY_DIR  := ../compy
 INGENIC_PLATFORMS   := T10 T20 T21 T23 T30 T31 T32 T33 T40 T41 A1
 SIGMASTAR_PLATFORMS := INFINITY6E INFINITY6B0 INFINITY6C
 
-# Split by MPP generation, because V5 (CV610) is a different ABI from V4 and
-# will want its own backend directory. The union is what VENDOR keys on.
+# Split by MPP generation, because V5 is a different ABI from V4 and has its
+# own backend directory (raptor-hal/src/hisi_v5). The union is what VENDOR
+# keys on, and both generations are ARM soft-float, so nothing below splits.
+#
+# HI3516CV610 names the ABI, not the die: OpenIPC builds one MPP for the whole
+# hi3516cv6xx family and it reports "HI3516CV610_MPP_V1.0.2.0 B051" on a CV608
+# too, so the die travels as SOC_MODEL instead. Keep this in step with
+# raptor-hal/mk/hisilicon.mk.
 HISI_GEN4_PLATFORMS := HI3516EV200 HI3516EV300
-HISI_GEN5_PLATFORMS :=
+HISI_GEN5_PLATFORMS := HI3516CV610
 HISILICON_PLATFORMS := $(strip $(HISI_GEN4_PLATFORMS) $(HISI_GEN5_PLATFORMS))
 
 VALID_PLATFORMS := $(INGENIC_PLATFORMS) $(SIGMASTAR_PLATFORMS) $(HISILICON_PLATFORMS)
