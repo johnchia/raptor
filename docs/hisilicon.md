@@ -1001,8 +1001,9 @@ own `oom_score_adj`, so when the box runs out the OOM killer takes rsd instead
 — seen once on the bench with a client that would not drain. Now that the MMZ
 side needs 13 MB less than it did, the honest fix is to move the split: `mem=`
 in the board's `bootargs` decides it, and every megabyte given to Linux is one
-taken from a zone that has 17.9 MB spare. Leave at least 24 MB of MMZ: a raw
-snapshot on channel 0 transiently needs 9.3 MB more than the steady state.
+taken from a zone that has 17.9 MB spare. Leave at least 24 MB of MMZ: sampled across a raw
+snapshot on channel 0, the zone peaks at 23,940 KiB while the ring is off and
+the channel holds a private pool of three uncompressed frames.
 
 ## Raw snapshots take the ring off and put it back
 
