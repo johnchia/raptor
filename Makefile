@@ -50,6 +50,11 @@ HISILICON_PLATFORMS := $(strip $(HISI_GEN4_PLATFORMS) $(HISI_GEN5_PLATFORMS))
 
 VALID_PLATFORMS := $(INGENIC_PLATFORMS) $(SIGMASTAR_PLATFORMS) $(HISILICON_PLATFORMS)
 
+# Which config/sensors/ subdirectory, if any, this platform's image needs
+# installed. Empty for every generation whose vendor image already ships
+# /etc/sensors; see the install rule for what makes gen5 different.
+HAL_SENSOR_DIR := $(if $(filter $(PLATFORM),$(HISI_GEN5_PLATFORMS)),hisi_v5)
+
 # No default clause. The old two-way form treated every unlisted PLATFORM as
 # Ingenic, so a typo built a MIPS-flavoured configuration for an ARM part and
 # said nothing until the link failed somewhere unhelpful.
@@ -659,3 +664,13 @@ install:
 	done
 	install -m 0644 config/raptor.conf $(DESTDIR)/etc/raptor.conf
 	install -m 0755 config/S31raptor $(DESTDIR)/etc/init.d/S31raptor
+# Sensor mode files, on the generations whose images ship none. A cv6xx
+# OpenIPC image has no /etc/sensors at all -- hisilicon-opensdk builds the
+# sensor libraries from source and carries no config directory -- so without
+# these there is no lane map, Bayer order or sensor geometry on the board and
+# the pipeline cannot be configured. Installed only for the platforms that
+# need them, so a gen4 image keeps the vendor's own files untouched.
+ifneq ($(strip $(HAL_SENSOR_DIR)),)
+	install -d $(DESTDIR)/etc/sensors
+	install -m 0644 config/sensors/$(HAL_SENSOR_DIR)/*.ini $(DESTDIR)/etc/sensors/
+endif
