@@ -12,9 +12,10 @@ Every guard in `src/hisi_v4/` is `HAL_HISI_GEN4` and never a part macro, so
 adding Hi3516DV200 or Hi3518EV300 costs a word in `HISI_GEN4_PLATFORMS`, a
 `caps_hisilicon.inc` block, and no code at all.
 
-**Hi3516CV610 will not be a variant of this.** It is a V5 part with a different
-MPI ABI behind identically-named symbols, and it gets `src/hisi_v5/` as a
-sibling directory when a board exists. See `PLAN-hi3516ev200.md`, risk R12.
+**Hi3516CV610 is not a variant of this.** It is a V5 part with a different MPI
+ABI behind identically-named symbols, and it has `src/hisi_v5/` as a sibling
+directory. The board exists now, so the second half of this file is its own:
+see **HiSilicon gen5** below.
 
 This is an index, not the reference. Each decision is argued where it applies,
 in the file that makes it.
@@ -900,3 +901,164 @@ SigmaStar checks there is no vendor header to agree with.
 
 `build-standalone.sh` rejects HiSilicon, exactly as it rejects SigmaStar: there
 is no self-contained dependency set for these platforms.
+
+---
+
+# HiSilicon gen5 (HiMPP V5 — Hi3516CV610 / Hi3516CV608)
+
+Status of the `PLATFORM=HI3516CV610` backend, `src/hisi_v5/`. Brought up on an
+H4-52POX-S bench board: **Hi3516CV608 + OS04D10**, 8 MB NOR, OpenIPC
+(`hi3516cv608_raptor`), MPP `HI3516CV610_MPP_V1.0.2.0 B051`.
+
+**One MPP, two dies.** The libraries say `HI3516CV610_MPP_V1.0.2.0` while
+`/proc/umap/sys` names the part `0X3516C608`. The platform is the ABI and the
+die is a build-time name: `./build.sh hi3516cv608` sets `PLATFORM=HI3516CV610`
+and `SOC_MODEL=hi3516cv608`, which is what fills in the per-die encoder
+ceilings. `hi3516cv6xx` (OpenIPC's family spelling) builds the same backend
+with those ceilings left unset.
+
+**Nothing is shared with gen4 but the shape of the problem.** Same generation
+of vendor, same `/proc/umap` habit, same dlopen-a-blob-and-forward pattern —
+and a different struct layout behind every call, a different module set, a
+different MPZ node path, VI-pipe rather than VPSS 3DNR, and a coupling between
+VI and VPSS that gen4 did not have to choose. `HAL_HISI_GEN5` guards the
+directory; no part macro appears in it.
+
+## What runs on hardware
+
+Two H.264 streams (1920x1080 and 640x360) with per-stream JPEG snapshots, OSD
+overlays on both, audio capture, IR-cut switching, the full ISP tuning load
+(static sections, the dynamic ISP sections, the 3DNR ladder and eight per-light
+ladders), 3DNR on the VI pipe, and raw NV12 snapshots. `PLAN-hi3516cv610.md`
+carries the phase-by-phase record and every measurement behind the numbers
+below.
+
+## The memory picture
+
+The bench board has **32 MB of MMZ and 32 MB for Linux** (`mem=32M` on the
+kernel command line; the MMZ is what is left above it, `/proc/umap/media-mem`
+ZONE `anonymous` at 0x42000000). Both halves are tight, and the MMZ half is
+where the backend has choices to make.
+
+**The VI/VPSS coupling is the biggest one.** `hal_init` asks for
+`OT_VI_ONLINE_VPSS_ONLINE` — both stages fed on chip — and configures VB
+accordingly:
+
+| | VI online, VPSS offline | VI and VPSS both online |
+|---|---|---|
+| sensor-sized common pool | 3 x 4,478,976 B = 13,122 KiB | **none** |
+| channel 0 | 128-line wrap ring, 412,696 B | same |
+| channel 1 | private pool, 3 x 345,600 B | same |
+| MMZ in use, two streams + JPEG + 3DNR | 27,960 KiB | **14,816 KiB** |
+
+Nothing between VI and VPSS goes through DDR in the all-online coupling, so the
+pool that fed the software bind is dead weight and is not configured at all —
+which is also what the vendor's own low-memory sample does
+(`sample_venc.c`'s `sample_venc_online_wrap_get_default_vb_cfg` starts its loop
+at pool 1). The coupling cannot be asked for until after `ss_mpi_sys_init` and
+the pools have to be fixed before it, so `hisi_sys_bringup` runs twice when the
+driver says no: VB and SYS come back down and up in the shape that matches what
+was granted. A pipeline that fails to start on the granted coupling gets one
+more attempt on the offline one.
+
+**Channel 0 streams through a wrap ring**, not through frames: 128 lines of a
+`SEG_COMPACT` 1080p frame, 343,944 B out of a one-block common pool, instead of
+three 2.1 MB frames. Two preconditions, both measured:
+
+- `ss_mpi_sys_get_vpss_venc_wrap_buf_line` validates its parameters *only* in
+  the all-online coupling, and refuses (`0xa0028007`) unless `full_lines_std` is
+  strictly greater than the large stream's height and the small stream is
+  smaller than the large one. `hisi_wrap_param` fills both with nominal values
+  for that reason; the answer is 128 lines for every accepted combination.
+- CV610 takes `ss_mpi_vpss_set_chn_buf_wrap` in that coupling only with the
+  group's frame interrupt at `EARLY_END` and `early_line` at half the group's
+  max height. Without it the wrap call answers `0xa007800d` (NOT_PERM) and the
+  channel silently costs 6.1 MB more than it should.
+
+**Everything outside VB, attributed.** The MMZ at rest with two streams, JPEG
+on both, audio and OSD up, all-online:
+
+| what | KiB | where it comes from |
+|---|---|---|
+| `h264e0_*` | 4,876 | 1080p encoder: 2,820 reconstruction + 2,036 stream buffer |
+| `vi(0)_3dnr_*` | 2,760 | the VI pipe's temporal NR reference, mad and stt |
+| `jpege2_stm` + `jpege3_stm` | 2,296 | snapshot stream buffers, both streams |
+| `vi(0)_bnr_*` | 1,280 | bayer NR reference |
+| `user_pool` | 1,024 | channel 1's private pool |
+| `h264e1_*` | 652 | 640x360 encoder |
+| kernel modules | 628 | VGS nodes, IVE, VEDU, NPU share — allocated at `insmod` |
+| ISP | 452 | virtual registers, statistics, DRC, LUTs |
+| `vb_pool` | 412 | the channel 0 wrap ring |
+| audio | 252 | AI DMA and frame buffers |
+| RGN | 176 | eight overlay canvases |
+
+`/proc/umap/media-mem` prints every one of these by name, which is what makes
+the table checkable rather than a model.
+
+**The other half is Linux**, and it is the tighter one: 26.9 MB usable, of
+which rvd is ~6 MB RSS and the shared ring another ~4. rvd writes -1000 to its
+own `oom_score_adj`, so when the box runs out the OOM killer takes rsd instead
+— seen once on the bench with a client that would not drain. Now that the MMZ
+side needs 13 MB less than it did, the honest fix is to move the split: `mem=`
+in the board's `bootargs` decides it, and every megabyte given to Linux is one
+taken from a zone that has 17.9 MB spare. Leave at least 24 MB of MMZ: a raw
+snapshot on channel 0 transiently needs 9.3 MB more than the steady state.
+
+## Raw snapshots take the ring off and put it back
+
+`raptorctl rvd save raw <file> [ch]` works on either stream. Channel 0 is on the
+wrap ring and a wrapped channel queues nothing for userspace, so a depth on it
+cycles the channel: ring off, attribute, private pool, grab, and back on the
+ring when the depth returns to 0. The frames are **NV21** (YVU semi-planar) —
+the JSON reply says which — and the block comes back unmapped, because every
+pool here is `REMAP_NONE`; `hal_fs_get_frame` maps it cached for the one read
+and unmaps it on release.
+
+## The sensor name is a coupling, not a label
+
+`raptor.conf`:
+
+```ini
+[sensor]
+name = os04d10
+```
+
+names the tuning and the sensor library raptor loads. It has to agree with what
+`open_sys_config` was given at `insmod` time, because **the sensor clock is
+decided there, not by raptor**: the module maps a sensor name to an MCLK
+(os04d10 24 MHz, sc4336p 27 MHz) and a mismatch runs the sensor 12.5% fast,
+which shows up as MIPI lane FIFO overflows in `/proc/umap/mipi_rx` and a frame
+rate that is not the one the mode says. The loaded name cannot be read back
+from `/sys/module/open_sys_config/parameters/sensors` — it truncates at the `=`
+— but it is in the hostname OpenIPC builds, `openipc-hi3516cv608-os04d10-9205`,
+and in `dmesg | grep sensor0`.
+
+## The `/proc/umap` oracles
+
+Diagnosis on this part is reading, not guessing. Each of these answers one
+class of question outright:
+
+| node | what it settles |
+|---|---|
+| `media-mem` | who holds MMZ, by name and byte |
+| `vb` | pool sizes, counts, `min_free` — a pool one block short says so here |
+| `vi` | `int_cnt` (is the sensor arriving), `vb_fail_cnt`, `lost_cnt`, the component mask |
+| `mipi_rx` | the data type actually arriving and which PHY lanes see traffic |
+| `isp` | live ISO and exposure, and the black level the tuning's ladder actually wrote |
+| `vpss` / `venc` | channel geometry, encoder sequence numbers, buffer state |
+| `rgn` | every overlay: type, attach triple, show flag, position, alphas |
+
+## Building
+
+```sh
+./build.sh hi3516cv608 /path/to/openipc-firmware/output-hi3516cv608
+```
+
+`hi3516cv610` and `hi3516cv6xx` are the other two spellings; all three build
+`PLATFORM=HI3516CV610` with the soft-float `arm-openipc-linux-musleabi-`
+toolchain, and the part spellings additionally set `SOC_MODEL`. The ABI
+transcriptions in `v5_*.h` are checked the same way as gen4's:
+
+```sh
+make -C raptor-hal/tests abi-check-hisi5 CROSS_COMPILE=arm-openipc-linux-musleabi-
+```

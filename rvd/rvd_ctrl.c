@@ -2407,7 +2407,12 @@ static int handle_pipeline_cmd(const char *cmd, const char *cmd_json, rvd_state_
 			cJSON_AddStringToObject(r, "status", "ok");
 			cJSON_AddStringToObject(r, "file", file);
 			cJSON_AddStringToObject(r, "format", "raw");
-			cJSON_AddStringToObject(r, "pixfmt", "nv12");
+			/* Whichever semi-planar order the backend actually handed
+			 * back: HiSilicon's VPSS channels are YVU (NV21) and a
+			 * caller told "nv12" decodes the frame with red and blue
+			 * swapped. */
+			cJSON_AddStringToObject(r, "pixfmt",
+						info.pixfmt == RSS_PIXFMT_NV21 ? "nv21" : "nv12");
 			cJSON_AddNumberToObject(r, "width", info.width);
 			cJSON_AddNumberToObject(r, "height", info.height);
 			cJSON_AddNumberToObject(r, "bytes", (double)info.size);
