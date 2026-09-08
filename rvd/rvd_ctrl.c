@@ -2597,6 +2597,13 @@ static int handle_pipeline_cmd(const char *cmd, const char *cmd_json, rvd_state_
 		int x, y;
 		rvd_osd_calc_position(stream_w, stream_h, (int)reg->width, (int)reg->height, pos,
 				      &x, &y);
+		/*
+		 * The whole attribute, not just the position: set_region_attr
+		 * replaces a region's attributes rather than merging them, so a
+		 * struct left at its defaults tells the backend the region is
+		 * fully transparent on layer 0. The alpha pair and the layer are
+		 * the same ones create_region and the resize path use.
+		 */
 		rss_osd_region_t attr = {
 			.type = RSS_OSD_PIC,
 			.x = x,
@@ -2605,6 +2612,10 @@ static int handle_pipeline_cmd(const char *cmd, const char *cmd_json, rvd_state_
 			.height = (int)reg->height,
 			.bitmap_data = reg->local_buf,
 			.bitmap_fmt = RSS_PIXFMT_BGRA,
+			.global_alpha_en = true,
+			.fg_alpha = 255,
+			.bg_alpha = 0,
+			.layer = reg->layer,
 		};
 		if (st->use_isp_osd && st->streams[stream].fs_chn % 3 == 0) {
 			int sensor = st->streams[stream].sensor_idx;
