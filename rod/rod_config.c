@@ -251,6 +251,33 @@ static void load_osd_section(const char *section, void *userdata)
 	RSS_DEBUG("osd element from config: [%s] name=%s type=%s", section, name, type_str);
 }
 
+/*
+ * "Is this camera's video reachable by anyone who can route to it?"
+ *
+ * rsd serves RTSP with Digest only when [rtsp] has both a username and a
+ * password; rhd's snapshot and MJPEG routes are Basic-gated on the same terms
+ * from [http]. Either one left unset is a camera anybody on the network can
+ * watch. rhd's configuration route is not part of this -- it authenticates
+ * against the system account in /etc/shadow, whatever raptor.conf says.
+ *
+ * [system] unsafe = true is the way to say the openness is deliberate: a feed
+ * into an NVR on an isolated VLAN is a real thing to want. It is a positive
+ * statement in the config file rather than a default, so the file records that
+ * somebody meant it.
+ */
+static bool section_has_credentials(rss_config_t *cfg, const char *section)
+{
+	return rss_config_get_str(cfg, section, "username", "")[0] != '\0' &&
+	       rss_config_get_str(cfg, section, "password", "")[0] != '\0';
+}
+
+static bool media_is_open(rss_config_t *cfg)
+{
+	if (rss_config_get_bool(cfg, "system", "unsafe", false))
+		return false;
+	return !section_has_credentials(cfg, "rtsp") || !section_has_credentials(cfg, "http");
+}
+
 void init_elements_from_config(rod_state_t *st)
 {
 	struct osd_section_ctx ctx = {.st = st, .count = 0};
@@ -267,6 +294,26 @@ void init_elements_from_config(rod_state_t *st)
 		rod_element_t *e = rod_find_element(st, "privacy");
 		if (e)
 			e->visible = false;
+	}
+
+	/*
+	 * The unsecured banner.
+	 *
+	 * An open stream is convenient and is the right default on a bench: it
+	 * is what makes a freshly flashed camera useful without configuring
+	 * anything. The failure it invites is nobody closing it afterwards, and
+	 * that failure is silent -- a log line goes to a console no one reads,
+	 * and documentation is read before the mistake rather than after.
+	 *
+	 * The video is the one surface the person who can fix this is certainly
+	 * looking at, and they are looking at it during exactly the phase when
+	 * the fix is cheap. So the warning goes there. It costs an OSD region,
+	 * it clears itself the moment a credential is set, and it never refuses
+	 * to stream -- convenience is the point, and blocking would spend it.
+	 */
+	if (media_is_open(st->cfg) && !rod_find_element(st, "unsecured")) {
+		rod_add_element(st, "unsecured", ROD_ELEM_TEXT, "UNSECURED - NO PASSWORD SET",
+				"bottom_center", 1, 0, 40, ROD_UPDATE_CHANGE);
 	}
 
 	if (st->detect_enabled && !rod_find_element(st, "detect")) {

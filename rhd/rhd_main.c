@@ -1272,13 +1272,19 @@ int main(int argc, char **argv)
 		rss_strlcpy(srv.auth_user, http_user, sizeof(srv.auth_user));
 		rss_strlcpy(srv.auth_pass, http_pass, sizeof(srv.auth_pass));
 		RSS_INFO("HTTP Basic auth enabled");
-	} else if (srv.api_enabled) {
-		/* Worth saying out loud: with no account set, anything that can
-		 * reach this port can change the camera's configuration. The
-		 * snapshot and MJPEG endpoints are already open on the same
-		 * terms, so this is not a new door -- but it is a wider one. */
-		RSS_WARN("configuration api served without authentication -- "
-			 "set [http] username and password");
+	} else if (!rss_config_get_bool(ctx.cfg, "system", "unsafe", false)) {
+		/*
+		 * What [http] guards is the media gate -- snapshots, MJPEG and
+		 * the console page -- and that is what this reports. The
+		 * configuration route is NOT part of it: that authenticates
+		 * against the system account in /etc/shadow and is reachable
+		 * on those terms whether or not [http] carries a credential,
+		 * which is why it is routed above the gate. Naming the API
+		 * here would send someone to set a key that does not govern it.
+		 */
+		RSS_WARN("snapshots and MJPEG served without authentication -- "
+			 "set [http] username and password, or [system] unsafe = true if "
+			 "that is deliberate");
 	}
 
 #ifdef RSS_HAS_TLS

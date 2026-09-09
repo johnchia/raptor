@@ -137,6 +137,19 @@ int main(int argc, char **argv)
 		}
 	} else if (rtsp_user[0] || rtsp_pass[0]) {
 		RSS_WARN("RTSP auth requires both username and password — auth disabled");
+	} else if (!rss_config_get_bool(dctx.cfg, "system", "unsafe", false)) {
+		/*
+		 * Not a failure and deliberately not fatal: an open stream is
+		 * the useful default on a bench, and refusing to serve one
+		 * would spend the convenience this default exists for. The
+		 * risk it carries is only that a camera reaches production
+		 * still in this state, so the state is said out loud instead.
+		 * rod puts the same warning on the video, which is the copy
+		 * that gets read.
+		 */
+		RSS_WARN("RTSP has no password — anyone who can reach this camera can watch it. "
+			 "Set [rtsp] username and password, or [system] unsafe = true if that "
+			 "is deliberate.");
 	}
 
 #ifdef COMPY_HAS_TLS
