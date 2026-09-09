@@ -2220,6 +2220,16 @@ static int handle_pipeline_cmd(const char *cmd, const char *cmd_json, rvd_state_
 			return rss_ctrl_resp_error(
 				resp, resp_size,
 				"unsupported format (supported: jpeg, raw, bayer)");
+		/* Every format below writes <file>.tmp and renames it into place,
+		 * which turns a device node or a fifo into a regular file rather
+		 * than writing through it. `save raw /dev/null` replaced /dev/null
+		 * with a 3 MB file on a bench board and took the machine's spare
+		 * memory with it. A target that exists and is not a regular file
+		 * is a mistake, not a destination. */
+		struct stat sb;
+		if (stat(file, &sb) == 0 && !S_ISREG(sb.st_mode))
+			return rss_ctrl_resp_error(resp, resp_size,
+						   "target exists and is not a regular file");
 		if (file[0] != '/')
 			return rss_ctrl_resp_error(resp, resp_size,
 						   "file must be an absolute path");
