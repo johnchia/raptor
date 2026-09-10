@@ -464,16 +464,15 @@ const L = {
 ["width","height","codec","profile","rc_mode","bitrate","gop","fps","osd_enabled","jpeg"]
   .forEach(k => { if (L["stream0." + k]) L["stream1." + k] = L["stream0." + k]; });
 
-/* The six places on the picture take the same three keys, so they take the same
-   three labels. Written once for the same reason the schema pins them equal. */
-const SLOTS = [["top_left","Top left"],       ["top_center","Top centre"],
-               ["top_right","Top right"],     ["bottom_left","Bottom left"],
-               ["bottom_center","Bottom centre"], ["bottom_right","Bottom right"]];
-SLOTS.forEach(([p]) => {
-  L["osd." + p + ".template"] =
-    ["Text","","Empty leaves the corner clear."];
-  L["osd." + p + ".visible"] = ["Show","","Keeps the text but stops drawing it."];
-  L["osd." + p + ".align"] = ["Align","","Which way the text grows as it gets longer."];
+/* The four elements take the same four keys, so they take the same four
+   labels. Written once for the same reason the schema pins them equal. */
+const SLOTS = [1, 2, 3, 4];
+SLOTS.forEach(n => {
+  L["osd." + n + ".template"] =
+    ["Text","","Empty draws nothing, and leaves the element where it is."];
+  L["osd." + n + ".position"] = ["Position","","Where on the picture it sits."];
+  L["osd." + n + ".align"] = ["Align","","Which way the text grows as it gets longer."];
+  L["osd." + n + ".visible"] = ["Show","","Keeps the text but stops drawing it."];
 });
 
 const pretty = s => s.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
@@ -519,15 +518,21 @@ const TABS = [
  {id:"services",name:"Services",    groups:[{title:"RTSP", section:"rtsp"},
                                             {title:"Snapshots & MJPEG", section:"http"}]},
  /*
-  * The overlay is its own page: what it draws is six independent corners plus
-  * the type they share, which is more than fits beside the servers it used to
-  * sit with. The six groups are built rather than written out -- they differ
-  * in nothing but which corner they are, and the schema pins them equal.
+  * The overlay is its own page: what it draws is four independent elements
+  * plus the type they share, which is more than fits beside the servers it
+  * used to sit with. The four groups are built rather than written out --
+  * they differ in nothing but which element they are, and the schema pins
+  * them equal.
+  *
+  * An element is the camera's own, in the order its config lists them, so
+  * what these edit is whatever this camera was set up to draw rather than a
+  * fixed set of corners. Elements past the fourth are still drawn and are
+  * hand-edited; see rcd_osd.h.
   */
  {id:"overlay", name:"Overlay",
   groups:[{title:"Overlay", section:"osd",
-           note:"One typeface and one size for every corner. Any corner's text may hold %time%, %uptime%, %hostname%, %ip%, %ae_luma%, %total_gain% or %soc_temp%, each replaced as it is drawn; long text is cut off at the width the corner reserves."}]
-          .concat(SLOTS.map(([p, name]) => ({title:name, section:"osd." + p})))
+           note:"One typeface and one size for every element. Any element's text may hold %time%, %uptime%, %hostname%, %ip%, %ae_luma%, %total_gain% or %soc_temp%, each replaced as it is drawn; long text is cut off at the width the element reserves."}]
+          .concat(SLOTS.map(n => ({title:"Element " + n, section:"osd." + n})))
           .concat([{title:"Actions", actions:["osd-enable","osd-disable"],
                     note:"Stops and resumes drawing. Persists nothing — a reboot restores what is configured here."}])}
 ];

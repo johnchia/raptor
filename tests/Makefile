@@ -42,7 +42,8 @@ CTRL_SRCS = ../rvd/rvd_ctrl.c mock_hal.c \
 # clean without a socket or a config file, which is the point of the split.
 RCD_SRCS = ../rcd/rcd_config.c ../rcd/rcd_schema.c ../rcd/rcd_proto.c \
            ../rcd/rcd_system.c ../rcd/rcd_guard.c ../rcd/rcd_network.c ../rcd/rcd_wifi.c \
-           ../rcd/rcd_apply.c ../rcd/rcd_state.c ../rcd/rcd_ipc.c ../rcd/rcd_passwd.c
+           ../rcd/rcd_apply.c ../rcd/rcd_state.c ../rcd/rcd_ipc.c ../rcd/rcd_passwd.c \
+           ../rcd/rcd_osd.c
 IPC_SRCS = ../../raptor-ipc/src/rss_ring.c ../../raptor-ipc/src/rss_ctrl.c \
            ../../raptor-ipc/src/rss_osd_shm.c ../../raptor-ipc/src/rss_ipc_log.c
 

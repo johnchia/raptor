@@ -6,6 +6,7 @@
 #include "rcd.h"
 #include "rcd_guard.h"
 #include "rcd_ipc.h"
+#include "rcd_osd.h"
 #include "rcd_proto.h"
 #include "rcd_schema.h"
 #include "rcd_wifi.h"
@@ -944,8 +945,15 @@ static void emit_value(cJSON *arr, const rcd_key_t *k, rss_config_t *file, const
 		if (cJSON_IsString(v))
 			raw = v->valuestring;
 	}
+
+	/* An overlay slot is an ordinal and the file knows it by name. The
+	 * reply still says `osd.N`: what a client addressed is what it is
+	 * answered about, and the name behind it is this daemon's business. */
+	char store[RCD_OSD_SECT_MAX];
+	const char *sect = rcd_osd_store(file, k->section, store, sizeof(store));
+
 	if (!raw && file) {
-		raw = rss_config_get_str(file, k->section, k->key, NULL);
+		raw = rss_config_get_str(file, sect, k->key, NULL);
 		source = "file";
 	}
 	cJSON *o = cJSON_CreateObject();
@@ -985,8 +993,7 @@ static void emit_value(cJSON *arr, const rcd_key_t *k, rss_config_t *file, const
 	 * Only the file knows which of the two it is, and a client offering
 	 * to put the key back has to ask.
 	 */
-	bool configured =
-		k->provider ? true : file && rss_config_get_str(file, k->section, k->key, NULL);
+	bool configured = k->provider ? true : file && rss_config_get_str(file, sect, k->key, NULL);
 	if (!configured)
 		cJSON_AddBoolToObject(o, "configured", false);
 
@@ -1025,7 +1032,7 @@ typedef struct {
 	cJSON *live; /* owned */
 } live_cache_t;
 
-static cJSON *live_for(live_cache_t *cache, int *count, const char *section)
+static cJSON *live_for(live_cache_t *cache, int *count, const char *section, rss_config_t *file)
 {
 	for (int i = 0; i < *count; i++) {
 		if (strcmp(cache[i].section, section) == 0)
@@ -1041,8 +1048,14 @@ static cJSON *live_for(live_cache_t *cache, int *count, const char *section)
 	if (*count >= RCD_LIVE_MAX)
 		return NULL;
 
+	/* Cached under the name the caller used -- an ordinal is stable for
+	 * the length of one request, because the file is loaded once -- and
+	 * asked of the daemon under the name the daemon has. */
+	char store[RCD_OSD_SECT_MAX];
+
 	cache[*count].section = section;
-	cache[*count].live = section_from_daemon(section);
+	cache[*count].live =
+		section_from_daemon(rcd_osd_store(file, section, store, sizeof(store)));
 	return cache[(*count)++].live;
 }
 
@@ -1073,7 +1086,9 @@ cJSON *rcd_cmd_get(rcd_state_t *st, const cJSON *root)
 		/* Walk the table rather than the daemon's reply: what a client
 		 * may act on is what the table names, and a raw section dump
 		 * would otherwise carry keys nothing here can validate. */
-		cJSON *live = section_from_daemon(sec->valuestring);
+		char store[RCD_OSD_SECT_MAX];
+		cJSON *live = section_from_daemon(
+			rcd_osd_store(file, sec->valuestring, store, sizeof(store)));
 		int found = 0;
 		for (int i = 0;; i++) {
 			const rcd_key_t *k = rcd_key_at(i);
@@ -1131,7 +1146,7 @@ cJSON *rcd_cmd_get(rcd_state_t *st, const cJSON *root)
 		if (!k)
 			continue;
 
-		emit_value(out, k, file, live_for(cache, &cached, k->section));
+		emit_value(out, k, file, live_for(cache, &cached, k->section, file));
 	}
 
 	live_cache_free(cache, cached);
@@ -1215,15 +1230,25 @@ static int write_file(rcd_state_t *st, rcd_edit_t *edits, const bool *to_file, b
 		 * defaults is mostly keys that were already at them, and
 		 * charging a restart for those would make the button useless.
 		 */
+		/*
+		 * An overlay slot is written to the section it stands for, and
+		 * resolved per edit rather than once: a slot with no element
+		 * yet resolves to its own name, so the first edit of a request
+		 * creates the section and the rest of them find it. See
+		 * rcd_osd.h.
+		 */
+		char store[RCD_OSD_SECT_MAX];
+		const char *sect = rcd_osd_store(cfg, edits[i].k->section, store, sizeof(store));
+
 		if (edits[i].reset) {
-			changed[i] = rss_config_unset(cfg, edits[i].k->section, edits[i].k->key);
+			changed[i] = rss_config_unset(cfg, sect, edits[i].k->key);
 			if (changed[i])
-				RSS_INFO("reset: [%s] %s back to its default", edits[i].k->section,
+				RSS_INFO("reset: [%s] %s back to its default", sect,
 					 edits[i].k->key);
 			continue;
 		}
 
-		rss_config_set_str(cfg, edits[i].k->section, edits[i].k->key, edits[i].rendered);
+		rss_config_set_str(cfg, sect, edits[i].k->key, edits[i].rendered);
 		changed[i] = true;
 
 		/* The log records what changed, not what it changed to -- for
@@ -1232,7 +1257,7 @@ static int write_file(rcd_state_t *st, rcd_edit_t *edits, const bool *to_file, b
 		bool secret =
 			edits[i].k->type == V_SECRET || edits[i].k->type == V_PASSWD ||
 			(edits[i].k->type == V_CRED && strcmp(edits[i].k->key, "password") == 0);
-		RSS_INFO("set: [%s] %s = %s", edits[i].k->section, edits[i].k->key,
+		RSS_INFO("set: [%s] %s = %s", sect, edits[i].k->key,
 			 secret ? "(set)" : edits[i].rendered);
 	}
 

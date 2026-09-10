@@ -65,6 +65,16 @@ The migration from position-carrying element names (`[osd.timestamp]`,
 this, which is how it surfaced: every element in the file changed name at once,
 so one migration burned a whole generation.
 
+The shipped config has since moved back the other way -- the web console offers
+the first four `[osd.*]` sections as four elements and lets each one be placed,
+so a section named for a corner it can be moved out of is a name that lies, and
+`[osd.timestamp]` and `[osd.uptime]` are what ships again. That is one more
+generation for a camera that takes the new file and restarts rod under a
+long-lived rvd; a sysupgrade reboots, so the usual path pays nothing. Editing
+an element from the console does not rename it -- the name is not among the
+four things that page sets -- so nothing a user does there can burn a
+generation.
+
 ## What the fix has to do
 
 Reaping the region when the producer goes is the obvious move and it is wrong on

@@ -114,13 +114,11 @@ static const struct {
 	{"timelapse", "rmr"},
 	{"rtsp", "rsd"},
 	{"http", "rhd"},
-	/* One per place on the picture; see the [osd.*] keys below. */
-	{"osd.top_left", "rod"},
-	{"osd.top_center", "rod"},
-	{"osd.top_right", "rod"},
-	{"osd.bottom_left", "rod"},
-	{"osd.bottom_center", "rod"},
-	{"osd.bottom_right", "rod"},
+	/* One per overlay element; see the [osd.*] keys below. */
+	{"osd.1", "rod"},
+	{"osd.2", "rod"},
+	{"osd.3", "rod"},
+	{"osd.4", "rod"},
 	{NULL, NULL},
 };
 
@@ -144,12 +142,11 @@ static const struct {
 	{"device", RCD_D_COUNT},
 	{"network", RCD_D_COUNT},
 	{"wifi", RCD_D_COUNT},
-	{"osd.top_left", RCD_D_ROD},
-	{"osd.top_center", RCD_D_ROD},
-	{"osd.top_right", RCD_D_ROD},
-	{"osd.bottom_left", RCD_D_ROD},
-	{"osd.bottom_center", RCD_D_ROD},
-	{"osd.bottom_right", RCD_D_ROD},
+	/* One per overlay element; see the [osd.*] keys below. */
+	{"osd.1", RCD_D_ROD},
+	{"osd.2", RCD_D_ROD},
+	{"osd.3", RCD_D_ROD},
+	{"osd.4", RCD_D_ROD},
 	{NULL, RCD_D_COUNT},
 };
 
@@ -183,6 +180,9 @@ static const char *const choices_ainput[] = {"amic", "dmic", NULL};
 static const char *const choices_arate[] = {"8000", "16000", "32000", "48000", NULL};
 static const char *const choices_trigger[] = {"luma", "gain", "adc", "photo", NULL};
 static const char *const choices_align[] = {"left", "center", "right", NULL};
+static const char *const choices_position[] = {
+	"top_left",	 "top_center",	 "top_right", "bottom_left",
+	"bottom_center", "bottom_right", "center",    NULL};
 static const char *const choices_algorithm[] = {"move", "base_move", "persondet", "yolo", NULL};
 static const char *const choices_recmode[] = {"continuous", "motion", "both", NULL};
 
@@ -446,20 +446,27 @@ static const rcd_key_t keys[] = {
 	{"osd", "font_stroke", V_INT, 0, 5, NULL, SAVED},
 
 	/*
-	 * -- The six places on the picture. --
+	 * -- The first four elements of the overlay. --
 	 *
 	 * rod's overlay is a list of elements, each named by whoever wrote the
 	 * config and placed by a `position` line -- which is the right model
 	 * for what it can draw and the wrong one for a table of keys fixed at
 	 * compile time, because nothing here can name a section a person has
-	 * not written yet. So rod also reads a section named for a place as
-	 * being in that place, and these are those six names. An element named
-	 * anything else is untouched by this and simply not reachable from
-	 * here; it is not overwritten, hidden, or moved.
+	 * not written yet.
 	 *
-	 * `position` is deliberately absent. It is the section name, and a key
-	 * that could disagree with it would let a slot be dragged out of the
-	 * slot it is.
+	 * These four are ordinals into that list rather than names in it:
+	 * `osd.1` is the first [osd.*] section of the config file, whatever it
+	 * is called, and rcd_osd.h has the reasoning and what the ordinal
+	 * costs. It replaces a scheme that named the six places on the picture
+	 * and offered those as the sections, which read well and worked badly
+	 * -- a camera configured with [osd.timestamp] and [osd.uptime] drew two
+	 * elements no client could reach, beside six corners that were empty
+	 * because nothing had ever been in them.
+	 *
+	 * `position` is therefore a key here, and the value it always was to
+	 * rod. Its choices are rod's seven place names and not a pixel pair:
+	 * rod reads `x,y` too, and a coordinate is a value somebody gets wrong
+	 * with nothing to say so until they look at the video.
 	 *
 	 * A template is the one value in this table that a person composes
 	 * rather than chooses, so it is the widest grammar here -- V_TEXT, the
@@ -469,36 +476,35 @@ static const rcd_key_t keys[] = {
 	 * own limit is longer -- a template past it is still settable by hand
 	 * and through rod's `set-element`.
 	 *
-	 * Spelled out six times rather than expanded from a macro, because a
-	 * macro here formats badly enough to be worth avoiding and the six are
-	 * meant to be greppable by section name. What keeps them identical is
-	 * a test that walks them, which a macro could not have caught anyway:
-	 * the drift that matters is one slot gaining a key the others lack.
+	 * Spelled out four times rather than expanded from a macro, because a
+	 * macro here formats badly enough to be worth avoiding and the four
+	 * are meant to be greppable by section name. What keeps them identical
+	 * is a test that walks them, which a macro could not have caught
+	 * anyway: the drift that matters is one slot gaining a key the others
+	 * lack.
 	 *
-	 * What a corner is, and not how it is drawn: the type is the overlay's
-	 * and is set once in [osd]. rod reads a per-element `font_size` and
-	 * `max_chars` and honours both, and they stay hand-edited -- six copies
-	 * of a size that is meant to match is a way to end up with six sizes
-	 * that do not.
+	 * What an element is, and not how it is drawn: the type is the
+	 * overlay's and is set once in [osd]. rod reads a per-element
+	 * `font_size` and `max_chars` and honours both, and they stay
+	 * hand-edited -- four copies of a size that is meant to match is a way
+	 * to end up with four sizes that do not.
 	 */
-	{"osd.top_left", "template", V_TEXT, 0, 71, NULL, SAVED},
-	{"osd.top_left", "visible", V_BOOL, 0, 0, NULL, SAVED},
-	{"osd.top_left", "align", V_ENUM, 0, 0, choices_align, SAVED},
-	{"osd.top_center", "template", V_TEXT, 0, 71, NULL, SAVED},
-	{"osd.top_center", "visible", V_BOOL, 0, 0, NULL, SAVED},
-	{"osd.top_center", "align", V_ENUM, 0, 0, choices_align, SAVED},
-	{"osd.top_right", "template", V_TEXT, 0, 71, NULL, SAVED},
-	{"osd.top_right", "visible", V_BOOL, 0, 0, NULL, SAVED},
-	{"osd.top_right", "align", V_ENUM, 0, 0, choices_align, SAVED},
-	{"osd.bottom_left", "template", V_TEXT, 0, 71, NULL, SAVED},
-	{"osd.bottom_left", "visible", V_BOOL, 0, 0, NULL, SAVED},
-	{"osd.bottom_left", "align", V_ENUM, 0, 0, choices_align, SAVED},
-	{"osd.bottom_center", "template", V_TEXT, 0, 71, NULL, SAVED},
-	{"osd.bottom_center", "visible", V_BOOL, 0, 0, NULL, SAVED},
-	{"osd.bottom_center", "align", V_ENUM, 0, 0, choices_align, SAVED},
-	{"osd.bottom_right", "template", V_TEXT, 0, 71, NULL, SAVED},
-	{"osd.bottom_right", "visible", V_BOOL, 0, 0, NULL, SAVED},
-	{"osd.bottom_right", "align", V_ENUM, 0, 0, choices_align, SAVED},
+	{"osd.1", "template", V_TEXT, 0, 71, NULL, SAVED},
+	{"osd.1", "position", V_ENUM, 0, 0, choices_position, SAVED},
+	{"osd.1", "align", V_ENUM, 0, 0, choices_align, SAVED},
+	{"osd.1", "visible", V_BOOL, 0, 0, NULL, SAVED},
+	{"osd.2", "template", V_TEXT, 0, 71, NULL, SAVED},
+	{"osd.2", "position", V_ENUM, 0, 0, choices_position, SAVED},
+	{"osd.2", "align", V_ENUM, 0, 0, choices_align, SAVED},
+	{"osd.2", "visible", V_BOOL, 0, 0, NULL, SAVED},
+	{"osd.3", "template", V_TEXT, 0, 71, NULL, SAVED},
+	{"osd.3", "position", V_ENUM, 0, 0, choices_position, SAVED},
+	{"osd.3", "align", V_ENUM, 0, 0, choices_align, SAVED},
+	{"osd.3", "visible", V_BOOL, 0, 0, NULL, SAVED},
+	{"osd.4", "template", V_TEXT, 0, 71, NULL, SAVED},
+	{"osd.4", "position", V_ENUM, 0, 0, choices_position, SAVED},
+	{"osd.4", "align", V_ENUM, 0, 0, choices_align, SAVED},
+	{"osd.4", "visible", V_BOOL, 0, 0, NULL, SAVED},
 
 	/* -- Day/night: how the board is wired, and what nightfall is. -- */
 	{"ircut", "enabled", V_BOOL, 0, 0, NULL, SAVED},

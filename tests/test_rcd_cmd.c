@@ -30,6 +30,7 @@
 #include "../rcd/rcd_config.h"
 #include "../rcd/rcd_guard.h"
 #include "../rcd/rcd_network.h"
+#include "../rcd/rcd_osd.h"
 #include "../rcd/rcd_proto.h"
 #include "../rcd/rcd_schema.h"
 #include "../rcd/rcd_state.h"
@@ -849,55 +850,57 @@ TEST every_daynight_threshold_is_a_live_key(void)
 }
 
 /*
- * The six places on the picture differ in nothing but where they are.
+ * The four overlay slots differ in nothing but which element they stand for.
  *
  * They are spelled out one section at a time rather than expanded from a
  * macro, so this is what holds them equal: a slot that gained a key, lost one,
- * or bounded one differently would render as a corner that behaves unlike the
- * other five for no reason anybody could find.
+ * or bounded one differently would render as an element that behaves unlike
+ * the other three for no reason anybody could find.
  */
-TEST the_six_places_carry_the_same_keys(void)
+TEST the_four_slots_carry_the_same_keys(void)
 {
-	static const char *const places[] = {"osd.top_left",
-					     "osd.top_center",
-					     "osd.top_right",
-					     "osd.bottom_left",
-					     "osd.bottom_center",
-					     "osd.bottom_right",
-					     NULL};
-	static const char *const expect[] = {"template", "visible", "align", NULL};
+	static const char *const slots[] = {"osd.1", "osd.2", "osd.3", "osd.4", NULL};
+	static const char *const expect[] = {"template", "position", "align", "visible", NULL};
 
-	for (int p = 0; places[p]; p++) {
+	for (int p = 0; slots[p]; p++) {
 		int n = 0;
 		for (int i = 0;; i++) {
 			const rcd_key_t *k = rcd_key_at(i);
 			if (!k)
 				break;
-			if (strcmp(k->section, places[p]) != 0)
+			if (strcmp(k->section, slots[p]) != 0)
 				continue;
 			n++;
 
-			/*
-			 * `position` is the section name. A key that could
-			 * disagree with it would let a slot be moved out of
-			 * the slot it is.
-			 */
-			ASSERT(strcmp(k->key, "position") != 0);
-
-			const rcd_key_t *first = rcd_key_find(places[0], k->key);
+			const rcd_key_t *first = rcd_key_find(slots[0], k->key);
 			ASSERT(first);
 			ASSERT_EQ(first->type, k->type);
 			ASSERT_EQ(first->min, k->min);
 			ASSERT_EQ(first->max, k->max);
 		}
-		ASSERT_EQ(3, n);
+		ASSERT_EQ(4, n);
 
 		for (int e = 0; expect[e]; e++)
-			ASSERT(rcd_key_find(places[p], expect[e]));
+			ASSERT(rcd_key_find(slots[p], expect[e]));
+
+		/*
+		 * `position` is a value now rather than the section name. The
+		 * places it may take are rod's own seven and not a coordinate:
+		 * rod reads `x,y` too, and it is not on offer here.
+		 */
+		const rcd_key_t *pos = rcd_key_find(slots[p], "position");
+		int places = 0;
+
+		ASSERT_EQ(V_ENUM, pos->type);
+		for (int c = 0; pos->choices[c]; c++)
+			places++;
+		ASSERT_EQ(7, places);
+		ASSERT_STR_EQ("top_left", pos->choices[0]);
+		ASSERT_STR_EQ("center", pos->choices[6]);
 
 		/* rod owns them, and answers for them when asked. */
-		ASSERT_EQ(RCD_D_ROD, rcd_section_owner(places[p]));
-		ASSERT_STR_EQ("rod", rcd_section_reader(places[p]));
+		ASSERT_EQ(RCD_D_ROD, rcd_section_owner(slots[p]));
+		ASSERT_STR_EQ("rod", rcd_section_reader(slots[p]));
 	}
 	PASS();
 }
@@ -971,6 +974,147 @@ static int sysconf_dir_ready(void)
 	if (mkdir(RCD_SYSCONF_DIR, 0755) == 0)
 		return 1;
 	return access(RCD_SYSCONF_DIR, W_OK) == 0;
+}
+
+/*
+ * A config file with the given [osd.*] sections, in the given order, loaded
+ * the way rcd loads one. Written to the scratch directory the suite already
+ * mounts, so the ordering under test is a file's own and not a fixture's.
+ */
+static rss_config_t *osd_config(const char *const *sections)
+{
+	char path[300];
+	FILE *f;
+
+	snprintf(path, sizeof(path), "%s/osd-order.conf", RCD_SYSCONF_DIR);
+	f = fopen(path, "w");
+	if (!f)
+		return NULL;
+	fprintf(f, "[osd]\nfont_size = 24\n\n");
+	for (int i = 0; sections[i]; i++)
+		fprintf(f, "[%s]\ntemplate = e%d\n\n", sections[i], i);
+	fclose(f);
+
+	return rss_config_load(path);
+}
+
+/* What a slot resolves to, as a string, so a test reads as the question. */
+static const char *resolved(rss_config_t *cfg, const char *slot, char *buf, size_t bufsz)
+{
+	return rcd_osd_store(cfg, slot, buf, bufsz);
+}
+
+/*
+ * A slot is an ordinal into the file, so it stands for whatever the camera's
+ * own config put there -- which is the whole point of the change: the six
+ * place-named sections could not see an element called [osd.timestamp], and
+ * every camera in the field has one.
+ */
+TEST a_slot_stands_for_the_element_the_file_has(void)
+{
+	if (!sysconf_dir_ready())
+		SKIP();
+
+	static const char *const three[] = {"osd.timestamp", "osd.uptime", "osd.camera", NULL};
+	rss_config_t *cfg = osd_config(three);
+	char buf[RCD_OSD_SECT_MAX];
+
+	ASSERT(cfg);
+	ASSERT_STR_EQ("osd.timestamp", resolved(cfg, "osd.1", buf, sizeof(buf)));
+	ASSERT_STR_EQ("osd.uptime", resolved(cfg, "osd.2", buf, sizeof(buf)));
+	ASSERT_STR_EQ("osd.camera", resolved(cfg, "osd.3", buf, sizeof(buf)));
+
+	/*
+	 * The fourth stands for nothing yet and answers with its own name,
+	 * which is what makes an empty slot work in both directions: read,
+	 * the keys come back unset; written, the section is created.
+	 */
+	ASSERT_STR_EQ("osd.4", resolved(cfg, "osd.4", buf, sizeof(buf)));
+
+	rss_config_free(cfg);
+	PASS();
+}
+
+/*
+ * The order is the file's, and nothing else's.
+ *
+ * rss_config prepends each section as it parses, so a walk of the store hands
+ * them back backwards. A resolver that trusted the walk would number every
+ * camera's elements in reverse, and the only sign would be that editing the
+ * top-left clock moved the bottom-right logo.
+ */
+TEST the_slots_are_numbered_the_way_the_file_reads(void)
+{
+	if (!sysconf_dir_ready())
+		SKIP();
+
+	static const char *const five[] = {"osd.first",	 "osd.second", "osd.third",
+					   "osd.fourth", "osd.fifth",  NULL};
+	rss_config_t *cfg = osd_config(five);
+	char buf[RCD_OSD_SECT_MAX];
+
+	ASSERT(cfg);
+	ASSERT_STR_EQ("osd.first", resolved(cfg, "osd.1", buf, sizeof(buf)));
+	ASSERT_STR_EQ("osd.second", resolved(cfg, "osd.2", buf, sizeof(buf)));
+	ASSERT_STR_EQ("osd.third", resolved(cfg, "osd.3", buf, sizeof(buf)));
+	ASSERT_STR_EQ("osd.fourth", resolved(cfg, "osd.4", buf, sizeof(buf)));
+
+	/* The fifth is rod's, still drawn, and simply not on the page. */
+	rss_config_free(cfg);
+	PASS();
+}
+
+/*
+ * A section rod would not draw takes no slot. rod ignores an element with an
+ * empty name and one whose name it cannot hold, so counting them here would
+ * point every slot below at the wrong element -- and [osd] itself is the
+ * overlay's own settings rather than an element at all.
+ */
+TEST a_section_rod_would_not_draw_takes_no_slot(void)
+{
+	if (!sysconf_dir_ready())
+		SKIP();
+
+	static const char *const mixed[] = {
+		"osd.", "osd.thisnameislongerthanrodwillholdinanelement", "osd.real", NULL};
+	rss_config_t *cfg = osd_config(mixed);
+	char buf[RCD_OSD_SECT_MAX];
+
+	ASSERT(cfg);
+	ASSERT_STR_EQ("osd.real", resolved(cfg, "osd.1", buf, sizeof(buf)));
+	ASSERT_STR_EQ("osd.2", resolved(cfg, "osd.2", buf, sizeof(buf)));
+
+	rss_config_free(cfg);
+	PASS();
+}
+
+/*
+ * Everything else is a section name like any other and comes back untouched.
+ * A camera whose config really does say [osd.top_left] still has it read and
+ * written under that name -- it is an element, and it takes a slot like one.
+ */
+TEST only_the_four_ordinals_resolve(void)
+{
+	if (!sysconf_dir_ready())
+		SKIP();
+
+	static const char *const one[] = {"osd.top_left", NULL};
+	rss_config_t *cfg = osd_config(one);
+	char buf[RCD_OSD_SECT_MAX];
+
+	ASSERT(cfg);
+	ASSERT_STR_EQ("osd.top_left", resolved(cfg, "osd.1", buf, sizeof(buf)));
+
+	/* Not ordinals: a name, the overlay's own section, a number past the
+	 * slots, and one with more digits than a slot has. */
+	ASSERT_STR_EQ("osd.top_left", resolved(cfg, "osd.top_left", buf, sizeof(buf)));
+	ASSERT_STR_EQ("osd", resolved(cfg, "osd", buf, sizeof(buf)));
+	ASSERT_STR_EQ("osd.5", resolved(cfg, "osd.5", buf, sizeof(buf)));
+	ASSERT_STR_EQ("osd.10", resolved(cfg, "osd.10", buf, sizeof(buf)));
+	ASSERT_STR_EQ("network", resolved(cfg, "network", buf, sizeof(buf)));
+
+	rss_config_free(cfg);
+	PASS();
 }
 
 TEST the_zone_table_is_two_arrays_of_one_length(void)
@@ -3886,7 +4030,11 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(a_live_command_is_sent_the_field_it_asks_for);
 	RUN_TEST(a_selector_names_the_key_that_carries_it);
 	RUN_TEST(every_daynight_threshold_is_a_live_key);
-	RUN_TEST(the_six_places_carry_the_same_keys);
+	RUN_TEST(the_four_slots_carry_the_same_keys);
+	RUN_TEST(a_slot_stands_for_the_element_the_file_has);
+	RUN_TEST(the_slots_are_numbered_the_way_the_file_reads);
+	RUN_TEST(a_section_rod_would_not_draw_takes_no_slot);
+	RUN_TEST(only_the_four_ordinals_resolve);
 	RUN_TEST(every_writable_key_has_an_owner);
 	RUN_TEST(impact_separates_the_pipeline_from_the_stream);
 	RUN_TEST(the_zone_table_is_two_arrays_of_one_length);
