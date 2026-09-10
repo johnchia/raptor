@@ -598,6 +598,81 @@ static const char *render(const rcd_key_t *k, const cJSON *v, rcd_edit_t *e, cha
 		return NULL;
 	}
 
+	if (k->type == V_PASSWD) {
+		if (!cJSON_IsString(v) || !v->valuestring) {
+			snprintf(err, errsz, "'%s' must be a string", k->key);
+			return RCD_E_TYPE;
+		}
+		const char *s = v->valuestring;
+		size_t n = strlen(s);
+
+		if (n > (size_t)k->max || n >= sizeof(e->rendered)) {
+			/* Never quoting the value back: it is the password. */
+			snprintf(err, errsz, "'%s' is longer than %d characters", k->key, k->max);
+			return RCD_E_RANGE;
+		}
+
+		/*
+		 * A value beginning '$' is a crypt(3) string the client
+		 * derived, and it is checked first because it is outside the
+		 * length rule below rather than an instance of it -- the same
+		 * shape as the pre-derived PSK above.
+		 *
+		 * "$id$salt$digest": three dollars, nothing before the first
+		 * and something after the last. Refusing anything else is what
+		 * stops a plaintext password that merely starts with '$' from
+		 * being stored as though it were already hashed, which would
+		 * write a password nobody could ever authenticate with.
+		 */
+		if (s[0] == '$') {
+			int dollars = 0;
+			size_t last = 0;
+
+			for (size_t i = 0; i < n; i++) {
+				if (s[i] == '$') {
+					dollars++;
+					last = i;
+				}
+			}
+			if (dollars < 3 || last + 1 >= n) {
+				snprintf(err, errsz,
+					 "'%s' begins '$' but is not a $id$salt$digest hash",
+					 k->key);
+				return RCD_E_CHOICE;
+			}
+			memcpy(e->rendered, s, n);
+			e->rendered[n] = '\0';
+			return NULL;
+		}
+
+		if (n < (size_t)k->min) {
+			snprintf(err, errsz, "'%s' must be at least %d characters", k->key, k->min);
+			return RCD_E_RANGE;
+		}
+		for (size_t i = 0; i < n; i++) {
+			unsigned char c = (unsigned char)s[i];
+
+			/*
+			 * Printable ASCII, and one exclusion within it. Both
+			 * are the store's: /etc/shadow is line-oriented, so a
+			 * control byte would end the record early, and it is
+			 * colon-delimited, so a ':' would add a field. Nothing
+			 * else is refused -- a password nobody may choose is
+			 * the mistake V_CRED's grammar exists to avoid making
+			 * twice.
+			 */
+			if (c < 0x20 || c > 0x7e || c == ':') {
+				snprintf(err, errsz,
+					 "'%s' may contain only printable characters, and not ':'",
+					 k->key);
+				return RCD_E_CHOICE;
+			}
+		}
+		memcpy(e->rendered, s, n);
+		e->rendered[n] = '\0';
+		return NULL;
+	}
+
 	if (k->type == V_HOST) {
 		if (!cJSON_IsString(v) || !v->valuestring) {
 			snprintf(err, errsz, "'%s' must be a string", k->key);
@@ -814,13 +889,26 @@ static void emit_value(cJSON *arr, const rcd_key_t *k, rss_config_t *file, const
 	/* A credential is settable and never readable. Reporting the key with
 	 * no value is the honest rendering: the client draws the input and
 	 * knows not to expect it to fill in. */
-	if (k->type == V_CRED || k->type == V_SECRET) {
+	if (rcd_type_secret(k->type)) {
 		cJSON *o = cJSON_CreateObject();
 		if (!o)
 			return;
 		cJSON_AddStringToObject(o, "section", k->section);
 		cJSON_AddStringToObject(o, "key", k->key);
 		cJSON_AddBoolToObject(o, "readable", false);
+		/*
+		 * Whether one is stored, which is not the secret and is the
+		 * only thing a form needs in order to say "set a password"
+		 * rather than "change it". Asked of the provider and thrown
+		 * away unread -- for a key kept in raptor.conf there is no
+		 * store to ask and the flag is left off, exactly as before.
+		 */
+		if (k->provider) {
+			char held[RCD_VAL_MAX];
+
+			cJSON_AddBoolToObject(o, "configured",
+					      k->provider->get(held, sizeof(held)) == 0);
+		}
 		cJSON_AddItemToArray(arr, o);
 		return;
 	}
@@ -1134,7 +1222,7 @@ static int write_file(rcd_state_t *st, rcd_edit_t *edits, const bool *to_file, b
 		 * a password those are different things, and this file is
 		 * readable by anyone who can read the flash. */
 		bool secret =
-			edits[i].k->type == V_SECRET ||
+			edits[i].k->type == V_SECRET || edits[i].k->type == V_PASSWD ||
 			(edits[i].k->type == V_CRED && strcmp(edits[i].k->key, "password") == 0);
 		RSS_INFO("set: [%s] %s = %s", edits[i].k->section, edits[i].k->key,
 			 secret ? "(set)" : edits[i].rendered);
@@ -1444,7 +1532,7 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		 * daemon that owns it brings, and rcd is not the one to say. */
 		if (edits[i].reset) {
 			cJSON_AddBoolToObject(o, "reset", true);
-		} else if (edits[i].k->type != V_CRED && edits[i].k->type != V_SECRET) {
+		} else if (!rcd_type_secret(edits[i].k->type)) {
 			cJSON *v = typed_value(edits[i].k, edits[i].rendered);
 			if (v)
 				cJSON_AddItemToObject(o, "value", v);

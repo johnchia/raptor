@@ -16,6 +16,8 @@
 #include "rhd_api.h"
 #include "rhd_authrate.h"
 
+#include <rss_shadow.h>
+
 /*
  * One round trip, owned by two threads.
  *
@@ -190,65 +192,15 @@ static void api_refuse(rhd_client_t *c, const char *status, const char *code, co
 #define RHD_API_REALM "Raptor Config"
 
 /*
- * The account's password hash as /etc/shadow spells it.
- *
- * Every way of not finding one is the same answer: unknown user, unreadable
- * file, locked account. A locked or password-less account ("*", "!", "!!", or
- * an empty field) must never authenticate -- clearing the root password is a
- * thing people do while debugging, and it has to lock the camera rather than
- * open it to everyone.
- */
-static bool shadow_hash(const char *user, char *out, size_t outsz)
-{
-	if (!user || !user[0] || strchr(user, ':'))
-		return false;
-
-	FILE *f = fopen("/etc/shadow", "r");
-	if (!f)
-		return false;
-
-	char line[512];
-	size_t ulen = strlen(user);
-	bool found = false;
-
-	while (!found && fgets(line, sizeof(line), f)) {
-		if (strncmp(line, user, ulen) != 0 || line[ulen] != ':')
-			continue;
-
-		char *hash = line + ulen + 1;
-		char *end = strchr(hash, ':');
-
-		if (end)
-			*end = '\0';
-		hash[strcspn(hash, "\r\n")] = '\0';
-
-		/*
-		 * A usable hash is "$id$salt$digest". Nothing else is accepted,
-		 * which also rules out a bare DES hash -- no account here has
-		 * one, and refusing an unrecognised field is the safe way to be
-		 * wrong.
-		 */
-		if (hash[0] == '$' && strlen(hash) < outsz) {
-			rss_strlcpy(out, hash, outsz);
-			found = true;
-		}
-		break;
-	}
-
-	fclose(f);
-	return found;
-}
-
-/*
  * crypt() answers in static storage, which is safe here only because this runs
  * on the main loop thread and nothing else in rhd calls it. The comparison is
  * constant-time so a wrong password does not leak how much of it was right.
  */
 static bool system_account_ok(const char *user, const char *pass)
 {
-	char hash[128];
+	char hash[160];
 
-	if (!shadow_hash(user, hash, sizeof(hash)))
+	if (!rss_shadow_hash(RHD_SHADOW_PATH, user, hash, sizeof(hash)))
 		return false;
 
 	const char *got = crypt(pass, hash);
@@ -382,8 +334,250 @@ static void api_401(rhd_client_t *c)
 	rhd_write(c, body, (size_t)blen);
 }
 
+/*
+ * Hand a request to a worker and answer from rhd_api_poll() when it comes
+ * back. `req` is copied, so a caller that built it may free its own.
+ *
+ * Shared by both routes below because both round trips are the same round
+ * trip: what differs is who was allowed to start one and what the body is
+ * permitted to say, and neither of those is this function's business.
+ */
+static bool api_start(rhd_client_t *c, const char *req, size_t len)
+{
+	if (len > RHD_API_MAX_BODY) {
+		api_refuse(c, "413 Payload Too Large", "too-many", "request body too large");
+		return true;
+	}
+	if (c->api_job) {
+		api_refuse(c, "409 Conflict", "busy", "a request is already in flight");
+		return true;
+	}
+
+	rhd_api_job_t *job = calloc(1, sizeof(*job));
+	if (!job) {
+		api_refuse(c, "503 Service Unavailable", "io", "out of memory");
+		return true;
+	}
+	job->req = malloc(len + 1);
+	if (!job->req) {
+		free(job);
+		api_refuse(c, "503 Service Unavailable", "io", "out of memory");
+		return true;
+	}
+	memcpy(job->req, req, len);
+	job->req[len] = '\0';
+	pthread_mutex_init(&job->lock, NULL);
+	job->refs = 2; /* this client, and the worker about to start */
+
+	pthread_t tid;
+	if (pthread_create(&tid, NULL, api_worker, job) != 0) {
+		job->refs = 1;
+		job_release(job);
+		api_refuse(c, "503 Service Unavailable", "io", "cannot start a worker");
+		return true;
+	}
+	pthread_detach(tid);
+
+	c->api_job = job;
+	return true;
+}
+
+/*
+ * The body of a POST, once the checks both routes share have passed. Returns
+ * false having already answered the client.
+ *
+ * Insist on the JSON content type. A form-encoded or text/plain POST is a
+ * request a browser will send cross-origin without asking first; this one it
+ * must preflight, and rhd answers no preflight. That is the whole of the
+ * cross-site story here, so it is not optional -- and it matters most on the
+ * claim route, which by construction answers a camera with no password to
+ * check.
+ */
+static bool api_post_body(rhd_client_t *c, const char **body, size_t *blen)
+{
+	size_t ctlen = 0;
+	const char *ct = header_value(c->recv_buf, "Content-Type", &ctlen);
+
+	if (!ct || ctlen < 16 || strncasecmp(ct, "application/json", 16) != 0) {
+		api_refuse(c, "415 Unsupported Media Type", "malformed",
+			   "content-type must be application/json");
+		return false;
+	}
+
+	const char *end = strstr(c->recv_buf, "\r\n\r\n");
+	if (!end) {
+		api_refuse(c, "400 Bad Request", "malformed", "no request body");
+		return false;
+	}
+	const char *b = end + 4;
+	size_t n = c->recv_len - (size_t)(b - c->recv_buf);
+	long clen = content_length(c->recv_buf);
+
+	if (clen > 0 && (size_t)clen < n)
+		n = (size_t)clen;
+	if (n == 0) {
+		api_refuse(c, "400 Bad Request", "malformed", "no request body");
+		return false;
+	}
+	*body = b;
+	*blen = n;
+	return true;
+}
+
+/* -- claiming -- */
+
+/*
+ * Whether this camera may still be taken, which is one bit and is answered to
+ * anybody who asks.
+ *
+ * The console has to know which card to draw before it has a credential to
+ * draw it with, so this cannot be behind the authentication it is the way out
+ * of. What it gives away is a bit an attacker establishes anyway by sending a
+ * claim and reading the refusal; publishing it costs nothing and saves the
+ * page from inferring its state from an error.
+ */
+static void api_claim_state(rhd_client_t *c)
+{
+	rss_shadow_state_t st = rss_shadow_state(RHD_SHADOW_PATH, RHD_API_USER);
+	cJSON *r = cJSON_CreateObject();
+	char body[128];
+
+	if (!r) {
+		api_refuse(c, "500 Internal Server Error", "io", "out of memory");
+		return;
+	}
+	cJSON_AddStringToObject(r, "status", "ok");
+	cJSON_AddBoolToObject(r, "claimed", st == RSS_SHADOW_SET);
+	cJSON_AddBoolToObject(r, "claimable", st == RSS_SHADOW_UNSET);
+
+	bool ok = cJSON_PrintPreallocated(r, body, (int)sizeof(body), 0);
+
+	cJSON_Delete(r);
+	if (!ok) {
+		api_refuse(c, "500 Internal Server Error", "io", "could not serialise");
+		return;
+	}
+	http_send(c, "200 OK", "application/json", body, (int)strlen(body));
+}
+
+/*
+ * Take the camera: set the root password on one that has none.
+ *
+ * Two things happen here and nowhere else in this file. The route answers
+ * without authentication, because the credential it would ask for is the one
+ * it is about to create. And the request that reaches rcd is built here rather
+ * than forwarded, from one field, so that an unauthenticated caller cannot
+ * name a command -- forwarding this body verbatim would be an open door onto
+ * every verb rcd has.
+ *
+ * rcd refuses an already-claimed camera as well. That is not redundancy for
+ * its own sake: this is the only unauthenticated write on the device, the two
+ * checks read the same file from different processes, and one check is one
+ * mistake.
+ */
+static bool api_claim(rhd_client_t *c, const char *method)
+{
+	if (strcmp(method, "GET") == 0) {
+		api_claim_state(c);
+		return true;
+	}
+	if (strcmp(method, "POST") != 0) {
+		api_refuse(c, "405 Method Not Allowed", "malformed", "claiming takes GET or POST");
+		return true;
+	}
+
+	char host[64];
+
+	client_addr_str(&c->addr, host, sizeof(host));
+
+	/*
+	 * 403 and not 401, for all three refusals. An operator who mistyped a
+	 * password and a camera that is not theirs to take are different
+	 * problems, and answering both with the same challenge sends the first
+	 * one looking for a password that would not have helped.
+	 */
+	switch (rss_shadow_state(RHD_SHADOW_PATH, RHD_API_USER)) {
+	case RSS_SHADOW_UNSET:
+		break;
+	case RSS_SHADOW_SET:
+		RSS_WARN("claim: %s tried to claim a camera that is already claimed", host);
+		api_refuse(c, "403 Forbidden", "claimed", "this camera has already been claimed");
+		return true;
+	case RSS_SHADOW_LOCKED:
+		RSS_WARN("claim: %s asked to claim a camera whose root account is locked", host);
+		api_refuse(c, "403 Forbidden", "claimed",
+			   "this camera's root account is locked, so it cannot be claimed "
+			   "over the network");
+		return true;
+	case RSS_SHADOW_MISSING:
+		RSS_WARN("claim: %s asked to claim a camera with no readable %s", host,
+			 RHD_SHADOW_PATH);
+		api_refuse(c, "403 Forbidden", "io", "this camera has no account to claim");
+		return true;
+	}
+
+	const char *body = NULL;
+	size_t blen = 0;
+
+	if (!api_post_body(c, &body, &blen))
+		return true;
+
+	cJSON *in = cJSON_ParseWithLength(body, blen);
+	const cJSON *pw = in ? cJSON_GetObjectItemCaseSensitive(in, "password") : NULL;
+
+	if (!cJSON_IsString(pw) || !pw->valuestring) {
+		cJSON_Delete(in);
+		api_refuse(c, "400 Bad Request", "malformed", "claiming needs a 'password'");
+		return true;
+	}
+
+	/*
+	 * Rebuilt rather than passed through, and only the one field is
+	 * carried across. Whether the value is a password this camera will
+	 * accept is rcd's table's answer, not this file's -- the grammar,
+	 * the length and the pre-derived form are all decided there.
+	 */
+	cJSON *req = cJSON_CreateObject();
+	if (!req || !cJSON_AddStringToObject(req, "cmd", "claim") ||
+	    !cJSON_AddStringToObject(req, "password", pw->valuestring)) {
+		cJSON_Delete(req);
+		cJSON_Delete(in);
+		api_refuse(c, "503 Service Unavailable", "io", "out of memory");
+		return true;
+	}
+
+	char *wire = cJSON_PrintUnformatted(req);
+
+	cJSON_Delete(req);
+	cJSON_Delete(in);
+	if (!wire) {
+		api_refuse(c, "503 Service Unavailable", "io", "out of memory");
+		return true;
+	}
+
+	/*
+	 * Logged at warning level, with the address, and before the answer is
+	 * known. An owner who plugs a camera in and finds it already claimed
+	 * has one question, and this is the line that answers it.
+	 */
+	RSS_WARN("claim: %s is claiming this camera", host);
+
+	bool taken = api_start(c, wire, strlen(wire));
+
+	free(wire);
+	return taken;
+}
+
 bool rhd_api_handle(rhd_server_t *srv, rhd_client_t *c, const char *method, const char *path)
 {
+	if (strcmp(path, RHD_API_CLAIM_PATH) == 0) {
+		if (!srv->api_enabled) {
+			api_refuse(c, "403 Forbidden", "unknown", "the api is disabled");
+			return true;
+		}
+		return api_claim(c, method);
+	}
+
 	if (strcmp(path, RHD_API_PATH) != 0)
 		return false;
 
@@ -400,21 +594,25 @@ bool rhd_api_handle(rhd_server_t *srv, rhd_client_t *c, const char *method, cons
 	 * After the enabled check, so a camera with the api switched off says
 	 * so rather than asking for credentials it will refuse anyway.
 	 *
-	 * Setup mode does not authenticate at all, and that is the same
-	 * decision as binding one address rather than a wildcard rather than
-	 * a second one. The credential this route wants is the system
-	 * account, and a camera being set up for the first time is precisely
-	 * the camera whose owner has not been given one -- so asking would
-	 * refuse everybody, including the person holding the device. What
-	 * bounds the exposure is the network: the listener answers only on
-	 * the access point the camera raised, and that access point exists
-	 * only while the camera has no network of its own. See rhd_portal.h.
+	 * Setup mode does not authenticate -- but only while there is nothing
+	 * to authenticate against. The reason the portal is open is that the
+	 * owner of a camera being set up for the first time has not been given
+	 * a credential yet, and asking for one would refuse everybody
+	 * including them. The moment the camera is claimed that reason is
+	 * gone: a password exists, so a portal that still asked for nothing
+	 * would be an open configuration surface on an open access point --
+	 * which is exactly what a camera that fell back to setup mode after a
+	 * wifi failure would be. What bounds the remaining exposure is the
+	 * network: the listener answers only on the access point the camera
+	 * raised. See rhd_portal.h.
 	 *
 	 * Nothing narrows *what* may be set here, deliberately. rcd's table
 	 * is the policy, and an allow-list in this file would be a second
 	 * copy of it -- the thing this whole route exists not to have.
 	 */
-	if (!srv->portal) {
+	bool claimed = rss_shadow_state(RHD_SHADOW_PATH, RHD_API_USER) == RSS_SHADOW_SET;
+
+	if (!srv->portal || claimed) {
 		char host[64];
 		int retry_sec = 1;
 
@@ -438,71 +636,13 @@ bool rhd_api_handle(rhd_server_t *srv, rhd_client_t *c, const char *method, cons
 		}
 	}
 
-	/*
-	 * Insist on the JSON content type. A form-encoded or text/plain POST
-	 * is a request a browser will send cross-origin without asking first;
-	 * this one it must preflight, and rhd answers no preflight. That is
-	 * the whole of the cross-site story here, so it is not optional.
-	 */
-	size_t ctlen = 0;
-	const char *ct = header_value(c->recv_buf, "Content-Type", &ctlen);
-	if (!ct || ctlen < 16 || strncasecmp(ct, "application/json", 16) != 0) {
-		api_refuse(c, "415 Unsupported Media Type", "malformed",
-			   "content-type must be application/json");
-		return true;
-	}
+	const char *body = NULL;
+	size_t blen = 0;
 
-	const char *end = strstr(c->recv_buf, "\r\n\r\n");
-	if (!end) {
-		api_refuse(c, "400 Bad Request", "malformed", "no request body");
+	if (!api_post_body(c, &body, &blen))
 		return true;
-	}
-	const char *body = end + 4;
-	size_t blen = c->recv_len - (size_t)(body - c->recv_buf);
-	long clen = content_length(c->recv_buf);
-	if (clen > 0 && (size_t)clen < blen)
-		blen = (size_t)clen;
 
-	if (blen == 0) {
-		api_refuse(c, "400 Bad Request", "malformed", "no request body");
-		return true;
-	}
-	if (blen > RHD_API_MAX_BODY) {
-		api_refuse(c, "413 Payload Too Large", "too-many", "request body too large");
-		return true;
-	}
-	if (c->api_job) {
-		api_refuse(c, "409 Conflict", "busy", "a request is already in flight");
-		return true;
-	}
-
-	rhd_api_job_t *job = calloc(1, sizeof(*job));
-	if (!job) {
-		api_refuse(c, "503 Service Unavailable", "io", "out of memory");
-		return true;
-	}
-	job->req = malloc(blen + 1);
-	if (!job->req) {
-		free(job);
-		api_refuse(c, "503 Service Unavailable", "io", "out of memory");
-		return true;
-	}
-	memcpy(job->req, body, blen);
-	job->req[blen] = '\0';
-	pthread_mutex_init(&job->lock, NULL);
-	job->refs = 2; /* this client, and the worker about to start */
-
-	pthread_t tid;
-	if (pthread_create(&tid, NULL, api_worker, job) != 0) {
-		job->refs = 1;
-		job_release(job);
-		api_refuse(c, "503 Service Unavailable", "io", "cannot start a worker");
-		return true;
-	}
-	pthread_detach(tid);
-
-	c->api_job = job;
-	return true;
+	return api_start(c, body, blen);
 }
 
 void rhd_api_release(rhd_client_t *c)

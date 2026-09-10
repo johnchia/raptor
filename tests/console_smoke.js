@@ -49,6 +49,9 @@ class El {
 		this._text = "";
 		this.hidden = false;
 		this.disabled = false;
+		/* A real input always has a string here, and a page reading
+		 * .length off it is entitled to assume so. */
+		this.value = "";
 		this.handlers = {};
 		const self = this;
 		this.classList = {
@@ -136,6 +139,13 @@ let served = 0;
 const sent = [];          /* every request body, so a test can read the last one */
 /* The value the camera insists on for the next `set`, or null to take it. */
 let refuseNext = null;
+
+/* Whether this camera has been claimed, and what a claim carried. The console
+ * run below is a claimed camera -- that is the ordinary case and the one the
+ * whole page is about -- and the claim card is exercised afterwards by
+ * flipping this and asking the page to draw it. */
+let CLAIMABLE = false;
+let claimed_with = null;
 function reply(body) {
 	served++;
 	sent.push(body);
@@ -232,6 +242,9 @@ function valuesFor(section) {
 	SCHEMA.keys.filter(k => k.section === section).forEach((k, i) => {
 		const o = {section: k.section, key: k.key};
 		if (k.type === "credential") { o.set = true; out.push(o); return; }
+		/* A secret backed by a store: never its value, and the one bit
+		 * that says whether a form should offer "set" or "change". */
+		if (k.type === "password") { o.configured = false; out.push(o); return; }
 		/*
 		 * rvd stops writing an [image] key the config never named, so
 		 * the ordinary state of a knob is absent from the file and
@@ -270,6 +283,16 @@ const sandbox = {
 	requestAnimationFrame: () => 0,
 	AbortController: function () { this.signal = {}; this.abort = () => {}; },
 	fetch: async (url, opt) => {
+		/* The claim route is not rcd's envelope and is answered here
+		 * rather than by reply(): the page asks it before anything
+		 * else, without a credential, and what it answers decides
+		 * whether there is a console to draw at all. CLAIMABLE is set
+		 * per run below. */
+		if (String(url).indexOf("/api/v1/claim") === 0) {
+			const st = {status: "ok", claimed: !CLAIMABLE, claimable: CLAIMABLE};
+			if (opt && opt.method === "POST") claimed_with = JSON.parse(opt.body);
+			return {ok: true, status: 200, json: async () => st, text: async () => ""};
+		}
 		const body = opt && opt.body ? JSON.parse(opt.body) : {};
 		return {ok: true, status: 200, json: async () => reply(body), text: async () => ""};
 	},
@@ -296,6 +319,7 @@ const probe_epilogue = `
   setActive: function (v) { active = v; },
   ACT_STATE: ACT_STATE,
   V: V,
+  claimGate: claimGate, drawClaim: drawClaim,
 };
 `;
 
@@ -683,9 +707,67 @@ try {
 	if (!/270/.test(rot.textContent))
 		fail("the rotation control did not offer every angle the camera takes");
 
+	/*
+	 * The password key is a settings row like any other and must be drawn
+	 * as one -- typed twice, committed by a button. A password that saved
+	 * as you left the field is one you had a single chance to type right.
+	 */
+	p.setActive("system");
+	p.render();
+	await settle();
+	const pw = sheet.querySelectorAll(".row").find(r => r.dataset.id === "device.root_password");
+	if (!pw) fail("the system tab drew no row for the root password");
+	const pwFields = pw.querySelectorAll("input").filter(i => i.type === "password");
+	if (pwFields.length !== 2)
+		fail("the password row drew " + pwFields.length + " password fields, not two");
+	const pwGo = pw.querySelectorAll("button")[0];
+	if (!pwGo || !pwGo.disabled)
+		fail("the password row offered its button before anything had been typed");
+	pwFields[0].value = "a good long password";
+	pwFields[1].value = "a good long passwerd";
+	pwFields[0].handlers.input[0]();
+	if (!pwGo.disabled) fail("the password row accepted two fields that do not match");
+	pwFields[1].value = "a good long password";
+	pwFields[1].handlers.input[0]();
+	if (pwGo.disabled) fail("the password row refused two fields that do match");
+
+	/*
+	 * And the gate in front of all of it. A camera nobody has claimed has
+	 * no credential to authenticate the console with, so the page must ask
+	 * before it asks for anything else and draw a way in rather than a
+	 * fault.
+	 */
+	CLAIMABLE = true;
+	if (await p.claimGate() !== true)
+		fail("the page did not notice a camera that has not been claimed");
+	const card = sheet.querySelectorAll(".banner")[0];
+	if (!card) fail("the claim gate drew no card");
+	if (!/claim/i.test(card.textContent)) fail("the claim card does not say what it is for");
+	const fields = sheet.querySelectorAll("input").filter(i => i.type === "password");
+	if (fields.length !== 2)
+		fail("the claim card drew " + fields.length + " password fields, not two");
+	const go = sheet.querySelectorAll("button")[0];
+	if (!go || !go.disabled) fail("the claim card offered its button before anything was typed");
+
+	fields[0].value = "short";
+	fields[1].value = "short";
+	fields[0].handlers.input[0]();
+	if (!go.disabled) fail("the claim card accepted a password shorter than rcd's minimum");
+
+	fields[0].value = fields[1].value = "a good long password";
+	fields[1].handlers.input[0]();
+	if (go.disabled) fail("the claim card refused a password it should have taken");
+
+	await go.handlers.click[0]();
+	await settle();
+	if (!claimed_with || claimed_with.password !== "a good long password")
+		fail("the claim card did not send the password to the claim route");
+	if (!/claimed/i.test(sheet.textContent))
+		fail("the claim card did not say the camera had been claimed");
+
 	console.log("ok  " + p.TABS.length + " tabs, " + drawn + " groups, " + undos +
 		    " reset controls, " + staged + " redrawn with a reset staged, " +
 		    "day/night override wired, image knobs on the camera's own " +
 		    "ranges, " + live_reset + " reset live and " + staged_reset +
-		    " staged, " + served + " requests served");
+		    " staged, " + served + " requests served, claim card drawn");
 })();

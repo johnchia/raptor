@@ -336,6 +336,9 @@ select{background:var(--sink);border:1px solid var(--line);border-radius:var(--r
    One route, one shape. rhd forwards the body to rcd's socket and forwards
    the answer back; it parses neither. */
 const API = "/api/v1/rcd";
+/* Claiming answers without a credential, because the credential it asks for
+   is the one it is about to create. See rhd_api.h. */
+const CLAIM = "/api/v1/claim";
 const logEl = document.getElementById("log");
 
 function wlog(cls, text) {
@@ -504,7 +507,10 @@ const TABS = [
  {id:"record",  name:"Recording",   groups:[{title:"Motion", section:"motion"},
                                             {title:"Recording", section:"recording"},
                                             {title:"Time-lapse", section:"timelapse"}]},
- {id:"system",  name:"System",       groups:[{title:"Time", section:"device"},
+ {id:"system",  name:"System",       groups:[{title:"Access", section:"device",
+                                             keys:["root_password"],
+                                             note:"The root account, which is the login this page asks for \u2014 not the one that watches video. Changing it signs this browser out."},
+                                            {title:"Time", section:"device"},
                                             {title:"Network", section:"network",
                                              note:"Applied together, and put back after 90 seconds unless you confirm — so a wrong address costs a wait, not a trip to the camera."},
                                             {title:"Wi-Fi", section:"wifi",
@@ -704,6 +710,10 @@ function isIdentifier(k) { return IDENTIFIER.test(k.key); }
 function widgetFor(k) {
   if (k.type === "bool") return "switch";
   if (k.type === "credential") return "cred";
+  /* Not the credential widget: this one is typed twice and committed by a
+     button. A password that saved as you left the field would be a password
+     you had one chance to type correctly and no way to check. */
+  if (k.type === "password") return "passwd";
   /* Everything with a length rather than a range. A V_TEXT carries max_length
      and no bounds at all, so without this it falls past every span test below
      and lands on the number widget -- which is what the wifi SSID had been
@@ -846,7 +856,7 @@ async function commit(id, val, el) {
      changed their mind about the reset, not that they want both. */
   RESET.delete(id);
 
-  if (k.tier === "live" && k.type !== "credential") {
+  if (k.tier === "live" && k.type !== "credential" && k.type !== "password") {
     if (inflight.has(id)) { parked[id] = {val: val, el: el}; return; }
     inflight.add(id);
     try {
@@ -856,6 +866,20 @@ async function commit(id, val, el) {
       const q = parked[id];
       if (q) { delete parked[id]; commit(id, q.val, q.el); }
     }
+    return;
+  }
+
+  if (k.type === "password") {
+    try {
+      await api({cmd:"set", edits:[{section:k.section, key:k.key, value:val}]});
+      CREDSET[id] = true;
+      mark(el, "set");
+      /* The credential the browser is holding for this page is now the wrong
+         one, and nothing here can clear it -- only a reload makes the browser
+         ask again. Said rather than done: reloading out from under an
+         operator mid-edit would lose whatever else they had staged. */
+      wlog("sys", "password changed \u2014 reload this page to sign in with it");
+    } catch (e) { V[id] = prev; mark(el, e.message, true); }
     return;
   }
 
@@ -1040,6 +1064,44 @@ function buildControl(id, onChange) {
       seg.append(b);
     });
     wrap.append(seg); return wrap;
+  }
+
+  if (w === "passwd") {
+    const box = document.createElement("div"); box.className = "cred";
+    const one = document.createElement("input");
+    const two = document.createElement("input");
+    one.type = two.type = "password";
+    /* new-password, so a browser offers to generate one and does not fill in
+       the credential it has stored for the media gate. */
+    one.autocomplete = two.autocomplete = "new-password";
+    one.placeholder = CREDSET[id] ? "new password" : "choose a password";
+    two.placeholder = "again";
+    const go = document.createElement("button");
+    go.type = "button"; go.className = "btn primary"; go.disabled = true;
+    go.textContent = CREDSET[id] ? "Change" : "Set";
+    const st = document.createElement("span"); st.className = "state";
+    /* rcd's table is the authority on both of these and refuses anything it
+       disagrees with; the page carries them only to say so before the round
+       trip rather than after it. */
+    const min = k.min_length || 8;
+    const check = () => {
+      go.disabled = !(one.value.length >= min && one.value === two.value);
+      st.textContent = !one.value ? (CREDSET[id] ? "set" : "not set")
+                     : one.value.length < min ? min + " characters or more"
+                     : one.value !== two.value ? "they do not match" : "ready";
+    };
+    one.addEventListener("input", check);
+    two.addEventListener("input", check);
+    go.addEventListener("click", () => {
+      const v = one.value;
+      one.value = two.value = ""; check();
+      onChange(v);
+    });
+    check();
+    box.append(one, two, go, st); wrap.append(box);
+    const n = document.createElement("span"); n.className = "unit";
+    n.textContent = "the login this page asks for \u00b7 never read back";
+    wrap.append(n); return wrap;
   }
 
   if (w === "cred") {
@@ -2035,7 +2097,13 @@ async function loadValues() {
     (r.values || []).forEach(v => {
       const id = v.section + "." + v.key;
       if (!byId[id]) return;
-      if (byId[id].type === "credential") { CREDSET[id] = v.set === true; return; }
+      /* A secret is reported without its value. `configured` is the bit a
+         form needs -- whether there is one to change -- and is present only
+         where a store can be asked; `set` is what an older rcd said. */
+      if (byId[id].type === "credential" || byId[id].type === "password") {
+        CREDSET[id] = v.configured === true || v.set === true;
+        return;
+      }
       if (v.set === false || v.value === undefined || v.value === null) {
         DEFAULTED.add(id);
         /* Nobody has ever set it and no daemon answered for it, so its value
@@ -2066,7 +2134,123 @@ async function loadPending() {
   } catch (e) { /* drift is a nicety; the page works without it */ }
 }
 
+/*
+ * A camera nobody has taken yet.
+ *
+ * Asked before anything else, and without a credential, because on a camera
+ * that has never been claimed there is no credential to ask with: the login
+ * this page wants is the system account, and its password field is empty
+ * until somebody sets it. Every other request would answer 401, the browser
+ * would raise a dialog nobody can satisfy, and the page would report a fault
+ * where what has happened is a step nobody has done yet.
+ *
+ * Returns true when it has drawn the claim card, and the caller stops.
+ */
+async function claimGate() {
+  let st;
+  try {
+    const r = await fetch(CLAIM, {headers: {"Accept": "application/json"}});
+    if (!r.ok) return false;
+    st = await r.json();
+  } catch (e) {
+    /* An older rhd has no such route. Fall through to the ordinary page,
+       which is exactly what this camera did before claiming existed. */
+    return false;
+  }
+  if (!st || st.claimable !== true) return false;
+  drawClaim();
+  return true;
+}
+
+function drawClaim() {
+  const sheet = document.getElementById("sheet");
+  sheet.textContent = "";
+
+  const card = document.createElement("div"); card.className = "banner";
+  const t = document.createElement("b"); t.textContent = "Claim this camera";
+  const p1 = document.createElement("div");
+  p1.textContent = "This camera has no password, so nothing here can be changed " +
+    "and anyone who can reach it can take it. Setting one claims it: it becomes " +
+    "the login this page asks for, and the only account that may change anything.";
+  const p2 = document.createElement("div");
+  p2.style.marginTop = "6px";
+  p2.textContent = "It can only be done once. Afterwards the way back is a " +
+    "factory reset from a shell, so choose something you will still have.";
+  card.append(t, p1, p2);
+
+  const box = document.createElement("div"); box.className = "cred";
+  box.style.marginTop = "10px";
+  const one = document.createElement("input");
+  const two = document.createElement("input");
+  one.type = two.type = "password";
+  one.autocomplete = two.autocomplete = "new-password";
+  one.placeholder = "choose a password";
+  two.placeholder = "again";
+  const go = document.createElement("button");
+  go.type = "button"; go.className = "btn primary"; go.disabled = true;
+  go.textContent = "Claim";
+  const st = document.createElement("span"); st.className = "state";
+
+  /* Eight is rcd's minimum for this key. The camera refuses anything shorter
+     whatever this page believes, so the number here only saves a round trip. */
+  const MIN = 8;
+  const check = () => {
+    go.disabled = !(one.value.length >= MIN && one.value === two.value);
+    st.textContent = !one.value ? ""
+                   : one.value.length < MIN ? MIN + " characters or more"
+                   : one.value !== two.value ? "they do not match" : "ready";
+  };
+  one.addEventListener("input", check);
+  two.addEventListener("input", check);
+
+  go.addEventListener("click", async () => {
+    go.disabled = true;
+    st.textContent = "claiming\u2026";
+    let body;
+    try {
+      const r = await fetch(CLAIM, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({password: one.value})
+      });
+      body = await r.json();
+      if (!r.ok || body.status !== "ok")
+        throw new Error(body && body.reason ? body.reason : "HTTP " + r.status);
+    } catch (e) {
+      st.textContent = "";
+      /* Not re-enabled on a refusal that will refuse again: somebody else
+         claiming the camera between the page loading and this click is the
+         case, and offering the button back would invite them to keep
+         pressing it. */
+      if (!(body && body.code === "claimed")) check();
+      const bad = document.createElement("div");
+      bad.style.marginTop = "8px";
+      bad.textContent = e.message;
+      card.append(bad);
+      return;
+    }
+    /* Reloaded rather than carried on with, because the browser has to be
+       asked for the credential that now exists, and it only asks on a fresh
+       request it has nothing cached for. */
+    sheet.textContent = "";
+    const done = document.createElement("div"); done.className = "banner";
+    const dt = document.createElement("b"); dt.textContent = "Claimed";
+    const dp = document.createElement("div");
+    dp.textContent = "Sign in as root with the password you just set.";
+    done.append(dt, dp);
+    sheet.append(done);
+    setTimeout(() => location.reload(), 1200);
+  });
+
+  box.append(one, two, go, st);
+  card.append(box);
+  sheet.append(card);
+  one.focus();
+}
+
 async function boot() {
+  if (await claimGate()) return;
+
   let hello;
   try {
     hello = await api({cmd:"hello"});

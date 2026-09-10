@@ -129,6 +129,17 @@ select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,va
     <p class="hint" id="pskhint">Scrambled on this device before it is sent.</p>
   </div>
 
+  <div class="field hidden" id="claimwrap">
+    <label for="rootpw">Camera password</label>
+    <div class="pw">
+      <input id="rootpw" type="password" maxlength="127" placeholder="8 characters or more">
+      <button type="button" id="revealpw">Show</button>
+    </div>
+    <input id="rootpw2" type="password" maxlength="127" placeholder="Again">
+    <p class="hint" id="claimhint">Nobody has claimed this camera yet. This becomes
+       the login for its settings page, and it can only be set once.</p>
+  </div>
+
   <div class="field">
     <label for="name">Camera name</label>
     <input id="name" type="text" maxlength="63" placeholder="front-door">
@@ -319,6 +330,40 @@ $("reveal").addEventListener("click", () => {
   $("reveal").textContent = shown ? "Show" : "Hide";
 });
 
+$("revealpw").addEventListener("click", () => {
+  const f = $("rootpw");
+  const shown = f.type === "text";
+  f.type = shown ? "password" : "text";
+  $("revealpw").textContent = shown ? "Show" : "Hide";
+});
+
+/* ── claiming ──
+   A camera nobody has taken has no password, and this open access point is
+   where its owner is standing. So the field is offered here, and offered only
+   here: on a camera that has already been claimed the whole configuration
+   route asks for that password instead, and there is nothing to set.
+
+   The plaintext crosses the access point, which is open by construction. The
+   wifi passphrase above does not -- it is derived on the device first -- and
+   the difference is deliberate rather than an oversight. That passphrase is
+   the operator's home network's and is very likely reused elsewhere, and the
+   PBKDF2 it needs was small enough to write here. This one is this camera's
+   alone, and the sha256-crypt it would need is a hundred lines of hashing
+   whose failure mode is a camera claimed with a password nobody can use.
+   rcd advertises `accepts_hash` on the key, so a client that can derive one
+   may send it instead, and that is the door left open. */
+let CLAIMABLE = false;
+
+async function loadClaim() {
+  try {
+    const r = await fetch("/api/v1/claim", {headers: {Accept: "application/json"}});
+    if (!r.ok) return;
+    const st = await r.json();
+    CLAIMABLE = st && st.claimable === true;
+  } catch (e) { /* an older rhd has no such route, and no password to set */ }
+  $("claimwrap").classList.toggle("hidden", !CLAIMABLE);
+}
+
 /* ── scanning ──
    rcd triggers a scan and answers with the results it already has, rather
    than blocking its single serve loop for the seconds a scan takes. So this
@@ -420,6 +465,16 @@ $("form").addEventListener("submit", async (ev) => {
   if (secure && (pass.length < 8 || pass.length > 63))
     return fail("A passphrase is 8 to 63 characters.");
 
+  /* rcd's minimum for this key, checked here so a typo is caught while the
+     form still holds it rather than after a round trip. */
+  const rootpw = $("rootpw").value;
+  if (CLAIMABLE) {
+    if (rootpw.length < 8)
+      return fail("The camera password is 8 characters or more.");
+    if (rootpw !== $("rootpw2").value)
+      return fail("The two camera passwords do not match.");
+  }
+
   $("go").disabled = true;
   $("go").textContent = "Working…";
 
@@ -436,10 +491,20 @@ $("form").addEventListener("submit", async (ev) => {
     }
   }
 
-  const edits = [
-    {section: "wifi", key: "ssid", value: ssid},
-    {section: "wifi", key: "psk", value: psk}
-  ];
+  const edits = [];
+
+  /*
+   * The password goes first, and the order is the whole of why it is in this
+   * batch at all. rcd writes these one at a time: claimed first, a camera
+   * that fails halfway is one nobody else can take. The other way round it is
+   * a camera that has been given a network and no password, which is the
+   * state this whole flow exists to avoid ever reaching.
+   */
+  if (CLAIMABLE)
+    edits.push({section: "device", key: "root_password", value: rootpw});
+
+  edits.push({section: "wifi", key: "ssid", value: ssid},
+             {section: "wifi", key: "psk", value: psk});
   const name = $("name").value.trim();
   if (name) edits.push({section: "device", key: "hostname", value: name});
   const tz = $("tz").value;
@@ -473,5 +538,6 @@ $("form").addEventListener("submit", async (ev) => {
 });
 
 scan();
+loadClaim();
 loadExtras();
 </script>

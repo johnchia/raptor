@@ -165,9 +165,9 @@ void rcd_guard_hold(rcd_state_t *st)
 /*
  * What may be said out loud about a value being put back.
  *
- * The revert is the one place a guarded value is written to the log, and two
- * of the keys it covers are secrets: the wifi passphrase, and a credential if
- * one is ever guarded. `set` and `get` have refused to report those since they
+ * The revert is the one place a guarded value is written to the log, and some
+ * of the keys it may cover are secrets: the wifi passphrase, and a credential
+ * if one is ever guarded. `set` and `get` have refused to report those since they
  * existed, and this was the hole left behind -- a wifi revert printed the
  * whole PSK to syslog, where it outlives the change that caused it.
  *
@@ -176,7 +176,7 @@ void rcd_guard_hold(rcd_state_t *st)
  */
 static const char *redacted(const rcd_key_t *k, const char *value)
 {
-	if (k->type == V_SECRET || k->type == V_CRED)
+	if (rcd_type_secret(k->type))
 		return "its previous value";
 	return value;
 }

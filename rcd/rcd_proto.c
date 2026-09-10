@@ -8,6 +8,7 @@
 #include "rcd_config.h"
 #include "rcd_guard.h"
 #include "rcd_ipc.h"
+#include "rcd_passwd.h"
 #include "rcd_schema.h"
 #include "rcd_state.h"
 
@@ -220,6 +221,8 @@ static cJSON *dispatch(rcd_state_t *st, const char *name, const cJSON *root)
 		return rcd_cmd_set(st, root);
 	if (strcmp(name, "credentials") == 0)
 		return rcd_cmd_credentials(st, root);
+	if (strcmp(name, "claim") == 0)
+		return rcd_cmd_claim(st, root);
 	if (strcmp(name, "action") == 0)
 		return rcd_cmd_action(st, root);
 	if (strcmp(name, "apply") == 0)

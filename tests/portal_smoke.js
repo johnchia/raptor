@@ -121,6 +121,8 @@ let scanReply = {
 	],
 };
 
+let CLAIMABLE = true;
+
 function reply(body) {
 	sent.push(body);
 	if (body.cmd === "action" && body.action === "wifi-scan") return scanReply;
@@ -158,6 +160,14 @@ const sandbox = {
 	},
 	clearTimeout: () => {},
 	fetch: async (url, opt) => {
+		/* Not rcd's envelope: the claim route answers rhd's own two
+		 * booleans, and the page asks it before anything else. A
+		 * camera that has not been claimed is the case this whole
+		 * page exists for, so it is the default here. */
+		if (String(url).indexOf("/api/v1/claim") === 0)
+			return {ok: true, status: 200,
+				json: async () => ({status: "ok", claimed: !CLAIMABLE,
+						    claimable: CLAIMABLE})};
 		const body = opt && opt.body ? JSON.parse(opt.body) : {};
 		sandbox.__lastBody = opt ? opt.body : "";
 		return {ok: true, status: 200, json: async () => reply(body)};
@@ -171,7 +181,7 @@ sandbox.window.document = document;
 /* The page's own names are lexical, so an epilogue in the same scope is the
  * only way to reach them. */
 const epilogue = `
-;globalThis.__probe = {derive: derive, scan: scan, api: api};
+;globalThis.__probe = {derive: derive, scan: scan, api: api, loadClaim: loadClaim};
 `;
 
 vm.createContext(sandbox);
@@ -254,9 +264,29 @@ async function main() {
 	eq("a short passphrase is refused here", sent.length, before);
 	ok("and it says so", el("err").textContent.indexOf("8 to 63") >= 0);
 
+	/* -- claiming, which is offered because this camera has none -- */
+	ok("the claim field is offered on an unclaimed camera",
+	   !el("claimwrap").classList.contains("hidden"));
+
+	el("psk").value = "correct horse battery staple";
+	el("rootpw").value = "short";
+	el("rootpw2").value = "short";
+	let mark = sent.length;
+	await el("form").fire("submit");
+	eq("a camera password shorter than rcd's minimum never leaves the page",
+	   sent.length, mark);
+
+	el("rootpw").value = "a good long password";
+	el("rootpw2").value = "a good long passwerd";
+	mark = sent.length;
+	await el("form").fire("submit");
+	eq("nor do two that disagree", sent.length, mark);
+	ok("and it says which", el("err").textContent.indexOf("do not match") >= 0);
+
 	/* -- the real thing -- */
 	const secret = "correct horse battery staple";
 	el("psk").value = secret;
+	el("rootpw").value = el("rootpw2").value = "a good long password";
 	el("name").value = "front-door";
 	el("tz").value = "Europe/London";
 	await el("form").fire("submit");
@@ -274,6 +304,15 @@ async function main() {
 	ok("the plaintext passphrase is nowhere in the request",
 	   JSON.stringify(sent).indexOf(secret) < 0);
 
+	/*
+	 * First in the batch, and that is the property rather than a detail of
+	 * the array. rcd writes these in order: claimed before it has a
+	 * network is a camera nobody else can take, and a network before it is
+	 * claimed is one that joins the operator's LAN with no password on it.
+	 */
+	eq("the camera password leads the batch", set.edits[0].key, "root_password");
+	eq("and goes to the section rcd actually has", set.edits[0].section, "device");
+
 	ok("the name came along", set.edits.some((e) => e.key === "hostname" && e.value === "front-door"));
 	ok("so did the zone",
 	   set.edits.some((e) => e.key === "timezone" && e.value === "Europe/London"));
@@ -288,10 +327,33 @@ async function main() {
 	el("form").classList.remove("hidden");
 	sel.value = "Hedgerow Guest";
 	el("psk").value = "";
+	el("rootpw").value = el("rootpw2").value = "a good long password";
 	await el("form").fire("submit");
 	const open = sent.find((r) => r.cmd === "set");
 	ok("an open network is accepted with no passphrase", !!open);
 	eq("and stores an empty one", open.edits.find((e) => e.key === "psk").value, "");
+
+	/*
+	 * And a camera somebody already has does not offer to be taken again.
+	 * The portal is reachable on a claimed camera -- a wifi passphrase that
+	 * did not work brings it back -- and there the password is not a field
+	 * on this form but the credential the configuration route asks for.
+	 */
+	CLAIMABLE = false;
+	await probe.loadClaim();
+	ok("a claimed camera offers no way to claim it again",
+	   el("claimwrap").classList.contains("hidden"));
+
+	sent.length = 0;
+	el("done").classList.add("hidden");
+	el("form").classList.remove("hidden");
+	el("rootpw").value = el("rootpw2").value = "";
+	sel.value = "Hedgerow";
+	el("psk").value = secret;
+	await el("form").fire("submit");
+	const later = sent.find((r) => r.cmd === "set");
+	ok("and joining a network still works with no password to set", !!later);
+	ok("without sending one", !later.edits.some((e) => e.key === "root_password"));
 
 	console.log("portal_smoke: " + checks + " checks passed");
 }

@@ -9,6 +9,7 @@
 #include "rcd_ipc.h"
 #include "rcd_proto.h"
 #include "rcd_schema.h"
+#include "rcd_passwd.h"
 #include "rcd_wifi.h"
 
 #include <raptor_hal.h>
@@ -487,8 +488,25 @@ static void collect_system(cJSON *state)
 	 * not to a camera with nothing to say.
 	 */
 	cJSON *o = cJSON_AddObjectToObject(state, "system");
-	if (o)
-		cJSON_AddBoolToObject(o, "provisioned", rcd_wifi_provisioned());
+	if (!o)
+		return;
+	cJSON_AddBoolToObject(o, "provisioned", rcd_wifi_provisioned());
+
+	/*
+	 * And whether anyone has taken this camera. Reported beside
+	 * provisioning because it is the same kind of fact -- derived from the
+	 * store at the moment it is asked, never cached, never a flag of
+	 * rcd's own -- and because a client that has both can tell a camera
+	 * waiting to be set up from one that already belongs to somebody.
+	 *
+	 * Only a client that authenticated is reading this, so it says more
+	 * than the unauthenticated claim route does: `claimable` distinguishes
+	 * a camera that may still be taken from one whose root account is
+	 * locked, which is the difference between a step somebody has not done
+	 * yet and a decision the image made.
+	 */
+	cJSON_AddBoolToObject(o, "claimed", rcd_passwd_claimed());
+	cJSON_AddBoolToObject(o, "claimable", rcd_passwd_claimable());
 }
 
 cJSON *rcd_cmd_state(rcd_state_t *st, const cJSON *root)

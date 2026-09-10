@@ -578,11 +578,14 @@ rsr: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
 		LDFLAGS="$(LDFLAGS) $(LDFLAGS_SRT)" Q="$(Q)"
 
+# -lcrypt for the same reason rhd names it: rcd_passwd.c hashes the root
+# password with crypt(3) when a camera is claimed, and glibc keeps that in
+# libcrypt where musl keeps it in libc.
 rcd: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rcd"
 	$(Q)$(MAKE) -C rcd CONFIG_STAMP="$(CONFIG_STAMP)" CC="$(CC)" CFLAGS="$(CFLAGS)" \
 		LIBS="$(LIB_COMMON) $(LIB_IPC) $(RSS_BUILD_LIBS)" \
-		LDFLAGS="$(LDFLAGS)" Q="$(Q)"
+		LDFLAGS="$(LDFLAGS) -lcrypt" Q="$(Q)"
 
 rmq: $(CONFIG_STAMP) $(LIB_IPC_FILE) $(LIB_COMMON_FILE) $(RSS_BUILD_OBJ)
 	@echo "  BUILD   rmq"

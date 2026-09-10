@@ -35,6 +35,7 @@ struct rcd_state;
 #define RCD_E_DAEMON	  "daemon"	/* the owning daemon refused or is absent */
 #define RCD_E_BUSY	  "busy"	/* an apply is running, or a change is unconfirmed */
 #define RCD_E_UNSUPPORTED "unsupported" /* the SoC has no such control */
+#define RCD_E_CLAIMED	  "claimed"	/* somebody already set this camera's password */
 
 /* A fresh success envelope, or a refusal. Both are owned by the caller. */
 cJSON *rcd_ok(void);

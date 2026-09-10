@@ -6,6 +6,7 @@
 
 #include "rcd_guard.h"
 #include "rcd_network.h"
+#include "rcd_passwd.h"
 #include "rcd_system.h"
 #include "rcd_wifi.h"
 
@@ -659,6 +660,24 @@ static const rcd_key_t keys[] = {
 	 GUARDED(rcd_provider_hostname, RCD_IMPACT_SERVICE, RCD_GUARD_NAME_SEC)},
 
 	/*
+	 * The password that decides who may configure this camera, which is
+	 * the system account's and not [http]'s -- see rcd_passwd.h.
+	 *
+	 * Live, and it is the clearest case in the table: /etc/shadow is read
+	 * at each authentication, so there is no running copy to reconcile and
+	 * nothing for `apply` to do. Which also means it cannot be guarded,
+	 * and must not be. What the guard protects is reachability, and this
+	 * key does not risk that -- it risks the operator's memory of what
+	 * they typed, which no timer can check. Worse, a revert here would put
+	 * an empty hash back and un-claim the camera on a timeout, which is
+	 * the one outcome nothing in this design may produce. The way back
+	 * from a forgotten password is `sysupgrade --wipe_overlay`, the same
+	 * answer every device of this kind gives.
+	 */
+	{"device", "root_password", V_PASSWD, 8, RCD_VAL_MAX - 1, NULL,
+	 PROVIDED(rcd_provider_root_password, RCD_IMPACT_NONE)},
+
+	/*
 	 * -- The camera's address. One interface, the camera's -- see
 	 *    rcd_network.h -- and five directives of one file, so they are
 	 *    declared together and enacted together: `apply` brings the
@@ -916,8 +935,15 @@ static const char *type_name(rcd_val_type_t t)
 		return "text";
 	case V_SECRET:
 		return "secret";
+	case V_PASSWD:
+		return "password";
 	}
 	return "int";
+}
+
+bool rcd_type_secret(rcd_val_type_t t)
+{
+	return t == V_CRED || t == V_SECRET || t == V_PASSWD;
 }
 
 static void emit_choices(cJSON *o, const char *const *choices)
@@ -965,8 +991,18 @@ static void emit_key(cJSON *arr, const rcd_key_t *k)
 		 */
 		if (k->auto_ok)
 			cJSON_AddBoolToObject(o, "auto", true);
-	} else if (k->type == V_CRED || k->type == V_HOST || k->type == V_TEXT) {
+	} else if (k->type == V_CRED || k->type == V_HOST || k->type == V_TEXT ||
+		   k->type == V_PASSWD) {
 		cJSON_AddNumberToObject(o, "max_length", k->max);
+		/* A form that can hash locally needs to be told it may: the
+		 * alternative is sending the plaintext across a network that
+		 * may be the camera's own open access point. Said only where
+		 * it is true, so a client that cannot derive one ignores it
+		 * and sends what it always sent. */
+		if (k->type == V_PASSWD) {
+			cJSON_AddNumberToObject(o, "min_length", k->min);
+			cJSON_AddBoolToObject(o, "accepts_hash", true);
+		}
 	} else if (k->type == V_SECRET) {
 		/* Its length rule is WPA's -- 8 to 63, or 64 hex digits -- and
 		 * belongs to the grammar rather than to this entry, so the
@@ -1026,8 +1062,7 @@ static void emit_key(cJSON *arr, const rcd_key_t *k)
 	 * not know that draws an input which always looks empty and calls it a
 	 * bug. Said plainly instead. A provider-backed key has no daemon to ask
 	 * and is read anyway -- from the store it is written to. */
-	if (k->type == V_CRED || k->type == V_SECRET ||
-	    (!k->provider && !rcd_section_reader(k->section)))
+	if (rcd_type_secret(k->type) || (!k->provider && !rcd_section_reader(k->section)))
 		cJSON_AddBoolToObject(o, "readable", false);
 
 	/* Present only where it applies, so a client that has never heard of

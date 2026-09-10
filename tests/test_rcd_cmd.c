@@ -33,6 +33,7 @@
 #include "../rcd/rcd_proto.h"
 #include "../rcd/rcd_schema.h"
 #include "../rcd/rcd_state.h"
+#include "../rcd/rcd_passwd.h"
 #include "../rcd/rcd_system.h"
 #include "../rcd/rcd_wifi.h"
 
@@ -2451,13 +2452,262 @@ TEST a_revert_can_unset_a_value_that_was_never_there(void)
 	PASS();
 }
 
+/* ------------------------------------------------------------------ */
+/* Claiming: the root password, and the one write an unclaimed camera  */
+/* accepts from a stranger                                             */
+/* ------------------------------------------------------------------ */
+
+#define TEST_SHADOW RCD_SYSCONF_DIR "/shadow"
+
+/* The line a fresh OpenIPC image ships: an empty password field, which is why
+ * a camera arrives configurable by nobody. */
+static int shadow_says(const char *field)
+{
+	if (!sysconf_dir_ready())
+		return 0;
+
+	FILE *f = fopen(TEST_SHADOW, "w");
+
+	if (!f)
+		return 0;
+	fprintf(f, "root:%s:19477::::::\ndaemon:*:::::::\nnobody:*:::::::\n", field);
+	fclose(f);
+	return 1;
+}
+
+static const char *shadow_field(char *buf, size_t sz)
+{
+	FILE *f = fopen(TEST_SHADOW, "r");
+
+	buf[0] = '\0';
+	if (!f)
+		return buf;
+
+	char line[512];
+
+	while (fgets(line, sizeof(line), f)) {
+		if (strncmp(line, "root:", 5) != 0)
+			continue;
+		char *end = strchr(line + 5, ':');
+
+		if (end)
+			*end = '\0';
+		snprintf(buf, sz, "%s", line + 5);
+		break;
+	}
+	fclose(f);
+	return buf;
+}
+
+/*
+ * The grammar is a fourth one rather than a borrowed one, and these are the
+ * cases that say why. It is wider than V_CRED, which has no '$' and so cannot
+ * carry a hash at all; it is not bounded by WPA's lengths the way V_SECRET is;
+ * and it excludes exactly what the store cannot hold, which is a colon and a
+ * control byte, rather than the punctuation a password ought to be allowed.
+ */
+TEST a_password_may_contain_what_a_password_contains(void)
+{
+	rcd_edit_t e[RCD_EDITS_MAX];
+	int n = 0;
+
+	ASSERT_EQ(0, validate_set("{\"section\":\"device\",\"key\":\"root_password\","
+				  "\"value\":\"correct horse battery staple\"}",
+				  e, &n));
+	ASSERT_EQ(0, validate_set("{\"section\":\"device\",\"key\":\"root_password\","
+				  "\"value\":\"p@ssw0rd!#%^&*()_+-=[]{}|;\\u0027\\\",.<>/?\"}",
+				  e, &n));
+
+	/* Too short, and short is the one length rule there is. */
+	ASSERT_EQ(-1, validate_set("{\"section\":\"device\",\"key\":\"root_password\","
+				   "\"value\":\"short\"}",
+				   e, &n));
+	ASSERT_STR_EQ(RCD_E_RANGE, code);
+
+	/* Empty is not "no password": there is no value in this grammar that
+	 * asks for an unclaimed camera. */
+	ASSERT_EQ(-1, validate_set("{\"section\":\"device\",\"key\":\"root_password\","
+				   "\"value\":\"\"}",
+				   e, &n));
+
+	/* The store is colon-delimited and line-oriented, and those are the
+	 * only two exclusions. */
+	ASSERT_EQ(-1, validate_set("{\"section\":\"device\",\"key\":\"root_password\","
+				   "\"value\":\"has:a:colon\"}",
+				   e, &n));
+	ASSERT_STR_EQ(RCD_E_CHOICE, code);
+	ASSERT_EQ(-1, validate_set("{\"section\":\"device\",\"key\":\"root_password\","
+				   "\"value\":\"has\\na newline\"}",
+				   e, &n));
+	ASSERT_STR_EQ(RCD_E_CHOICE, code);
+
+	/* And the value never comes back, whatever happens to it. */
+	ASSERT_EQ(NULL, strstr(reason, "correct horse"));
+	PASS();
+}
+
+/*
+ * A client that can hash locally may, and that is what makes the setup access
+ * point survivable: it is an open network by construction, so an eavesdropper
+ * should get something to crack rather than something to send.
+ *
+ * The shape is checked rather than trusted. A plaintext password that merely
+ * begins with '$' must not be mistaken for a hash and stored as one -- that
+ * would write a password nobody could ever authenticate with, silently.
+ */
+TEST a_pre_derived_hash_is_taken_as_one_and_a_lookalike_is_not(void)
+{
+	rcd_edit_t e[RCD_EDITS_MAX];
+	int n = 0;
+
+	ASSERT_EQ(0, validate_set("{\"section\":\"device\",\"key\":\"root_password\","
+				  "\"value\":\"$5$abcdefghijklmnop$0123456789abcdef\"}",
+				  e, &n));
+	ASSERT_STR_EQ("$5$abcdefghijklmnop$0123456789abcdef", e[0].rendered);
+
+	/* Longer than any passphrase, and accepted: a sha512 hash is 106
+	 * bytes, which is the reason the value buffer is the width it is. */
+	ASSERT_EQ(0, validate_set("{\"section\":\"device\",\"key\":\"root_password\","
+				  "\"value\":\"$6$abcdefghijklmnop$"
+				  "0123456789012345678901234567890123456789"
+				  "0123456789012345678901234567890123456789012345\"}",
+				  e, &n));
+
+	static const char *const not_hashes[] = {
+		"$money$$$",   /* dollars, but not a hash */
+		"$5$saltonly", /* no digest */
+		"$5$salt$",    /* an empty digest */
+		"$$$",	       /* three markers and nothing else */
+		NULL,
+	};
+
+	for (int i = 0; not_hashes[i]; i++) {
+		char json[160];
+
+		snprintf(json, sizeof(json),
+			 "{\"section\":\"device\",\"key\":\"root_password\","
+			 "\"value\":\"%s\"}",
+			 not_hashes[i]);
+		ASSERT_EQm(not_hashes[i], -1, validate_set(json, e, &n));
+		ASSERT_STR_EQ(RCD_E_CHOICE, code);
+	}
+	PASS();
+}
+
+/*
+ * What the provider does to the file, and what it refuses to do to it.
+ *
+ * The line is edited rather than rewritten: every other account and every
+ * ageing field on this one has to survive, for the reason the eth0 stanza's
+ * hwaddress line has to.
+ */
+TEST setting_the_password_claims_the_camera(void)
+{
+	if (!shadow_says(""))
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	ASSERT(rcd_passwd_claimable());
+	ASSERT_FALSE(rcd_passwd_claimed());
+
+	/* Emptying this store is not an operation: unconfigured here is a
+	 * camera anyone on the network may take. */
+	ASSERT_EQ(-1, rcd_provider_root_password.set(""));
+	ASSERT(rcd_passwd_claimable());
+
+	ASSERT_EQ(0, rcd_provider_root_password.set("correct horse battery staple"));
+	ASSERT(rcd_passwd_claimed());
+	ASSERT_FALSEm("a claimed camera is not claimable a second time", rcd_passwd_claimable());
+
+	char field[256];
+	shadow_field(field, sizeof(field));
+	ASSERT_EQm("the password itself must never reach the file", NULL,
+		   strstr(field, "correct horse"));
+	ASSERT_EQm("hashed with the method rcd asked for", 0, strncmp(field, "$5$", 3));
+
+	/* And the accounts this writer does not own are still there. */
+	FILE *f = fopen(TEST_SHADOW, "r");
+	ASSERT(f != NULL);
+	char all[1024] = "";
+	size_t got = fread(all, 1, sizeof(all) - 1, f);
+	all[got] = '\0';
+	fclose(f);
+	ASSERT(strstr(all, "daemon:*:") != NULL);
+	ASSERT(strstr(all, "nobody:*:") != NULL);
+	PASS();
+}
+
+/* A pre-derived value is stored as it came. Re-hashing a hash would store the
+ * wrong thing, and nothing downstream would notice until a login failed. */
+TEST a_pre_derived_hash_is_stored_verbatim(void)
+{
+	if (!shadow_says(""))
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	const char *given = "$5$abcdefghijklmnop$0123456789abcdef";
+
+	ASSERT_EQ(0, rcd_provider_root_password.set(given));
+
+	char field[256];
+	ASSERT_STR_EQ(given, shadow_field(field, sizeof(field)));
+
+	/* And `get` answers with the store, which is what lets `set` tell a
+	 * password change from a no-op. It is never reported to a client --
+	 * emit_value refuses a secret before the provider is asked. */
+	char back[RCD_VAL_MAX];
+	ASSERT_EQ(0, rcd_provider_root_password.get(back, sizeof(back)));
+	ASSERT_STR_EQ(given, back);
+	PASS();
+}
+
+/*
+ * The refusals, which are the half that must never break: this is the only
+ * unauthenticated write on the device.
+ *
+ * rhd has already declined to forward a claim on a camera that is not
+ * claimable. These are rcd not taking rhd's word for it.
+ */
+TEST a_claim_is_refused_on_a_camera_that_is_not_claimable(void)
+{
+	rcd_state_t st;
+	memset(&st, 0, sizeof(st));
+
+	if (!shadow_says("$5$abcdefghijklmnop$0123456789abcdef"))
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	cJSON *req = cJSON_Parse("{\"cmd\":\"claim\",\"password\":\"a good long password\"}");
+	cJSON *resp = rcd_cmd_claim(&st, req);
+
+	ASSERT(resp != NULL);
+	ASSERT_STR_EQ("error", cJSON_GetObjectItemCaseSensitive(resp, "status")->valuestring);
+	ASSERT_STR_EQ(RCD_E_CLAIMED, cJSON_GetObjectItemCaseSensitive(resp, "code")->valuestring);
+	cJSON_Delete(resp);
+
+	/* An account locked on purpose is not an unclaimed one, and it is
+	 * refused with the same code and a different sentence. */
+	ASSERT(shadow_says("!"));
+	resp = rcd_cmd_claim(&st, req);
+	ASSERT_STR_EQ(RCD_E_CLAIMED, cJSON_GetObjectItemCaseSensitive(resp, "code")->valuestring);
+	cJSON_Delete(resp);
+
+	/* A claim carrying nothing to set is a malformed request, not a
+	 * claimed camera: the shapes must not be confused. */
+	ASSERT(shadow_says(""));
+	cJSON *empty = cJSON_Parse("{\"cmd\":\"claim\"}");
+	resp = rcd_cmd_claim(&st, empty);
+	ASSERT_STR_EQ(RCD_E_MALFORMED, cJSON_GetObjectItemCaseSensitive(resp, "code")->valuestring);
+	cJSON_Delete(resp);
+	cJSON_Delete(empty);
+	cJSON_Delete(req);
+	PASS();
+}
+
 TEST the_schema_says_where_a_system_key_takes_effect(void)
 {
 	cJSON *out = cJSON_CreateObject();
 	rcd_schema_emit(out, "device");
 	const cJSON *keys = cJSON_GetObjectItemCaseSensitive(out, "keys");
 	ASSERT(cJSON_IsArray(keys));
-	ASSERT_EQ(3, cJSON_GetArraySize(keys));
+	ASSERT_EQ(4, cJSON_GetArraySize(keys));
 
 	int checked = 0;
 	const cJSON *k = NULL;
@@ -2471,8 +2721,10 @@ TEST the_schema_says_where_a_system_key_takes_effect(void)
 		ASSERT(cJSON_IsString(key));
 
 		/* A provider-backed key is read from its store, so it must not
-		 * be advertised as write-only the way a credential is. */
-		ASSERT_EQ(NULL, ro);
+		 * be advertised as write-only the way a credential is -- with
+		 * one exception, which is the key that is both. */
+		if (strcmp(key->valuestring, "root_password") != 0)
+			ASSERT_EQ(NULL, ro);
 		/* And it is owned by the camera, not by a daemon a client
 		 * could be invited to restart. */
 		ASSERT_STR_EQ("system", own->valuestring);
@@ -2516,8 +2768,31 @@ TEST the_schema_says_where_a_system_key_takes_effect(void)
 			ASSERT_STR_EQ("restart", tier->valuestring);
 			checked++;
 		}
+		if (strcmp(key->valuestring, "root_password") == 0) {
+			/* Settable and never readable, like every other
+			 * credential -- and, unlike the others, backed by a
+			 * store, so the schema can also say whether one has
+			 * been set without saying what it is. That bit is what
+			 * lets a form offer "set a password" or "change it"
+			 * rather than an input that always looks empty. */
+			ASSERT(cJSON_IsFalse(ro));
+			ASSERT_STR_EQ("password",
+				      cJSON_GetObjectItemCaseSensitive(k, "type")->valuestring);
+			ASSERT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(k, "accepts_hash")));
+
+			/* Live: /etc/shadow is read at every authentication,
+			 * so nothing is owed to `apply` and nothing waits. */
+			ASSERT_STR_EQ("live", tier->valuestring);
+			ASSERT_STR_EQ("none", imp->valuestring);
+
+			/* And not guarded, deliberately. A revert here would
+			 * put an empty hash back and un-claim the camera on a
+			 * timer. See the key's entry in rcd_schema.c. */
+			ASSERT_EQ(NULL, cJSON_GetObjectItemCaseSensitive(k, "guard_sec"));
+			checked++;
+		}
 	}
-	ASSERT_EQ(3, checked);
+	ASSERT_EQ(4, checked);
 	cJSON_Delete(out);
 	PASS();
 }
@@ -3094,7 +3369,7 @@ TEST the_schema_names_the_keys_that_cannot_be_reset(void)
 		ASSERT(cJSON_IsFalse(r));
 		seen++;
 	}
-	ASSERT_EQ(3, seen);
+	ASSERT_EQ(4, seen);
 	cJSON_Delete(out);
 
 	out = cJSON_CreateObject();
@@ -3582,6 +3857,11 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(a_reset_is_never_live);
 	RUN_TEST(resetting_an_isp_knob_asks_rvd_to_put_it_back);
 	RUN_TEST(resetting_the_network_puts_the_shipped_stanza_back);
+	RUN_TEST(a_password_may_contain_what_a_password_contains);
+	RUN_TEST(a_pre_derived_hash_is_taken_as_one_and_a_lookalike_is_not);
+	RUN_TEST(setting_the_password_claims_the_camera);
+	RUN_TEST(a_pre_derived_hash_is_stored_verbatim);
+	RUN_TEST(a_claim_is_refused_on_a_camera_that_is_not_claimable);
 	RUN_TEST(the_schema_says_where_a_system_key_takes_effect);
 	RUN_TEST(nothing_is_unavailable_until_the_camera_says_so);
 	RUN_TEST(availability_matches_whole_key_names);

@@ -21,14 +21,21 @@
 #include <cJSON.h>
 
 /*
- * Bounds on one rendered edit. Every value fits: the longest is a wifi
- * passphrase given in its pre-derived form, which is exactly 64 hex digits
- * and needs a 65th byte for the terminator. The next longest is a credential,
- * capped at 63 by the table entry that admits it.
+ * Bounds on one rendered edit. Every value fits, and the longest is the root
+ * password given in its pre-derived form: a crypt(3) string, which runs to 106
+ * bytes for sha512-crypt and further for the methods a libc may add later.
+ * After that comes a wifi passphrase pre-derived as 64 hex digits, then a
+ * credential, capped at 63 by the table entry that admits it.
+ *
+ * 128 rather than the 72 that fitted before the password key existed. It is
+ * the width of every value buffer in rcd, so the cost is a few kilobytes
+ * across the edit array and the guard's snapshot, and the alternative -- a
+ * grammar that refuses a hash this camera's own libc can produce -- would be a
+ * limit nobody could see the reason for.
  */
 #define RCD_SECT_MAX 24
 #define RCD_KEY_MAX  32
-#define RCD_VAL_MAX  72
+#define RCD_VAL_MAX  128
 
 /* Longest daemon request the table can produce, with room to spare. */
 #define RCD_REQ_MAX 512
@@ -98,7 +105,19 @@ typedef enum {
 	V_IPV4,
 	V_TEXT,
 	V_SECRET,
+	V_PASSWD,
 } rcd_val_type_t;
+
+/*
+ * Whether a value of this type must never be reported back.
+ *
+ * A predicate rather than the comparison spelled out at each site, because
+ * every one of those sites is a place a secret would otherwise reach a client
+ * -- `get`'s answer, `set`'s echo, the schema's `readable` flag, the guard's
+ * revert line -- and a type added later must not be able to miss one of them
+ * by being omitted from a list.
+ */
+bool rcd_type_secret(rcd_val_type_t t);
 
 /*
  * V_HOST is a hostname or an IPv4 address and nothing else: letters, digits,
@@ -137,6 +156,30 @@ typedef enum {
  *
  * Like V_CRED it is never reported back, and it is emptiable: an open network
  * has no passphrase, and that is a configuration rather than an omission.
+ *
+ * V_PASSWD is the root password, and it is a fourth grammar rather than one of
+ * the three above because each of them would be wrong in a way that matters.
+ * V_CRED's set has no '$' in it, so it cannot carry a crypt string at all, and
+ * widening it would weaken the four keys it exists to protect. V_SECRET's
+ * length rule is WPA's -- 8 to 63, or exactly 64 hex digits -- which belongs
+ * to that grammar rather than to any entry using it, so a key borrowing it
+ * would be a root password bounded by 802.11. And V_TEXT is reported back.
+ *
+ * So: printable ASCII, 8 to 127, with no colon and no newline. Those two
+ * exclusions are the store's -- /etc/shadow is colon-delimited and
+ * line-oriented -- and not a matter of taste, which is why they are the only
+ * two: a password nobody may choose is the V_CRED mistake again.
+ *
+ * A value beginning '$' is taken as a crypt(3) result the client derived
+ * itself and is stored as it came, so the plaintext never crosses the network.
+ * That form is what makes the setup access point survivable: it is an open
+ * network by construction, and an eavesdropper who sees a hash has something
+ * to crack rather than something to send.
+ *
+ * Never reported back, and -- alone among the secrets here -- not emptiable.
+ * An empty wifi passphrase is an open network and a configuration somebody
+ * meant; an empty root password is a camera anyone may take, and there is no
+ * value in this grammar that asks for one.
  *
  *
  * V_IPV4 is narrower still: four decimal octets, no leading zeros -- which

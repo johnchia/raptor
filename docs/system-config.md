@@ -40,9 +40,11 @@ for nothing. If it is a set of one-off writers, the portal grows its own — whi
 is what thingino has, and it costs them a duplicate implementation of every
 field (see [Appendix](#appendix-what-thingino-does)).
 
-The root password is deliberately out of scope. It needs its own discussion
-about privilege on this device; [Security](#security) records what that
-discussion has to settle.
+The root password was deliberately out of scope here and has since had that
+discussion of its own: it is `device.root_password`, a `V_PASSWD` key with a
+provider over `/etc/shadow`, and the flow around it is claiming. See
+`PROPOSAL-camera-claiming.md` for the argument and [Security](#security) for
+what the three questions below turned out to be.
 
 ## Decision: extend rcd, do not add a daemon
 
@@ -551,12 +553,19 @@ that has a radio.
 
 ## Security
 
-- **The root password is the one open question here** and should stay out of the
-  key table until it has had its own discussion. What that discussion must
-  settle: whether the web console may set it at all; whether rcd must refuse the
-  key unless rhd has authentication configured, since otherwise an
-  unauthenticated console is a one-click root takeover; and whether an SSH key
-  is the better primitive to expose instead.
+- **The root password is in the table, as `device.root_password`.** The three
+  questions this section used to pose were answered by looking at what a
+  shipped image actually does. *May the console set it at all* -- yes, and it is
+  the only interface that can: the console's own credential **is** this
+  password, and a stock image ships an empty field, so a camera arrives with a
+  settings page that authenticates nobody. *Must rcd refuse the key unless rhd
+  has authentication configured* -- the premise was inverted; rhd's
+  configuration route never authenticated from `[http]`, it authenticates
+  against this very account, so setting the key is what turns authentication
+  on. What guards it instead is that the unauthenticated route accepts one
+  write, only on a genuinely empty field, once, and is refused independently by
+  both daemons. *Is an SSH key the better primitive* -- not instead of this
+  one, because HTTP Basic cannot carry a key; alongside it, later.
 - **A setup portal is unauthenticated by construction.** Whoever is in range, or
   on the cable, can set every key it exposes. That argues for exposing the
   smallest set that gets the camera onto the network, and for setup mode ending
@@ -600,6 +609,13 @@ that has a radio.
    mode, AP bring-up, `udhcpd` and the DNS hijack. Last because it is the only
    phase that needs hardware this bench does not have, and because by then every
    value it collects is a key that already works.
+7. **Claiming.** `V_PASSWD`, the `/etc/shadow` provider, `claim`,
+   `/api/v1/claim`, and the password field on both pages. It is not a seventh
+   phase of this design so much as the thing this design was waiting for: it
+   uses the provider hook, the value grammars and the portal exactly as they
+   were built, and adds one key, one command and one route. Portal-mode
+   authentication moved with it -- open only while there is nothing to
+   authenticate against, rather than open because it is the portal.
 
 ## Appendix: what thingino does
 

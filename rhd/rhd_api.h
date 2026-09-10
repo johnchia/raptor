@@ -28,6 +28,30 @@
 #define RHD_API_MAX_BODY   4096
 
 /*
+ * Claiming: the one route that answers a camera nobody can authenticate to.
+ *
+ * A fresh camera's root account has no password, so the route above refuses
+ * every request including its owner's. This is the way out of that, and it is
+ * a second path rather than a special case of the first for one reason: the
+ * request that reaches rcd on it is built here, from two fields, so an
+ * unauthenticated caller cannot name a command. That is the only place this
+ * file's "understands none of it" property bends, and bending it here is what
+ * keeps it intact on the route that carries everything else.
+ *
+ * GET answers whether the camera may still be claimed. POST claims it.
+ */
+#define RHD_API_CLAIM_PATH "/api/v1/claim"
+
+/* Where the system account lives. Overridable so the suite can point the
+ * check at a file it wrote rather than at this host's. */
+#ifndef RHD_SHADOW_PATH
+#define RHD_SHADOW_PATH "/etc/shadow"
+#endif
+
+/* The account rhd authenticates against, and the one a claim writes. */
+#define RHD_API_USER "root"
+
+/*
  * True once the buffer holds a whole request. A GET ends at the blank line;
  * a POST does not, and acting on a half-arrived body would hand rcd a
  * truncated object to refuse.
