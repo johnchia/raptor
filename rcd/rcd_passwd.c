@@ -160,7 +160,7 @@ static int shadow_write(const char *user, const char *hash)
 	 * rcd writes whose contents are the reason it is not world-readable,
 	 * and rcd runs with no umask -- so the mode cannot be left to one.
 	 */
-	int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
 	FILE *out = fd >= 0 ? fdopen(fd, "w") : NULL;
 
 	if (!out) {
@@ -219,6 +219,22 @@ static int shadow_write(const char *user, const char *hash)
 		ok = fprintf(out, "%.*s:%s:%ld:%s", (int)ulen, line, hash, days, age_end + 1) >= 0;
 	}
 
+	/*
+	 * On flash, and durability is the whole point of the rename: /etc is
+	 * the jffs2 upper layer, so without this the rename can reach the
+	 * medium ahead of the bytes it names. A power cut in that window
+	 * leaves a shadow file that is short or empty -- no root line at all,
+	 * which reads as MISSING and authenticates nobody. Every other outcome
+	 * this writer guards against is recoverable and that one is not.
+	 *
+	 * It also decides what `ok` means. The claim answers before this
+	 * returns, and an owner told their camera is claimed has been told
+	 * something that must still be true after the next power cut.
+	 */
+	if (fflush(out) != 0 || fsync(fileno(out)) != 0) {
+		RSS_WARN("passwd: cannot commit %s: %s", tmp, strerror(errno));
+		ok = false;
+	}
 	if (fclose(out) != 0)
 		ok = false;
 	fclose(in);
@@ -236,6 +252,16 @@ static int shadow_write(const char *user, const char *hash)
 		unlink(tmp);
 		return -1;
 	}
+
+	/* And the directory entry the rename created, for the same reason.
+	 * Reported but not failed: the file is already on the medium by here,
+	 * and the write did happen. */
+	int dfd = open(RCD_SYSCONF_DIR, O_RDONLY);
+
+	if (dfd < 0 || fsync(dfd) != 0)
+		RSS_WARN("passwd: %s was written but its directory was not synced", PATH_SHADOW);
+	if (dfd >= 0)
+		close(dfd);
 	return 0;
 }
 
