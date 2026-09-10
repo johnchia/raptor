@@ -127,6 +127,25 @@ static bool hash_password(const char *plain, char *out, size_t outsz)
  */
 static int shadow_write(const char *user, const char *hash)
 {
+	/*
+	 * The field the caller is asking to store, checked against the store
+	 * rather than against the grammar that produced it. A ':' would add a
+	 * field and a control byte would end the record, and either leaves a
+	 * file that no login parses back into the password just set -- an
+	 * unrecoverable camera, from one malformed value.
+	 *
+	 * rcd_config.c refuses both already. This is the same reasoning as the
+	 * two claim checks in two processes: the value arriving here has been
+	 * hashed by one path and passed through verbatim by another, and the
+	 * invariant belongs to the file, so the file's writer states it too.
+	 */
+	for (const char *p = hash; *p; p++) {
+		if ((unsigned char)*p < 0x20 || (unsigned char)*p > 0x7e || *p == ':') {
+			RSS_WARN("passwd: refusing a password field %s cannot hold", PATH_SHADOW);
+			return -1;
+		}
+	}
+
 	FILE *in = fopen(PATH_SHADOW, "r");
 	if (!in) {
 		RSS_WARN("passwd: cannot read %s: %s", PATH_SHADOW, strerror(errno));

@@ -2596,6 +2596,17 @@ TEST a_pre_derived_hash_is_taken_as_one_and_a_lookalike_is_not(void)
 		"$5$saltonly", /* no digest */
 		"$5$salt$",    /* an empty digest */
 		"$$$",	       /* three markers and nothing else */
+		/*
+		 * And the store's own two exclusions, which apply here for
+		 * the same reason they apply to a plaintext and matter more:
+		 * this value is written to /etc/shadow verbatim, so it is the
+		 * only path by which either byte could reach the file. A colon
+		 * adds a field, truncating the hash to something no login can
+		 * reproduce; a newline adds a record, and the first line
+		 * naming an account is the one every shadow reader takes.
+		 */
+		"$5$salt$dig:est",
+		"$5$salt$digest\\noperator::20000:0:99999:7:::",
 		NULL,
 	};
 
@@ -2674,6 +2685,41 @@ TEST a_pre_derived_hash_is_stored_verbatim(void)
 	char back[RCD_VAL_MAX];
 	ASSERT_EQ(0, rcd_provider_root_password.get(back, sizeof(back)));
 	ASSERT_STR_EQ(given, back);
+	PASS();
+}
+
+/*
+ * And the writer refuses the same two bytes on its own account, which is the
+ * check that does not depend on the grammar having run. The value that reaches
+ * this function has been hashed by one path and passed through untouched by
+ * another, and only the file knows what the file cannot hold.
+ */
+TEST the_writer_refuses_a_field_the_store_cannot_hold(void)
+{
+	if (!shadow_says(""))
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	static const char *const unstorable[] = {
+		"$5$salt$dig:est",				/* adds a field */
+		"$5$salt$digest\noperator::20000:0:99999:7:::", /* adds a record */
+		NULL,
+	};
+
+	for (int i = 0; unstorable[i]; i++) {
+		ASSERT_EQm(unstorable[i], -1, rcd_provider_root_password.set(unstorable[i]));
+		ASSERTm("and the camera is still there to be claimed", rcd_passwd_claimable());
+	}
+
+	/* Nothing was written on the way to refusing: the other accounts are
+	 * as they were, and root still has the one line it started with. */
+	FILE *f = fopen(TEST_SHADOW, "r");
+	ASSERT(f != NULL);
+	char all[1024] = "";
+	size_t got = fread(all, 1, sizeof(all) - 1, f);
+
+	all[got] = '\0';
+	fclose(f);
+	ASSERT_STR_EQ("root::19477::::::\ndaemon:*:::::::\nnobody:*:::::::\n", all);
 	PASS();
 }
 
@@ -3879,6 +3925,7 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(a_pre_derived_hash_is_taken_as_one_and_a_lookalike_is_not);
 	RUN_TEST(setting_the_password_claims_the_camera);
 	RUN_TEST(a_pre_derived_hash_is_stored_verbatim);
+	RUN_TEST(the_writer_refuses_a_field_the_store_cannot_hold);
 	RUN_TEST(a_claim_is_refused_on_a_camera_that_is_not_claimable);
 	RUN_TEST(the_schema_says_where_a_system_key_takes_effect);
 	RUN_TEST(nothing_is_unavailable_until_the_camera_says_so);

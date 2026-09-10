@@ -613,10 +613,37 @@ static const char *render(const rcd_key_t *k, const cJSON *v, rcd_edit_t *e, cha
 		}
 
 		/*
+		 * Printable ASCII, and one exclusion within it. Both are the
+		 * store's: /etc/shadow is line-oriented, so a control byte
+		 * would end the record early, and it is colon-delimited, so a
+		 * ':' would add a field. Nothing else is refused -- a password
+		 * nobody may choose is the mistake V_CRED's grammar exists to
+		 * avoid making twice.
+		 *
+		 * This runs before the two forms divide, and that placement is
+		 * the point rather than tidiness. A plaintext is hashed on the
+		 * way to the file, so crypt(3) output would sanitise it for
+		 * free; a pre-derived hash is written verbatim, so this branch
+		 * is the only thing standing between a malformed value and a
+		 * shadow file no login can parse. The exclusion belongs to
+		 * whatever reaches the store, not to one of its shapes.
+		 */
+		for (size_t i = 0; i < n; i++) {
+			unsigned char c = (unsigned char)s[i];
+
+			if (c < 0x20 || c > 0x7e || c == ':') {
+				snprintf(err, errsz,
+					 "'%s' may contain only printable characters, and not ':'",
+					 k->key);
+				return RCD_E_CHOICE;
+			}
+		}
+
+		/*
 		 * A value beginning '$' is a crypt(3) string the client
-		 * derived, and it is checked first because it is outside the
-		 * length rule below rather than an instance of it -- the same
-		 * shape as the pre-derived PSK above.
+		 * derived, and it is checked separately because it is outside
+		 * the length rule below rather than an instance of it -- the
+		 * same shape as the pre-derived PSK above.
 		 *
 		 * "$id$salt$digest": three dollars, nothing before the first
 		 * and something after the last. Refusing anything else is what
@@ -648,25 +675,6 @@ static const char *render(const rcd_key_t *k, const cJSON *v, rcd_edit_t *e, cha
 		if (n < (size_t)k->min) {
 			snprintf(err, errsz, "'%s' must be at least %d characters", k->key, k->min);
 			return RCD_E_RANGE;
-		}
-		for (size_t i = 0; i < n; i++) {
-			unsigned char c = (unsigned char)s[i];
-
-			/*
-			 * Printable ASCII, and one exclusion within it. Both
-			 * are the store's: /etc/shadow is line-oriented, so a
-			 * control byte would end the record early, and it is
-			 * colon-delimited, so a ':' would add a field. Nothing
-			 * else is refused -- a password nobody may choose is
-			 * the mistake V_CRED's grammar exists to avoid making
-			 * twice.
-			 */
-			if (c < 0x20 || c > 0x7e || c == ':') {
-				snprintf(err, errsz,
-					 "'%s' may contain only printable characters, and not ':'",
-					 k->key);
-				return RCD_E_CHOICE;
-			}
 		}
 		memcpy(e->rendered, s, n);
 		e->rendered[n] = '\0';
