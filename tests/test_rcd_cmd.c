@@ -950,6 +950,24 @@ TEST impact_separates_the_pipeline_from_the_stream(void)
  */
 static int sysconf_dir_ready(void)
 {
+	/*
+	 * The parent first, because mkdir(2) makes one level and the path has
+	 * two -- and the suite mounts a fresh tmpfs on /run, so the parent is
+	 * never there. Without this every test that writes a file skipped, the
+	 * run reported itself green, and the skip count was the only sign: 33
+	 * tests, including the whole of the shadow suite, silently not run.
+	 */
+	char parent[256];
+
+	snprintf(parent, sizeof(parent), "%s", RCD_SYSCONF_DIR);
+
+	char *slash = strrchr(parent, '/');
+
+	if (slash && slash != parent) {
+		*slash = '\0';
+		mkdir(parent, 0755);
+	}
+
 	if (mkdir(RCD_SYSCONF_DIR, 0755) == 0)
 		return 1;
 	return access(RCD_SYSCONF_DIR, W_OK) == 0;
