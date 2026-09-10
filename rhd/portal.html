@@ -103,6 +103,16 @@ select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,va
 </header>
 
 <form id="form" class="card" autocomplete="off">
+  <div class="field hidden" id="unlockwrap">
+    <label for="camerapw">Camera password</label>
+    <div class="pw">
+      <input id="camerapw" type="password" maxlength="127" placeholder="The password this camera was set up with">
+      <button type="button" id="unlock">Unlock</button>
+    </div>
+    <p class="hint" id="unlockhint">This camera has already been set up, so its
+       password is needed before its network can be changed.</p>
+  </div>
+
   <div class="field">
     <div class="rows">
       <label for="ssid">Network</label>
@@ -177,12 +187,37 @@ select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,va
    and this page holds no second copy of it. */
 const API = "/api/v1/rcd";
 
+/*
+ * The credential, once the page has one, and empty on the camera this page
+ * mostly meets. An unclaimed camera has no password to ask for, which is the
+ * whole reason this page exists; a claimed one has one, and rhd asks for it
+ * here exactly as it does on the console. The setup network is open to
+ * anybody in radio range, so "the access point bounds it" is not a bound.
+ *
+ * It has to be attached rather than left to the browser: a 401 answered to
+ * fetch() raises no sign-in sheet -- only a top-level navigation does that --
+ * and the portal page itself is served unauthenticated, so nothing ever
+ * challenges the browser and it has nothing cached to send.
+ */
+let AUTH = "";
+
 async function api(req) {
+  const headers = {"Content-Type": "application/json"};
+
+  if (AUTH) headers.Authorization = "Basic " + AUTH;
+
   const res = await fetch(API, {
     method: "POST",
-    headers: {"Content-Type": "application/json"},
+    headers: headers,
     body: JSON.stringify(req)
   });
+  if (res.status === 401 || res.status === 429) {
+    const e = new Error(res.status === 429
+      ? "too many tries just now — wait a moment"
+      : "that password was not accepted");
+    e.unauthorized = true;
+    throw e;
+  }
   if (!res.ok) throw new Error("the camera answered HTTP " + res.status);
   const body = await res.json();
   if (body.status !== "ok") {
@@ -353,6 +388,7 @@ $("revealpw").addEventListener("click", () => {
    rcd advertises `accepts_hash` on the key, so a client that can derive one
    may send it instead, and that is the door left open. */
 let CLAIMABLE = false;
+let CLAIMED = false;
 
 async function loadClaim() {
   try {
@@ -360,9 +396,64 @@ async function loadClaim() {
     if (!r.ok) return;
     const st = await r.json();
     CLAIMABLE = st && st.claimable === true;
+    CLAIMED = st && st.claimed === true;
   } catch (e) { /* an older rhd has no such route, and no password to set */ }
   $("claimwrap").classList.toggle("hidden", !CLAIMABLE);
+  $("unlockwrap").classList.toggle("hidden", !CLAIMED);
 }
+
+/*
+ * Unlocking, which is the other half of the same question.
+ *
+ * A claimed camera reaches this page by falling back to setup mode after a
+ * wifi attempt that did not associate -- the most ordinary mistake in the
+ * whole flow -- and everything on this form goes through the configuration
+ * route, which asks that camera for its password. So nothing is scanned or
+ * read until there is one, and this is where it is proved: the scan is the
+ * request that settles it, and it is needed anyway.
+ */
+function credential(pw) {
+  /* rcd's grammar for this key is printable ASCII, so a password that came
+     from this camera encodes; one that never could is refused here rather
+     than thrown out of btoa. */
+  try {
+    return btoa("root:" + pw);
+  } catch (e) {
+    return "";
+  }
+}
+
+async function unlock() {
+  const pw = $("camerapw").value;
+
+  if (!pw) return;
+  $("unlock").disabled = true;
+  AUTH = credential(pw);
+  try {
+    await api({cmd: "get", section: "device", key: "hostname"});
+    $("unlockwrap").classList.add("hidden");
+    CLAIMED = false;
+    scan();
+    loadExtras();
+  } catch (e) {
+    AUTH = "";
+    $("unlockhint").textContent = e.unauthorized
+      ? e.message
+      : "The camera did not answer (" + e.message + ").";
+    $("unlockhint").classList.add("warn");
+  } finally {
+    $("unlock").disabled = false;
+  }
+}
+
+$("unlock").addEventListener("click", unlock);
+$("camerapw").addEventListener("keydown", (ev) => {
+  /* Enter in this field means unlock, not submit the form behind it. */
+  if (ev.key === "Enter") {
+    ev.preventDefault();
+    unlock();
+  }
+});
 
 /* ── scanning ──
    rcd triggers a scan and answers with the results it already has, rather
@@ -465,6 +556,9 @@ $("form").addEventListener("submit", async (ev) => {
   if (secure && (pass.length < 8 || pass.length > 63))
     return fail("A passphrase is 8 to 63 characters.");
 
+  if (CLAIMED)
+    return fail("Unlock the camera first: it needs the password it was set up with.");
+
   /* rcd's minimum for this key, checked here so a typo is caught while the
      form still holds it rather than after a round trip. */
   const rootpw = $("rootpw").value;
@@ -537,7 +631,17 @@ $("form").addEventListener("submit", async (ev) => {
   window.scrollTo(0, 0);
 });
 
-scan();
-loadClaim();
-loadExtras();
+/*
+ * Ordered rather than fired together, because what the page may do depends on
+ * the answer: an unclaimed camera answers everything, and a claimed one
+ * answers nothing until it has been given its password.
+ */
+async function boot() {
+  await loadClaim();
+  if (CLAIMED) return;
+  scan();
+  loadExtras();
+}
+
+boot();
 </script>

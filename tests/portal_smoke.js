@@ -123,6 +123,9 @@ let scanReply = {
 
 let CLAIMABLE = true;
 
+/* What this camera was claimed with, once it is claimed. */
+const PASSWORD = "a good long password";
+
 function reply(body) {
 	sent.push(body);
 	if (body.cmd === "action" && body.action === "wifi-scan") return scanReply;
@@ -154,6 +157,7 @@ const sandbox = {
 	navigator: {userAgent: "smoke"},
 	Option,
 	TextEncoder,
+	btoa: (t) => Buffer.from(t, "latin1").toString("base64"),
 	setTimeout: (fn, ms) => {
 		if (!ms) queueMicrotask(fn);
 		return 0;
@@ -168,6 +172,20 @@ const sandbox = {
 			return {ok: true, status: 200,
 				json: async () => ({status: "ok", claimed: !CLAIMABLE,
 						    claimable: CLAIMABLE})};
+
+		/*
+		 * And an unclaimed camera is the only one that answers this
+		 * route for nothing. rhd puts the configuration route behind
+		 * the system account the moment /etc/shadow has one, on the
+		 * access point as much as anywhere else -- so the mock does
+		 * too. It answered 200 unconditionally once, which is how a
+		 * page that could not authenticate at all went in green.
+		 */
+		const auth = opt && opt.headers && opt.headers.Authorization;
+
+		if (!CLAIMABLE && auth !== "Basic " + Buffer.from("root:" + PASSWORD).toString("base64"))
+			return {ok: false, status: 401, json: async () => ({})};
+
 		const body = opt && opt.body ? JSON.parse(opt.body) : {};
 		sandbox.__lastBody = opt ? opt.body : "";
 		return {ok: true, status: 200, json: async () => reply(body)};
@@ -181,7 +199,8 @@ sandbox.window.document = document;
 /* The page's own names are lexical, so an epilogue in the same scope is the
  * only way to reach them. */
 const epilogue = `
-;globalThis.__probe = {derive: derive, scan: scan, api: api, loadClaim: loadClaim};
+;globalThis.__probe = {derive: derive, scan: scan, api: api, loadClaim: loadClaim,
+		      unlock: unlock};
 `;
 
 vm.createContext(sandbox);
@@ -344,6 +363,18 @@ async function main() {
 	ok("a claimed camera offers no way to claim it again",
 	   el("claimwrap").classList.contains("hidden"));
 
+	ok("and asks instead for the password it already has",
+	   !el("unlockwrap").classList.contains("hidden"));
+
+	/*
+	 * That camera answers nothing until it is given that password, and
+	 * this is the case the page used to have no way through at all: the
+	 * form is served unauthenticated, fetch() raises no sign-in sheet on a
+	 * 401, so a browser here has never been challenged and has nothing to
+	 * send. Reaching this page on a claimed camera is not exotic either --
+	 * a passphrase that did not associate reverts the wifi and puts the
+	 * access point back up, with the camera claimed.
+	 */
 	sent.length = 0;
 	el("done").classList.add("hidden");
 	el("form").classList.remove("hidden");
@@ -351,9 +382,29 @@ async function main() {
 	sel.value = "Hedgerow";
 	el("psk").value = secret;
 	await el("form").fire("submit");
+	eq("a locked camera is not asked to join anything", sent.length, 0);
+	ok("and the form says what is missing",
+	   el("err").textContent.indexOf("Unlock") >= 0);
+
+	el("camerapw").value = "not the password";
+	await probe.unlock();
+	ok("a wrong password does not unlock it",
+	   !el("unlockwrap").classList.contains("hidden"));
+	ok("and it says so", el("unlockhint").textContent.indexOf("not accepted") >= 0);
+
+	el("camerapw").value = PASSWORD;
+	await probe.unlock();
+	ok("the right one does", el("unlockwrap").classList.contains("hidden"));
+
+	sent.length = 0;
+	el("psk").value = secret;
+	sel.value = "Hedgerow";
+	await el("form").fire("submit");
 	const later = sent.find((r) => r.cmd === "set");
-	ok("and joining a network still works with no password to set", !!later);
-	ok("without sending one", !later.edits.some((e) => e.key === "root_password"));
+	ok("and joining a network works once unlocked", !!later);
+	ok("without sending a password to set", !later.edits.some((e) => e.key === "root_password"));
+	ok("the plaintext passphrase still never leaves the device",
+	   JSON.stringify(sent).indexOf(secret) < 0);
 
 	console.log("portal_smoke: " + checks + " checks passed");
 }
