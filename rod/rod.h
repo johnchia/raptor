@@ -216,6 +216,7 @@ int rod_add_element(rod_state_t *st, const char *name, rod_elem_type_t type, con
 		    rod_update_mode_t update_mode);
 void rod_remove_element(rod_state_t *st, const char *name);
 int rod_alloc_font(rod_state_t *st, int stream_idx, int font_size);
+int rod_font_for_stream(rod_state_t *st, int size, int stream_idx);
 void release_font(rod_state_t *st, int stream_idx, int font_idx);
 void sanitize_text(char *s);
 uint32_t parse_color(const char *s);

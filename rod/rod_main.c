@@ -238,12 +238,8 @@ int main(int argc, char **argv)
 			continue;
 
 		for (int s = 0; s < st.stream_count; s++) {
-			int fs = e->font_size > 0 ? e->font_size : st.settings.font_size;
-			if (s > 0 && st.stream_h[0] > 0) {
-				fs = fs * st.stream_h[s] / st.stream_h[0];
-				if (fs < 12)
-					fs = 12;
-			}
+			int base = e->font_size > 0 ? e->font_size : st.settings.font_size;
+			int fs = rod_font_for_stream(&st, base, s);
 			int fi = rod_alloc_font(&st, s, fs);
 			if (fi < 0) {
 				RSS_FATAL("font init failed for stream %d element %s", s, e->name);

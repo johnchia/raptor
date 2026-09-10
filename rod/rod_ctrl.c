@@ -110,12 +110,7 @@ static int handle_font_size_change(rod_state_t *st, const char *cmd_json, char *
 		int new_size = e->font_size > 0 ? e->font_size : val;
 
 		for (int s = 0; s < st->stream_count; s++) {
-			int fs = new_size;
-			if (s > 0 && st->stream_h[0] > 0) {
-				fs = fs * st->stream_h[s] / st->stream_h[0];
-				if (fs < 12)
-					fs = 12;
-			}
+			int fs = rod_font_for_stream(st, new_size, s);
 
 			release_font(st, s, e->streams[s].font_idx);
 			int fi = rod_alloc_font(st, s, fs);
@@ -223,12 +218,8 @@ static int handle_add_element(rod_state_t *st, const char *cmd_json, char *resp,
 				e->receipt.max_line_len = mll;
 		}
 		for (int s = 0; s < st->stream_count; s++) {
-			int fs = e->font_size > 0 ? e->font_size : st->settings.font_size;
-			if (s > 0 && st->stream_h[0] > 0) {
-				fs = fs * st->stream_h[s] / st->stream_h[0];
-				if (fs < 12)
-					fs = 12;
-			}
+			int base = e->font_size > 0 ? e->font_size : st->settings.font_size;
+			int fs = rod_font_for_stream(st, base, s);
 			int fi = rod_alloc_font(st, s, fs);
 			if (fi >= 0) {
 				e->streams[s].font_idx = fi;
@@ -338,12 +329,8 @@ static int handle_set_element(rod_state_t *st, const char *cmd_json, char *resp,
 	    (e->type == ROD_ELEM_TEXT || e->type == ROD_ELEM_RECEIPT)) {
 		e->font_size = new_font_size;
 		for (int s = 0; s < st->stream_count; s++) {
-			int fs = new_font_size;
-			if (s > 0 && st->stream_h[0] > 0) {
-				fs = fs * st->stream_h[s] / st->stream_h[0];
-				if (fs < 12)
-					fs = 12;
-			}
+			int fs = rod_font_for_stream(st, new_font_size, s);
+
 			release_font(st, s, e->streams[s].font_idx);
 			int fi = rod_alloc_font(st, s, fs);
 			if (fi < 0) {

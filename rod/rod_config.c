@@ -53,6 +53,86 @@ static int slot_of(const char *name)
 	return -1;
 }
 
+/*
+ * What the picture actually is, rather than what the file asked for.
+ *
+ * [stream0] may leave width and height out, and rvd then takes them from
+ * the sensor -- so the configured fallback is a guess that a 2688x1520
+ * encode makes wrong by half. Rotation diverges the same way: rvd turns the
+ * picture only if the backend can and leaves it alone when it cannot, while
+ * load_config's swap assumes the turn always happens.
+ *
+ * Everything rod sizes from these is wrong by whatever the two disagree
+ * by -- the sub-stream font ratio, the overlay regions, the clip that
+ * keeps a region inside the frame -- so ask the process that knows. It is
+ * up: rvd starts first and the init script waits for its ring before
+ * starting anything that reads from one.
+ *
+ * Streams are matched by position, which is not a new assumption: an
+ * element's shared buffer is named osd_<index>_<element> and rvd looks it
+ * up under its own index, so the two orders already have to agree for any
+ * overlay to appear at all.
+ */
+/* Long enough for a round trip to a daemon that is up, short enough that a
+ * daemon that is not does not hold up the overlay. */
+#define RVD_ASK_MS 1000
+
+static void dims_from_rvd(rod_state_t *st)
+{
+	cJSON *q = cJSON_CreateObject();
+	char req[64];
+	char *resp = NULL;
+	bool built;
+
+	if (!q)
+		return;
+	cJSON_AddStringToObject(q, "cmd", "status");
+	built = cJSON_PrintPreallocated(q, req, sizeof(req), 0);
+	cJSON_Delete(q);
+	if (!built)
+		return;
+
+	/*
+	 * Allocated rather than into a buffer sized by guess: the reply carries
+	 * a line per stream, and a fixed buffer the stream table outgrows would
+	 * truncate the JSON into something unparseable without saying so.
+	 */
+	if (rss_ctrl_send_command_alloc(RSS_RUN_DIR "/rvd.sock", req, &resp, RVD_ASK_MS) < 0) {
+		RSS_INFO("rvd did not answer; sizing the overlay from the config");
+		return;
+	}
+
+	cJSON *root = cJSON_Parse(resp);
+
+	free(resp);
+	if (!root)
+		return;
+
+	cJSON *streams = cJSON_GetObjectItem(root, "streams");
+	cJSON *item;
+	int s = 0;
+
+	cJSON_ArrayForEach(item, streams)
+	{
+		if (s >= st->stream_count)
+			break;
+
+		int w = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(item, "w"));
+		int h = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(item, "h"));
+
+		if (w > 0 && h > 0) {
+			if (w != st->stream_w[s] || h != st->stream_h[s])
+				RSS_INFO("stream%d encodes %dx%d, not the configured %dx%d", s, w,
+					 h, st->stream_w[s], st->stream_h[s]);
+			st->stream_w[s] = w;
+			st->stream_h[s] = h;
+		}
+		s++;
+	}
+
+	cJSON_Delete(root);
+}
+
 void load_config(rod_state_t *st)
 {
 	rss_config_t *cfg = st->cfg;
@@ -115,6 +195,8 @@ void load_config(rod_state_t *st)
 			}
 		}
 	}
+
+	dims_from_rvd(st);
 
 	st->detect_enabled = rss_config_get_bool(cfg, "motion", "enabled", false);
 	gethostname(st->hostname, sizeof(st->hostname));

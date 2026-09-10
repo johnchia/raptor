@@ -38,6 +38,29 @@ rod_element_t *rod_find_element(rod_state_t *st, const char *name)
 	return NULL;
 }
 
+/*
+ * A configured font size is pixels on the main stream, and the same count of
+ * pixels on a quarter-height sub stream is four times the text. Scale by
+ * height: it is what legibility tracks, and it keeps a 16:9 and a 4:3 encode
+ * of one picture looking alike.
+ *
+ * The floor is where the glyph cache stops being legible rather than merely
+ * small. Text too small to read is worse than text that overruns its region,
+ * because the region is clipped to the frame and the overrun is at least
+ * visible.
+ */
+#define ROD_FONT_MIN 12
+
+int rod_font_for_stream(rod_state_t *st, int size, int stream_idx)
+{
+	if (stream_idx <= 0 || st->stream_h[0] <= 0)
+		return size;
+
+	int scaled = size * st->stream_h[stream_idx] / st->stream_h[0];
+
+	return scaled < ROD_FONT_MIN ? ROD_FONT_MIN : scaled;
+}
+
 int rod_alloc_font(rod_state_t *st, int stream_idx, int font_size)
 {
 	/* Reuse existing font context with same size */
