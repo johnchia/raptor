@@ -386,12 +386,12 @@ $("rescan").addEventListener("click", () => {
    care can leave it and change nothing. */
 async function loadExtras() {
   try {
-    const s = await api({cmd: "get", section: "system", key: "hostname"});
+    const s = await api({cmd: "get", section: "device", key: "hostname"});
     if (s.value) $("name").placeholder = s.value;
   } catch (e) { /* a camera that will not say is one to leave alone */ }
 
   try {
-    const sch = await api({cmd: "schema", section: "system"});
+    const sch = await api({cmd: "schema", section: "device"});
     const tz = (sch.keys || []).find((k) => k.key === "timezone");
     if (!tz || !tz.choices) return;
     const sel = $("tz");
@@ -441,9 +441,9 @@ $("form").addEventListener("submit", async (ev) => {
     {section: "wifi", key: "psk", value: psk}
   ];
   const name = $("name").value.trim();
-  if (name) edits.push({section: "system", key: "hostname", value: name});
+  if (name) edits.push({section: "device", key: "hostname", value: name});
   const tz = $("tz").value;
-  if (tz) edits.push({section: "system", key: "timezone", value: tz});
+  if (tz) edits.push({section: "device", key: "timezone", value: tz});
 
   /*
    * Stored first, and this is the request whose answer matters: it is where

@@ -125,12 +125,12 @@ function reply(body) {
 	sent.push(body);
 	if (body.cmd === "action" && body.action === "wifi-scan") return scanReply;
 	if (body.cmd === "get")
-		return {api: 1, status: "ok", section: "system", key: "hostname", value: "raptor-1a2b"};
+		return {api: 1, status: "ok", section: "device", key: "hostname", value: "raptor-1a2b"};
 	if (body.cmd === "schema")
 		return {
 			api: 1,
 			status: "ok",
-			keys: [{section: "system", key: "timezone", type: "enum",
+			keys: [{section: "device", key: "timezone", type: "enum",
 				choices: ["UTC", "Europe/London", "America/New_York"]}],
 		};
 	return {api: 1, status: "ok"};
