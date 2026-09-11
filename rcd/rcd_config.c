@@ -421,6 +421,35 @@ static int pct_tenths(const char *s)
  * grammar; see rcd_schema.h for why that is safe and why it does not
  * generalise.
  */
+/*
+ * The rule for a piece of text of the caller's own, wherever it arrives: a
+ * key's value, or an argument to the action that makes the thing the key is
+ * of. Printable ASCII only -- a control byte here would be a newline in a
+ * line-oriented file, and the two exclusions would each end the quoted string
+ * the value is rendered inside.
+ */
+static const char *check_text(const char *s, const char *key, int min, int max, char *err,
+			      size_t errsz)
+{
+	size_t n = strlen(s);
+
+	if (n < (size_t)min || n > (size_t)max) {
+		snprintf(err, errsz, "'%s' must be %d to %d characters", key, min, max);
+		return RCD_E_RANGE;
+	}
+	for (size_t i = 0; i < n; i++) {
+		unsigned char c = (unsigned char)s[i];
+
+		if (c < 0x20 || c > 0x7e || c == '"' || c == '\\') {
+			snprintf(err, errsz,
+				 "'%s' may contain only printable characters, and not '\"' or '\\'",
+				 key);
+			return RCD_E_CHOICE;
+		}
+	}
+	return NULL;
+}
+
 static const char *render(const rcd_key_t *k, const char *section, const cJSON *v, rcd_edit_t *e,
 			  char *err, size_t errsz)
 {
@@ -561,26 +590,13 @@ static const char *render(const rcd_key_t *k, const char *section, const cJSON *
 		}
 		const char *s = v->valuestring;
 		size_t n = strlen(s);
-		if (n < (size_t)k->min || n > (size_t)k->max || n >= sizeof(e->rendered)) {
+		const char *code = check_text(s, k->key, k->min, k->max, err, errsz);
+		if (code)
+			return code;
+		if (n >= sizeof(e->rendered)) {
 			snprintf(err, errsz, "'%s' must be %d to %d characters", k->key, k->min,
 				 k->max);
 			return RCD_E_RANGE;
-		}
-		for (size_t i = 0; i < n; i++) {
-			unsigned char c = (unsigned char)s[i];
-			/*
-			 * Printable ASCII only. A control byte here would be a
-			 * newline in a line-oriented file, and the two
-			 * exclusions below would each end the quoted string
-			 * this value is rendered inside.
-			 */
-			if (c < 0x20 || c > 0x7e || c == '"' || c == '\\') {
-				snprintf(err, errsz,
-					 "'%s' may contain only printable characters, and not "
-					 "'\"' or '\\'",
-					 k->key);
-				return RCD_E_CHOICE;
-			}
 		}
 		memcpy(e->rendered, s, n);
 		e->rendered[n] = '\0';
@@ -1797,12 +1813,22 @@ static const char *add_arg(cJSON *req, const cJSON *in, const rcd_arg_t *a, char
 		return NULL;
 	}
 
+	/* Text is the caller's own bytes, held to the rule a text key's value
+	 * is: it becomes one. */
+	if (a->type == A_TEXT) {
+		const char *code = check_text(v->valuestring, a->key, a->min, a->max, err, errsz);
+
+		if (code)
+			return code;
+		cJSON_AddStringToObject(req, a->key, v->valuestring);
+		return NULL;
+	}
+
 	/*
-	 * A name is the caller's own bytes, which nothing else in this table
-	 * passes on -- so the grammar is what stands between a JSON string and
-	 * a section header in the camera's config file. Asked of the section
-	 * the name will become rather than of the name, because that is what
-	 * has to be legal.
+	 * A name is the caller's own bytes too, and the grammar is what stands
+	 * between a JSON string and a section header in the camera's config
+	 * file. Asked of the section the name will become rather than of the
+	 * name, because that is what has to be legal.
 	 */
 	if (a->type == A_OSD_NAME || a->type == A_OSD_NEW_NAME) {
 		bool (*ok)(const char *, char *, size_t) =

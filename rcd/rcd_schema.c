@@ -294,6 +294,9 @@ static const char *const choices_threshold[] = {
  * any other, and put back if nobody confirms within `sec`. */
 #define GUARDED(p, imp, sec) NULL, NULL, -1, NULL, &(p), (imp), (sec), false, NULL, false
 
+/* What one value in this protocol holds; rod's own limit is longer. */
+#define OSD_TEMPLATE_MAX 71
+
 static const rcd_key_t keys[] = {
 	/* -- Sensor -- */
 	{"sensor", "fps", V_INT, 1, 120, NULL, SAVED},
@@ -503,9 +506,9 @@ static const rcd_key_t keys[] = {
 	 * rather than chooses, so it is the widest grammar here -- V_TEXT, the
 	 * type the wifi SSID uses. It is not a path, a format or a command:
 	 * rod expands its own %var% names into a bitmap and passes it to
-	 * nothing. The 71 is what one value in this protocol holds, and rod's
-	 * own limit is longer -- a template past it is still settable by hand
-	 * and through rod's `set-element`.
+	 * nothing. OSD_TEMPLATE_MAX is what one value in this protocol holds,
+	 * and rod's own limit is longer -- a template past it is still
+	 * settable by hand and through rod's `set-element`.
 	 *
 	 * What an element is, and not how it is drawn: the type is the
 	 * overlay's and is set once in [osd]. rod reads a per-element
@@ -513,7 +516,7 @@ static const rcd_key_t keys[] = {
 	 * hand-edited -- a size that is meant to match every element is worse
 	 * off spelled out once per element.
 	 */
-	{"osd.*", "template", V_TEXT, 0, 71, NULL, SAVED},
+	{"osd.*", "template", V_TEXT, 0, OSD_TEMPLATE_MAX, NULL, SAVED},
 	{"osd.*", "position", V_ENUM, 0, 0, choices_position, SAVED},
 	{"osd.*", "align", V_ENUM, 0, 0, choices_align, SAVED},
 	{"osd.*", "visible", V_BOOL, 0, 0, NULL, SAVED},
@@ -863,9 +866,12 @@ static const rcd_arg_t args_osd_name[] = {
 	{.type = A_END},
 };
 
-/* And the one to make, which this camera is naming for the first time. */
+/* And the one to make, which this camera is naming for the first time --
+ * with its text, so that it draws as it arrives and nothing has to be
+ * written to an element that may not have reached the file yet. */
 static const rcd_arg_t args_osd_new_name[] = {
 	{.key = "name", .type = A_OSD_NEW_NAME, .required = true},
+	{.key = "template", .type = A_TEXT, .required = false, .min = 0, .max = OSD_TEMPLATE_MAX},
 	{.type = A_END},
 };
 
@@ -923,7 +929,7 @@ static const rcd_action_t actions[] = {
 	 .args = args_osd_new_name,
 	 .persists = true,
 	 .saves_now = true,
-	 .note = "the element is added with nothing in it; give it text to see it"},
+	 .note = "an element with no text draws nothing until it is given some"},
 	{.name = "osd-remove",
 	 .daemon = "rod",
 	 .ctrl_cmd = "remove-element",
@@ -1203,6 +1209,12 @@ static void emit_action(cJSON *arr, const rcd_action_t *a)
 			break;
 		case A_OSD_NEW_NAME:
 			cJSON_AddStringToObject(ao, "type", "osd_new_name");
+			break;
+		case A_TEXT:
+			/* Spelled as the text keys are, so one client rule
+			 * draws both. */
+			cJSON_AddStringToObject(ao, "type", "text");
+			cJSON_AddNumberToObject(ao, "max_length", a->args[i].max);
 			break;
 		case A_END:
 			break;

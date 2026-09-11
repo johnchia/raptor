@@ -243,6 +243,42 @@ TEST a_repeat_row_is_served_apart_from_the_keys(void)
 }
 
 /*
+ * The text an element shows may arrive with the request that makes it, so it
+ * draws as it arrives and nothing has to be written to an element that may
+ * not have reached the file yet. It is the caller's own bytes, like the name,
+ * and is held to the rule the template key's value is held to.
+ */
+TEST an_element_can_be_made_with_its_text(void)
+{
+	char wire[RCD_REQ_MAX];
+	const char *owner = NULL;
+
+	ASSERT_EQ(0, validate_action("{\"action\":\"osd-add\",\"name\":\"clock\","
+				     "\"template\":\"%time%\"}",
+				     wire, sizeof(wire), &owner));
+	ASSERTm("the text did not reach rod's request",
+		strstr(wire, "\"template\":\"%time%\"") != NULL);
+
+	/* Without one, none is sent: rod makes the element empty. */
+	ASSERT_EQ(0, validate_action("{\"action\":\"osd-add\",\"name\":\"clock\"}", wire,
+				     sizeof(wire), &owner));
+	ASSERTm("a template nobody gave was sent", strstr(wire, "template") == NULL);
+
+	/* The key's rule: no quote, no control byte, no more than a value
+	 * holds, and a string. */
+	ASSERT_ACTION_REFUSED("{\"action\":\"osd-add\",\"name\":\"clock\","
+			      "\"template\":\"say \\\"hi\\\"\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"osd-add\",\"name\":\"clock\","
+			      "\"template\":\"two\\nlines\"}");
+	ASSERT_ACTION_REFUSED(
+		"{\"action\":\"osd-add\",\"name\":\"clock\","
+		"\"template\":"
+		"\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"osd-add\",\"name\":\"clock\",\"template\":7}");
+	PASS();
+}
+
+/*
  * What an element may be called.
  *
  * The name is the one argument in the table whose bytes are the caller's own
@@ -4581,6 +4617,7 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(no_credential_is_ever_readable);
 	RUN_TEST(a_repeat_row_is_served_apart_from_the_keys);
 	RUN_TEST(an_element_name_is_a_name);
+	RUN_TEST(an_element_can_be_made_with_its_text);
 	RUN_TEST(making_an_element_is_remembered);
 	RUN_TEST(refuses_unlisted_actions);
 	RUN_TEST(refuses_near_misses);

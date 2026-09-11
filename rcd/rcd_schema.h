@@ -432,6 +432,10 @@ typedef enum {
 	/* The same, for an element that does not exist yet: one rule
 	 * stricter, and the rule is that a name is not a number. */
 	A_OSD_NEW_NAME,
+	/* JSON string of [min,max] printable characters, held to the rule a
+	 * V_TEXT key's value is -- it is one, arriving with the action that
+	 * makes the element instead of after it. */
+	A_TEXT,
 } rcd_arg_type_t;
 
 typedef struct {
