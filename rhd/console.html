@@ -470,7 +470,10 @@ const SLOTS = [1, 2, 3, 4];
 SLOTS.forEach(n => {
   L["osd." + n + ".template"] =
     ["Text","","Empty draws nothing, and leaves the element where it is."];
-  L["osd." + n + ".position"] = ["Position","","Where on the picture it sits."];
+  L["osd." + n + ".position"] = ["Position","",
+    "Where on the picture it sits. The camera draws one element to a place, " +
+    "so a place another element is already drawn in is offered but cannot be " +
+    "chosen until that one moves or is switched off."];
   L["osd." + n + ".align"] = ["Align","","Which way the text grows as it gets longer."];
   L["osd." + n + ".visible"] = ["Show","","Keeps the text but stops drawing it."];
 });
@@ -898,6 +901,9 @@ async function commit(id, val, el) {
   const k = byId[id];
   const prev = V[id];
   V[id] = val;
+  /* A place taken or given up changes what the other elements may choose --
+     including by a slot becoming an element, which is what text in it does. */
+  if (/^osd\.[1-9]\.(position|visible|template)$/.test(id)) refreshPlaces();
   /* Typing into a field the operator has just asked to put back means they
      changed their mind about the reset, not that they want both. */
   RESET.delete(id);
@@ -1098,6 +1104,8 @@ function buildControl(id, onChange) {
         const op = document.createElement("option"); op.value = op.textContent = o;
         if (cur === o) op.selected = true; s.append(op);
       });
+      const slot = placeSlotOf(k);
+      if (slot) { placeFields[slot] = s; markPlaces(s, slot); }
       s.addEventListener("change", () => send(s.value));
       wrap.append(s); return wrap;
     }
@@ -1350,6 +1358,80 @@ function chip(k) {
   return c;
 }
 
+/* ═══ one element to a place ══════════════════════════════════════════════
+ *
+ * The camera draws one element in a place. Two in the same one do not blend:
+ * the overlay the compositor builds second replaces the first over its whole
+ * rectangle, so the element underneath does not sit behind it, it disappears.
+ * rod settles that by giving the place to the first element in the config and
+ * logging the one that missed -- and an element the camera has decided not to
+ * draw is a worse answer than a choice this page would not offer. So a place
+ * another element holds is drawn disabled, named for the element holding it.
+ *
+ * Only the four elements this page reaches can be seen from here. A camera
+ * with more of them hand-edited into its config still has rod to arbitrate,
+ * and rod says in the log which element lost a place and where.
+ */
+const OSD_KEYS = ["template", "position", "align", "visible"];
+
+/*
+ * Whether a slot has an element in it that is drawn. An empty slot holds no
+ * place -- there is nothing in it until somebody puts text there, which is
+ * what makes the element -- and neither does one switched off, which is the
+ * whole of the [osd.4] business this came from.
+ */
+function slotDraws(n) {
+  const has = OSD_KEYS.some(key => V["osd." + n + "." + key] !== undefined);
+  return has && V["osd." + n + ".visible"] !== false;
+}
+
+/* Which element is drawn in each place, leaving out the one doing the asking. */
+function placeOwners(except) {
+  const owners = {};
+  SLOTS.forEach(n => {
+    if (n === except || !slotDraws(n)) return;
+    const p = V["osd." + n + ".position"];
+    /* The first element in the file has the place, which is rod's rule and
+       so the one to name here. */
+    if (typeof p === "string" && p && !owners[p]) owners[p] = n;
+  });
+  return owners;
+}
+
+/* The element a position key belongs to, or 0 for every other key. */
+const placeSlotOf = k => (k && k.key === "position" && /^osd\.[1-9]$/.test(k.section)
+                          ? Number(k.section.slice(4)) : 0);
+
+/* What a place dropdown offers, given who holds what. A place is never taken
+ * away from the element standing in it: where two already overlap -- a config
+ * written by hand, or by a page that did not know better -- the field has to
+ * go on showing what the file says, or moving the other one out of the way
+ * would be the only way to see it. */
+function markPlaces(sel, slot) {
+  const owners = placeOwners(slot);
+  const mine = V["osd." + slot + ".position"];
+
+  sel.querySelectorAll("option").forEach(op => {
+    const owner = owners[op.value];
+    op.textContent = owner ? op.value + " \u2014 Element " + owner : op.value;
+    op.disabled = !!owner && op.value !== mine;
+  });
+}
+
+/* The place dropdowns on the page now, by element. Kept as they are built
+ * rather than looked up again: a place moving has to reach the other three,
+ * and the row it has to reach them through is one this page made. */
+const placeFields = {};
+
+/* The dropdowns already drawn, after one of the places moved. Applied to them
+ * rather than by redrawing the page, which would take it out from under
+ * whoever is typing in the next field. */
+function refreshPlaces() {
+  SLOTS.forEach(n => {
+    if (placeFields[n]) markPlaces(placeFields[n], n);
+  });
+}
+
 function buildRow(id) {
   const k = byId[id];
   const row = document.createElement("div"); row.className = "row"; row.dataset.id = id;
@@ -1582,6 +1664,8 @@ function ircutVisible(key) {
 function render() {
   const sheet = document.getElementById("sheet");
   sheet.textContent = "";
+  /* The rows about to be thrown away take their place dropdowns with them. */
+  SLOTS.forEach(n => delete placeFields[n]);
   const tab = TABS.find(t => t.id === active);
 
   /*

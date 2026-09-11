@@ -248,6 +248,14 @@ const ISP_STATE = {
  * reset control are drawn on every tab rather than whichever the bench camera
  * happened to have.
  */
+/* An empty object is a slot with no element in it: every key unset. */
+const OSD_ELEMENTS = {
+	"osd.1": {template: "%time%", position: "top_left", align: "left", visible: true},
+	"osd.2": {template: "%uptime%", position: "top_right", align: "right", visible: true},
+	"osd.3": {template: "Camera", position: "bottom_left", align: "left", visible: false},
+	"osd.4": {},
+};
+
 function valuesFor(section) {
 	const out = [];
 	SCHEMA.keys.filter(k => k.section === section).forEach((k, i) => {
@@ -278,6 +286,21 @@ function valuesFor(section) {
 		if (k.section === "osd" && k.key === "font_size") {
 			o.value = "3.6%";
 			o.source = "daemon";
+			out.push(o);
+			return;
+		}
+		/*
+		 * The overlay's four elements, as a camera in the field has
+		 * them: two drawn in places of their own, one switched off,
+		 * and a fourth slot with nothing in it at all. What a place
+		 * dropdown may offer differs in all four cases, and the
+		 * uniform fixture below -- every element drawn, all of them
+		 * top_left -- is the one arrangement that hides that.
+		 */
+		if (OSD_ELEMENTS[k.section]) {
+			const e = OSD_ELEMENTS[k.section];
+			if (e[k.key] === undefined) o.set = false;
+			else o.value = e[k.key];
 			out.push(o);
 			return;
 		}
@@ -775,6 +798,72 @@ try {
 	if (p.V["osd.font_size"] !== "3.6%")
 		fail("switching back staged " + JSON.stringify(p.V["osd.font_size"]) +
 		     ", not a percentage of the picture");
+
+	/*
+	 * One element to a place.
+	 *
+	 * The camera draws one element in a place, so a dropdown offering a
+	 * place another element is drawn in is offering a choice that ends in
+	 * an element nobody can see -- which is how the clock disappeared off
+	 * the camera this came from. Element 1 is drawn top_left and element 2
+	 * top_right; element 3 is switched off, which holds nothing, and
+	 * element 4 is an empty slot, which holds nothing either.
+	 */
+	const placeSel = n => {
+		const row = sheet.querySelectorAll(".row")
+				 .find(r => r.dataset.id === "osd." + n + ".position");
+		if (!row) fail("the overlay tab drew no position row for element " + n);
+		return row.querySelectorAll("select")[0];
+	};
+	const optFor = (sel, place) => sel.querySelectorAll("option")
+					  .find(o => o.value === place);
+
+	const two = placeSel(2);
+	if (!optFor(two, "top_left").disabled)
+		fail("element 2 was offered top_left, where element 1 is drawn");
+	if (!/Element 1/.test(optFor(two, "top_left").textContent))
+		fail("the place element 1 holds was disabled without saying whose it is");
+	if (optFor(two, "top_right").disabled)
+		fail("element 2 could not choose the place it is already drawn in");
+	if (optFor(two, "bottom_left").disabled)
+		fail("element 2 was refused bottom_left, which only a hidden element names");
+	if (optFor(two, "center").disabled)
+		fail("element 2 was refused a place nothing is drawn in");
+
+	const four = placeSel(4);
+	if (!optFor(four, "top_left").disabled || !optFor(four, "top_right").disabled)
+		fail("an empty slot was offered places that are already drawn in");
+
+	/*
+	 * And it follows the page. Switching element 1 off gives its place up,
+	 * which element 2 may then take -- without a reload, because the
+	 * operator making room is the operator about to use it.
+	 */
+	const vis1 = sheet.querySelectorAll(".row")
+			  .find(r => r.dataset.id === "osd.1.visible")
+			  .querySelectorAll("input")[0];
+	vis1.checked = false;
+	vis1.handlers.change[0]();
+	await settle();
+	if (optFor(placeSel(2), "top_left").disabled)
+		fail("element 1 was switched off and still held its place");
+
+	/*
+	 * A camera whose config already puts two elements in one place -- hand
+	 * written, or written by a page that did not know better -- still has
+	 * to show each of them where it is. A field that offered element 2
+	 * every place except the one it is drawn in would make moving the
+	 * other element the only way to see its own setting.
+	 */
+	p.V["osd.1.visible"] = true;
+	p.V["osd.2.position"] = "top_left";
+	p.render();
+	await settle();
+	if (optFor(placeSel(1), "top_left").disabled ||
+	    optFor(placeSel(2), "top_left").disabled)
+		fail("an element already drawn in a place was not shown that place");
+	if (!optFor(placeSel(4), "top_left").disabled)
+		fail("an empty slot was offered a place two elements are already in");
 
 	/*
 	 * The password key is a settings row like any other and must be drawn
