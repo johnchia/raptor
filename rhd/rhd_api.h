@@ -75,4 +75,32 @@ bool rhd_api_waiting(const rhd_server_t *srv);
  * a blocking read; it frees what is left when it returns. */
 void rhd_api_release(rhd_client_t *c);
 
+/*
+ * The system account as a gate elsewhere: the console page is held by it, and
+ * the media routes take it as a second key, since whoever configures the
+ * camera may watch it and the console's own preview arrives with that account.
+ *
+ * rhd_api_authenticate() reads the request's Basic credential and says what
+ * it was: right, absent, wrong, or refused because the host is paying for
+ * earlier guesses -- with the wait in `retry_sec`. A wrong password costs what
+ * it costs on the configuration route. rhd_api_401() and rhd_api_429() are
+ * the replies for the last two, in the configuration realm, so a browser that
+ * answers holds the account for every route under the page.
+ *
+ * rhd_api_claimed() is whether there is a system account to hold anything:
+ * until the camera is claimed the page has to be open, since the page is how
+ * it gets one.
+ */
+typedef enum {
+	RHD_AUTH_OK,
+	RHD_AUTH_NONE,
+	RHD_AUTH_BAD,
+	RHD_AUTH_THROTTLED,
+} rhd_auth_t;
+
+rhd_auth_t rhd_api_authenticate(rhd_client_t *c, int *retry_sec);
+void rhd_api_401(rhd_client_t *c);
+void rhd_api_429(rhd_client_t *c, int retry_sec);
+bool rhd_api_claimed(void);
+
 #endif /* RHD_API_H */

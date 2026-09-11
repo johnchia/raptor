@@ -561,9 +561,38 @@ static void handle_request(rhd_server_t *srv, rhd_client_t *c)
 	if (rhd_portal_route(srv, c, method, path))
 		return;
 
-	if (!http_check_auth(srv, c->recv_buf)) {
-		http_401(c);
-		return;
+	/*
+	 * The console page is the configuration surface, so it is held by the
+	 * account that configures -- the same realm as the route the page
+	 * calls, and one login opens both. A viewer's credential does not
+	 * open it. Open only while the camera has no such account: the page
+	 * is how it gets one.
+	 *
+	 * The media gate below takes either key. The media credential is a
+	 * viewer's; the system account is whoever configures the camera, who
+	 * may also watch it, and is what the console's own preview arrives
+	 * with. A wrong system password costs there what it costs on the
+	 * configuration route.
+	 */
+	bool page = strcmp(path, "/") == 0;
+
+	if (page ? rhd_api_claimed() : !http_check_auth(srv, c->recv_buf)) {
+		int retry_sec = 1;
+
+		switch (rhd_api_authenticate(c, &retry_sec)) {
+		case RHD_AUTH_OK:
+			break;
+		case RHD_AUTH_THROTTLED:
+			rhd_api_429(c, retry_sec);
+			return;
+		case RHD_AUTH_NONE:
+		case RHD_AUTH_BAD:
+			if (page)
+				rhd_api_401(c);
+			else
+				http_401(c);
+			return;
+		}
 	}
 
 	if (strcmp(method, "GET") != 0) {
@@ -1274,13 +1303,13 @@ int main(int argc, char **argv)
 		RSS_INFO("HTTP Basic auth enabled");
 	} else if (!rss_config_get_bool(ctx.cfg, "system", "unsafe", false)) {
 		/*
-		 * What [http] guards is the media gate -- snapshots, MJPEG and
-		 * the console page -- and that is what this reports. The
-		 * configuration route is NOT part of it: that authenticates
-		 * against the system account in /etc/shadow and is reachable
-		 * on those terms whether or not [http] carries a credential,
-		 * which is why it is routed above the gate. Naming the API
-		 * here would send someone to set a key that does not govern it.
+		 * What [http] guards is the media gate -- snapshots and MJPEG
+		 * -- and that is what this reports. The console page and the
+		 * configuration route are NOT part of it: those authenticate
+		 * against the system account in /etc/shadow and are reachable
+		 * on those terms whether or not [http] carries a credential.
+		 * Naming them here would send someone to set a key that does
+		 * not govern them.
 		 */
 		RSS_WARN("snapshots and MJPEG served without authentication -- "
 			 "set [http] username and password, or [system] unsafe = true if "

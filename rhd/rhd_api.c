@@ -339,7 +339,7 @@ static void api_401(rhd_client_t *c)
 {
 	char body[256];
 	int blen = api_error_body(body, sizeof(body), "auth",
-				  "the configuration api needs the system account");
+				  "the console and its api need the system account");
 	char header[256];
 	int hlen = snprintf(header, sizeof(header),
 			    "HTTP/1.1 401 Unauthorized\r\n"
@@ -588,6 +588,39 @@ static bool api_claim(rhd_client_t *c, const char *method)
 	return taken;
 }
 
+rhd_auth_t rhd_api_authenticate(rhd_client_t *c, int *retry_sec)
+{
+	char host[64];
+
+	client_addr_str(&c->addr, host, sizeof(host));
+	switch (api_authenticate(c->recv_buf, host, retry_sec)) {
+	case API_AUTH_OK:
+		return RHD_AUTH_OK;
+	case API_AUTH_THROTTLED:
+		return RHD_AUTH_THROTTLED;
+	case API_AUTH_BAD:
+		return RHD_AUTH_BAD;
+	case API_AUTH_NONE:
+		break;
+	}
+	return RHD_AUTH_NONE;
+}
+
+void rhd_api_401(rhd_client_t *c)
+{
+	api_401(c);
+}
+
+void rhd_api_429(rhd_client_t *c, int retry_sec)
+{
+	api_429(c, retry_sec);
+}
+
+bool rhd_api_claimed(void)
+{
+	return rss_shadow_state(RHD_SHADOW_PATH, RHD_API_USER) == RSS_SHADOW_SET;
+}
+
 bool rhd_api_handle(rhd_server_t *srv, rhd_client_t *c, const char *method, const char *path)
 {
 	if (strcmp(path, RHD_API_CLAIM_PATH) == 0) {
@@ -630,22 +663,17 @@ bool rhd_api_handle(rhd_server_t *srv, rhd_client_t *c, const char *method, cons
 	 * is the policy, and an allow-list in this file would be a second
 	 * copy of it -- the thing this whole route exists not to have.
 	 */
-	bool claimed = rss_shadow_state(RHD_SHADOW_PATH, RHD_API_USER) == RSS_SHADOW_SET;
-
-	if (!srv->portal || claimed) {
-		char host[64];
+	if (!srv->portal || rhd_api_claimed()) {
 		int retry_sec = 1;
 
-		client_addr_str(&c->addr, host, sizeof(host));
-
-		switch (api_authenticate(c->recv_buf, host, &retry_sec)) {
-		case API_AUTH_OK:
+		switch (rhd_api_authenticate(c, &retry_sec)) {
+		case RHD_AUTH_OK:
 			break;
-		case API_AUTH_THROTTLED:
+		case RHD_AUTH_THROTTLED:
 			api_429(c, retry_sec);
 			return true;
-		case API_AUTH_NONE:
-		case API_AUTH_BAD:
+		case RHD_AUTH_NONE:
+		case RHD_AUTH_BAD:
 			/* Unlogged here. A request carrying no credentials is
 			 * what every browser sends first, and a line for each
 			 * of those buries the ones that mean something; the
