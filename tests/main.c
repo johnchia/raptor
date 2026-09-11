@@ -35,6 +35,7 @@ extern SUITE(idr_recovery_suite);
 extern SUITE(resync_suite);
 extern SUITE(backchannel_suite);
 extern SUITE(config_suite);
+extern SUITE(rvd_osd_suite);
 extern SUITE(rhd_slots_suite);
 
 GREATEST_MAIN_DEFS();
@@ -77,6 +78,7 @@ int main(int argc, char **argv)
 	RUN_SUITE(resync_suite);
 	RUN_SUITE(backchannel_suite);
 	RUN_SUITE(config_suite);
+	RUN_SUITE(rvd_osd_suite);
 	RUN_SUITE(rhd_slots_suite);
 	GREATEST_MAIN_END();
 }

@@ -307,35 +307,6 @@ void rvd_stream_publish_info(rvd_state_t *st, int idx)
 	rec.publish_chn = idx;
 }
 
-void rvd_osd_set_privacy(rvd_state_t *st, bool enable, int stream)
-{
-	if (stream >= 0 && stream < st->stream_count) {
-		st->privacy[stream] = enable;
-	} else {
-		for (int i = 0; i < st->stream_count; i++)
-			st->privacy[i] = enable;
-	}
-}
-
-void rvd_osd_calc_position(int sw, int sh, int rw, int rh, const char *p, int *x, int *y)
-{
-	(void)sw;
-	(void)sh;
-	(void)rw;
-	(void)rh;
-	(void)p;
-	*x = 0;
-	*y = 0;
-}
-
-rvd_osd_region_t *rvd_osd_find_region(rvd_state_t *st, int s, const char *n)
-{
-	(void)st;
-	(void)s;
-	(void)n;
-	return NULL;
-}
-
 void rvd_ivs_pause(rvd_state_t *st)
 {
 	(void)st;
@@ -399,6 +370,12 @@ static void setup(void)
 
 	pthread_mutex_init(&st.osd_lock, NULL);
 	pthread_mutex_init(&st.ivs_det_lock, NULL);
+
+	/* The privacy path here is rvd_osd's own, not a stub of it: nothing
+	 * has created a cover region, so it has no handle to hide. */
+	st.osd_enabled = true;
+	for (int s = 0; s < RVD_MAX_STREAMS; s++)
+		st.privacy_handles[s] = -1;
 
 	/* Stream 0: main, hw channel 0 */
 	st.stream_count = 3;

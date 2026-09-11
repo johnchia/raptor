@@ -140,15 +140,17 @@ rvd_osd_region_t *rvd_osd_find_region(rvd_state_t *st, int stream, const char *n
 
 static rvd_osd_region_t *alloc_region_slot(rvd_state_t *st, int s)
 {
+	/* A slot a released region left behind, ahead of a fresh one: the
+	 * layer an element draws on is its slot's index, so filling the gaps
+	 * keeps the layers in use as few and as low as the elements are. */
+	for (int r = 0; r < st->osd_region_count[s]; r++) {
+		if (!st->osd_regions[s][r].active)
+			return &st->osd_regions[s][r];
+	}
 	if (st->osd_region_count[s] < RVD_OSD_MAX_REGIONS) {
 		rvd_osd_region_t *reg = &st->osd_regions[s][st->osd_region_count[s]];
 		st->osd_region_count[s]++;
 		return reg;
-	}
-	/* Reuse inactive slot */
-	for (int r = 0; r < st->osd_region_count[s]; r++) {
-		if (!st->osd_regions[s][r].active)
-			return &st->osd_regions[s][r];
 	}
 	return NULL;
 }
@@ -437,16 +439,34 @@ void rvd_osd_init_stream(rvd_state_t *st, int s)
 
 /* ── SHM staleness and discovery ── */
 
+static void shm_path(char *out, size_t n, int s, const char *name)
+{
+	snprintf(out, n, RSS_SHM_DIR "/rss_osd_osd_%d_%s", s, name);
+}
+
+/*
+ * Whether the producer's buffer is there at all, which is a different question
+ * from whether we can map it. A map that fails over a file that exists is this
+ * moment's failure and nothing more; the next tick asks again.
+ */
+static bool shm_exists(int s, const char *name)
+{
+	char path[128];
+	struct stat sb;
+
+	shm_path(path, sizeof(path), s, name);
+	return stat(path, &sb) == 0;
+}
+
 static bool shm_is_stale(rss_osd_shm_t *shm, int s, const char *name)
 {
 	char path[128];
-	snprintf(path, sizeof(path), RSS_SHM_DIR "/rss_osd_osd_%d_%s", s, name);
-
 	struct stat cur;
+	struct stat ours;
+
+	shm_path(path, sizeof(path), s, name);
 	if (stat(path, &cur) < 0)
 		return true;
-
-	struct stat ours;
 	if (fstat(rss_osd_get_fd(shm), &ours) < 0)
 		return true;
 
@@ -504,32 +524,83 @@ static void read_shm_and_push(rvd_state_t *st, int s, rvd_osd_region_t *reg)
 }
 
 /*
- * The producer is gone and this region is not coming back with it.
+ * Hide the region, then take it out of the hardware.
+ *
+ * In that order: the reverse leaves the compositor a frame in which it may
+ * still be reading a region that has been freed. A merged region has no
+ * hardware of its own -- its bitmap is composited into the region it was
+ * merged with -- and its handle is not one to hand a driver.
+ */
+static void destroy_region_hw(rvd_state_t *st, int s, rvd_osd_region_t *reg)
+{
+	if (reg->hal_handle < 0)
+		return;
+
+	if (STREAM_ISP_OSD(st, s)) {
+		int sensor = st->streams[s].sensor_idx;
+
+		RSS_HAL_CALL(st->ops, isp_osd_show_region, st->hal_ctx, sensor, reg->hal_handle, 0);
+		RSS_HAL_CALL(st->ops, isp_osd_destroy_region, st->hal_ctx, sensor, reg->hal_handle);
+	} else {
+		int grp = st->streams[s].chn;
+
+		RSS_HAL_CALL(st->ops, osd_show_region, st->hal_ctx, reg->hal_handle, grp, 0,
+			     reg->layer + 1);
+		RSS_HAL_CALL(st->ops, osd_unregister_region, st->hal_ctx, reg->hal_handle, grp);
+		RSS_HAL_CALL(st->ops, osd_destroy_region, st->hal_ctx, reg->hal_handle);
+	}
+
+	reg->hal_handle = -1;
+	reg->shown = false;
+}
+
+/*
+ * The producer is gone, and the region goes with it.
  *
  * What it last drew is still in the hardware, which goes on compositing it
  * into every frame with nobody left to change it -- so an element removed from
- * the config stays burned onto the picture, frozen, until rvd restarts. Blank
- * the region and push that: present and empty, rather than showing a moment
- * that has passed.
+ * the config would stay burned onto the picture, frozen, until rvd restarts.
  *
- * The region itself stays, and stays active. rod is entitled to create the
- * same name again -- a restart, an add-element -- and the next open finds it.
+ * Handing the region back rather than blanking it matters because a region is
+ * not only a picture: it holds one of a fixed number of slots and a share of
+ * the OSD pool, and that pool is sized once, at pipeline init, from the
+ * elements the config had then. Drawing nothing returns neither. Kept, they
+ * are spent for as long as the camera runs, and an element added later stops
+ * appearing at all -- its create fails for want of pool, and only the log
+ * says so.
+ *
+ * The element is welcome back. rod is entitled to create the same name again,
+ * and the next scan finds it and builds it a region afresh.
  */
-static void clear_region(rvd_state_t *st, int s, rvd_osd_region_t *reg)
+static void release_region(rvd_state_t *st, int s, rvd_osd_region_t *reg)
 {
+	/* The merge is one region drawing two elements, so the one merged in
+	 * cannot outlive its host: with the host's region gone there is
+	 * nothing left to composite it into. Let it go as well -- if its own
+	 * producer is still there, the next scan gives it a region of its
+	 * own, which is what it would have had without the merge. */
+	if (strcmp(reg->name, "time") == 0) {
+		rvd_osd_region_t *ureg = rvd_osd_find_region(st, s, "uptime");
+
+		if (ureg && ureg->hal_handle < 0) {
+			RSS_INFO("osd %d/%s: merged into a region that is going; releasing", s,
+				 ureg->name);
+			release_region(st, s, ureg);
+		}
+	}
+
 	if (reg->shm) {
 		rss_osd_close(reg->shm);
 		reg->shm = NULL;
 	}
+	destroy_region_hw(st, s, reg);
+	free(reg->local_buf);
+	reg->local_buf = NULL;
+	reg->width = 0;
+	reg->height = 0;
 	reg->no_update_ticks = 0;
-	if (!reg->local_buf)
-		return;
-	memset(reg->local_buf, 0, (size_t)reg->width * reg->height * 4);
-	/* A merged region has no handle of its own -- its bitmap is composited
-	 * into the region it was merged with -- so there is nothing of it in
-	 * the hardware to blank, and the handle is not one to hand a driver. */
-	if (reg->hal_handle >= 0)
-		push_region(st, s, reg);
+	reg->active = false;
+	reg->name[0] = '\0';
 }
 
 /*
@@ -554,17 +625,10 @@ static void try_open_shm(rvd_state_t *st, int s, rvd_osd_region_t *reg)
 	}
 	reg->shm = rss_osd_open(name);
 	if (!reg->shm) {
-		/*
-		 * A region that had one and cannot get it back is an element
-		 * that has been taken away, not one that has not arrived yet.
-		 * Nothing else will notice: the staleness sweep below only
-		 * looks at regions that still hold a mapping, so without this
-		 * the last bitmap stays on the picture for good.
-		 */
-		if (had_shm) {
-			RSS_INFO("osd %d/%s: producer gone, clearing", s, reg->name);
-			clear_region(st, s, reg);
-		}
+		if (shm_exists(s, reg->name))
+			return;
+		RSS_INFO("osd %d/%s: producer gone, releasing its region", s, reg->name);
+		release_region(st, s, reg);
 		return;
 	}
 	if (had_shm)
@@ -786,37 +850,34 @@ void rvd_osd_check(rvd_state_t *st)
 	pthread_mutex_lock(&st->osd_lock);
 
 	st->osd_retry_counter++;
-	if (st->osd_retry_counter >= RVD_OSD_RETRY_INTERVAL) {
-		st->osd_retry_counter = 0;
+
+	/*
+	 * Every second, each region against the buffer behind it: one whose
+	 * producer restarted or resized is reopened, one whose producer has
+	 * gone is released. That is one path rather than two, which is what
+	 * the region asks for -- when two of them could notice, whichever
+	 * noticed first decided what happened, and the one that got there
+	 * every fifth second did nothing.
+	 */
+	if ((st->osd_retry_counter % 10) == 0) {
 		for (int s = 0; s < st->stream_count; s++) {
 			if (st->streams[s].is_jpeg)
 				continue;
 			for (int r = 0; r < st->osd_region_count[s]; r++)
 				try_open_shm(st, s, &st->osd_regions[s][r]);
-			scan_new_shm(st, s);
 		}
 	}
 
-	/* Staleness check every ~1s */
-	if ((st->osd_retry_counter % 10) != 0)
-		goto push_updates;
-	for (int s = 0; s < st->stream_count; s++) {
-		if (st->streams[s].is_jpeg)
-			continue;
-
-		for (int r = 0; r < st->osd_region_count[s]; r++) {
-			rvd_osd_region_t *reg = &st->osd_regions[s][r];
-			if (!reg->active || !reg->shm)
-				continue;
-
-			if (shm_is_stale(reg->shm, s, reg->name)) {
-				RSS_INFO("osd %d/%s: producer gone, clearing", s, reg->name);
-				clear_region(st, s, reg);
-			}
+	/* Less often, the dearer question: elements with no region at all yet,
+	 * which costs a directory scan per stream. */
+	if (st->osd_retry_counter >= RVD_OSD_RETRY_INTERVAL) {
+		st->osd_retry_counter = 0;
+		for (int s = 0; s < st->stream_count; s++) {
+			if (!st->streams[s].is_jpeg)
+				scan_new_shm(st, s);
 		}
 	}
 
-push_updates:
 	for (int s = 0; s < st->stream_count; s++) {
 		if (st->streams[s].is_jpeg)
 			continue;
@@ -1045,23 +1106,8 @@ void rvd_osd_deinit_stream(rvd_state_t *st, int s)
 
 	for (int r = 0; r < st->osd_region_count[s]; r++) {
 		rvd_osd_region_t *reg = &st->osd_regions[s][r];
-		if (reg->active && reg->hal_handle >= 0) {
-			if (STREAM_ISP_OSD(st, s)) {
-				int sensor = st->streams[s].sensor_idx;
-				RSS_HAL_CALL(st->ops, isp_osd_show_region, st->hal_ctx, sensor,
-					     reg->hal_handle, 0);
-				RSS_HAL_CALL(st->ops, isp_osd_destroy_region, st->hal_ctx, sensor,
-					     reg->hal_handle);
-			} else {
-				int grp = st->streams[s].chn;
-				RSS_HAL_CALL(st->ops, osd_show_region, st->hal_ctx, reg->hal_handle,
-					     grp, 0, reg->layer + 1);
-				RSS_HAL_CALL(st->ops, osd_unregister_region, st->hal_ctx,
-					     reg->hal_handle, grp);
-				RSS_HAL_CALL(st->ops, osd_destroy_region, st->hal_ctx,
-					     reg->hal_handle);
-			}
-		}
+		if (reg->active)
+			destroy_region_hw(st, s, reg);
 		if (reg->shm) {
 			rss_osd_close(reg->shm);
 			reg->shm = NULL;

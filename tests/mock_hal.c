@@ -537,14 +537,77 @@ static int mock_enc_get_jpeg_qp(void *ctx, int chn, int *qp)
 	return RSS_OK;
 }
 
-/* ── OSD ── */
+/* ── OSD ──
+ *
+ * Regions come out of a fixed table, the way they do on a real backend: a
+ * handle is a slot, and a slot is free again only once the region in it is
+ * destroyed. A mock that handed out an ever-rising handle could not tell a
+ * region given back from one merely blanked, which is the whole of what the
+ * region lifecycle has to get right.
+ */
+
+#define MOCK_OSD_REGION_MAX 16
+
+static bool mock_osd_used[MOCK_OSD_REGION_MAX];
+static int mock_osd_capacity = MOCK_OSD_REGION_MAX;
+static int mock_osd_creates;
+
+void mock_osd_reset(void)
+{
+	memset(mock_osd_used, 0, sizeof(mock_osd_used));
+	mock_osd_capacity = MOCK_OSD_REGION_MAX;
+	mock_osd_creates = 0;
+}
+
+/* Shrink the table, to put a test against the limit without a hundred regions. */
+void mock_osd_set_capacity(int n)
+{
+	mock_osd_capacity = n < MOCK_OSD_REGION_MAX ? n : MOCK_OSD_REGION_MAX;
+}
+
+/* Every create since the reset, freed or not: a region handed back and taken
+ * again reuses its slot, so the live count alone cannot see it happen. */
+int mock_osd_region_creates(void)
+{
+	return mock_osd_creates;
+}
+
+int mock_osd_live_regions(void)
+{
+	int live = 0;
+
+	for (int i = 0; i < MOCK_OSD_REGION_MAX; i++) {
+		if (mock_osd_used[i])
+			live++;
+	}
+	return live;
+}
 
 static int mock_osd_create_region(void *ctx, int *handle, const rss_osd_region_t *attr)
 {
 	(void)ctx;
 	(void)attr;
-	static int next_handle = 0;
-	*handle = next_handle++;
+
+	for (int i = 0; i < mock_osd_capacity; i++) {
+		if (mock_osd_used[i])
+			continue;
+		mock_osd_used[i] = true;
+		mock_osd_creates++;
+		*handle = i;
+		return RSS_OK;
+	}
+	return RSS_ERR_NOMEM;
+}
+
+static int mock_osd_destroy_region(void *ctx, int handle)
+{
+	(void)ctx;
+
+	if (handle < 0 || handle >= MOCK_OSD_REGION_MAX)
+		return RSS_ERR_INVAL;
+	if (!mock_osd_used[handle])
+		return RSS_ERR_NOENT;
+	mock_osd_used[handle] = false;
 	return RSS_OK;
 }
 
@@ -878,7 +941,7 @@ static const rss_hal_ops_t mock_ops = {
 	.osd_create_group = (void *)mock_ok,
 	.osd_destroy_group = (void *)mock_ok,
 	.osd_create_region = (void *)mock_osd_create_region,
-	.osd_destroy_region = (void *)mock_ok,
+	.osd_destroy_region = (void *)mock_osd_destroy_region,
 	.osd_register_region = (void *)mock_ok,
 	.osd_unregister_region = (void *)mock_ok,
 	.osd_set_region_attr = (void *)mock_ok,
