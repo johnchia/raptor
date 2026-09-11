@@ -504,6 +504,35 @@ static void read_shm_and_push(rvd_state_t *st, int s, rvd_osd_region_t *reg)
 }
 
 /*
+ * The producer is gone and this region is not coming back with it.
+ *
+ * What it last drew is still in the hardware, which goes on compositing it
+ * into every frame with nobody left to change it -- so an element removed from
+ * the config stays burned onto the picture, frozen, until rvd restarts. Blank
+ * the region and push that: present and empty, rather than showing a moment
+ * that has passed.
+ *
+ * The region itself stays, and stays active. rod is entitled to create the
+ * same name again -- a restart, an add-element -- and the next open finds it.
+ */
+static void clear_region(rvd_state_t *st, int s, rvd_osd_region_t *reg)
+{
+	if (reg->shm) {
+		rss_osd_close(reg->shm);
+		reg->shm = NULL;
+	}
+	reg->no_update_ticks = 0;
+	if (!reg->local_buf)
+		return;
+	memset(reg->local_buf, 0, (size_t)reg->width * reg->height * 4);
+	/* A merged region has no handle of its own -- its bitmap is composited
+	 * into the region it was merged with -- so there is nothing of it in
+	 * the hardware to blank, and the handle is not one to hand a driver. */
+	if (reg->hal_handle >= 0)
+		push_region(st, s, reg);
+}
+
+/*
  * Try to open SHM for a region, or reopen if ROD restarted.
  * Handles SHM dimension changes by reallocating local_buf.
  */
@@ -515,16 +544,31 @@ static void try_open_shm(rvd_state_t *st, int s, rvd_osd_region_t *reg)
 	char name[64];
 	snprintf(name, sizeof(name), "osd_%d_%s", s, reg->name);
 
+	bool had_shm = reg->shm != NULL;
+
 	if (reg->shm) {
 		if (!shm_is_stale(reg->shm, s, reg->name))
 			return;
-		RSS_INFO("osd shm %s: producer restarted, reopening", name);
 		rss_osd_close(reg->shm);
 		reg->shm = NULL;
 	}
 	reg->shm = rss_osd_open(name);
-	if (!reg->shm)
+	if (!reg->shm) {
+		/*
+		 * A region that had one and cannot get it back is an element
+		 * that has been taken away, not one that has not arrived yet.
+		 * Nothing else will notice: the staleness sweep below only
+		 * looks at regions that still hold a mapping, so without this
+		 * the last bitmap stays on the picture for good.
+		 */
+		if (had_shm) {
+			RSS_INFO("osd %d/%s: producer gone, clearing", s, reg->name);
+			clear_region(st, s, reg);
+		}
 		return;
+	}
+	if (had_shm)
+		RSS_INFO("osd shm %s: producer restarted, reopening", name);
 	RSS_DEBUG("opened osd shm %s", name);
 
 	/* Handle SHM dimension changes (font size change) */
@@ -767,13 +811,7 @@ void rvd_osd_check(rvd_state_t *st)
 
 			if (shm_is_stale(reg->shm, s, reg->name)) {
 				RSS_INFO("osd %d/%s: producer gone, clearing", s, reg->name);
-				rss_osd_close(reg->shm);
-				reg->shm = NULL;
-				reg->no_update_ticks = 0;
-				if (reg->local_buf) {
-					memset(reg->local_buf, 0, reg->width * reg->height * 4);
-					push_region(st, s, reg);
-				}
+				clear_region(st, s, reg);
 			}
 		}
 	}
