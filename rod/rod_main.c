@@ -261,13 +261,25 @@ int main(int argc, char **argv)
 			}
 		}
 
-		if (st.stream_count > 1) {
-			e->image_sub_w = 100;
-			e->image_sub_h = 30;
-			if (rod_load_logo("/usr/share/images/thingino_100x30.bgra", e->image_sub_w,
-					  e->image_sub_h, &e->image_sub_data) != 0) {
-				e->image_sub_w = 0;
-				e->image_sub_h = 0;
+		/*
+		 * One shrunk copy for the sub streams, sized for the first of
+		 * them: an element carries a main bitmap and a sub bitmap
+		 * rather than one per stream, and a camera with two sub
+		 * streams of different heights is rare beside what making
+		 * that per-stream would cost. It is the element's own image
+		 * either way, which is the whole of what a logo is.
+		 */
+		if (e->image_data && st.stream_count > 1 && st.stream_h[0] > 0) {
+			int w = e->image_w * st.stream_h[1] / st.stream_h[0];
+			int h = e->image_h * st.stream_h[1] / st.stream_h[0];
+
+			if (w > 0 && h > 0 &&
+			    rod_scale_logo(e->image_data, e->image_w, e->image_h, w, h,
+					   &e->image_sub_data) == 0) {
+				e->image_sub_w = w;
+				e->image_sub_h = h;
+				RSS_DEBUG("logo %s: %dx%d on the main stream, %dx%d on a sub",
+					  e->image_path, e->image_w, e->image_h, w, h);
 			}
 		}
 	}

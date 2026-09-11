@@ -259,8 +259,13 @@ void create_elem_shm(rod_state_t *st, rod_element_t *e, int s)
 			w = e->image_w;
 			h = e->image_h;
 		} else {
-			w = e->image_sub_w > 0 ? e->image_sub_w : e->image_w;
-			h = e->image_sub_h > 0 ? e->image_sub_h : e->image_h;
+			/* The sub bitmap's own size, and no region at all
+			 * without one: an image that did not load draws
+			 * nothing, and a region reserved for it is a hole in
+			 * the pool that stays blank for as long as the camera
+			 * runs. */
+			w = e->image_sub_w;
+			h = e->image_sub_h;
 		}
 		if (w == 0 || h == 0)
 			return;

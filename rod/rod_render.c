@@ -337,3 +337,71 @@ int rod_load_logo(const char *path, int expected_w, int expected_h, uint8_t **ou
 	*out_data = (uint8_t *)data;
 	return 0;
 }
+
+/*
+ * The same mark, for a smaller picture.
+ *
+ * A logo's file is raw BGRA at the size the config declares, and that size is
+ * pixels on the main stream -- so the same bitmap on a quarter-height sub
+ * stream is four times the mark, which is what a font size does and gets the
+ * same answer: scale by that stream's share of the height. The logo then
+ * takes the same fraction of every picture it is drawn on, which is what
+ * anybody choosing its size was choosing.
+ *
+ * Averaged over the source rectangle rather than sampled from it. This only
+ * ever shrinks, and a sampled shrink keeps one pixel in nine and drops the
+ * rest -- which on a logo is the thin half of every stroke. Alpha is folded
+ * in before the average and out after it, so a transparent border does not
+ * bleed its colour into the edge.
+ */
+int rod_scale_logo(const uint8_t *src, int sw, int sh, int dw, int dh, uint8_t **out)
+{
+	if (!src || !out || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0 || dw > sw || dh > sh)
+		return -1;
+
+	uint8_t *dst = malloc((size_t)dw * dh * 4);
+
+	if (!dst)
+		return -1;
+
+	for (int y = 0; y < dh; y++) {
+		int y0 = y * sh / dh;
+		int y1 = (y + 1) * sh / dh;
+
+		if (y1 <= y0)
+			y1 = y0 + 1;
+		for (int x = 0; x < dw; x++) {
+			int x0 = x * sw / dw;
+			int x1 = (x + 1) * sw / dw;
+			uint32_t b = 0, g = 0, r = 0, a = 0, n = 0;
+
+			if (x1 <= x0)
+				x1 = x0 + 1;
+			for (int sy = y0; sy < y1; sy++) {
+				const uint8_t *row = src + (size_t)sy * sw * 4;
+
+				for (int sx = x0; sx < x1; sx++) {
+					const uint8_t *p = row + (size_t)sx * 4;
+
+					b += (uint32_t)p[0] * p[3];
+					g += (uint32_t)p[1] * p[3];
+					r += (uint32_t)p[2] * p[3];
+					a += p[3];
+					n++;
+				}
+			}
+
+			uint8_t *q = dst + ((size_t)y * dw + x) * 4;
+
+			/* Every source pixel transparent leaves no colour to
+			 * average, and the one that matters is the alpha. */
+			q[0] = a ? (uint8_t)(b / a) : 0;
+			q[1] = a ? (uint8_t)(g / a) : 0;
+			q[2] = a ? (uint8_t)(r / a) : 0;
+			q[3] = (uint8_t)(a / n);
+		}
+	}
+
+	*out = dst;
+	return 0;
+}
