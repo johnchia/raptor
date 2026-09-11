@@ -551,7 +551,7 @@ const TABS = [
          be asked for another. */
       .concat(can("osd-add")
               ? [{title:"Add an element", add: true,
-                  note:"A new element is added with nothing in it, which draws nothing and takes no place on the picture until you give it text."}]
+                  note:"Pick what the new element shows, or Custom to name one and type its text yourself. An element with no text draws nothing and takes no place on the picture until you give it some."}]
               : [])
       .concat([{title:"Actions", actions:["osd-enable","osd-disable"],
                 note:"Stops and resumes drawing. Persists nothing — a reboot restores what is configured here."}]);
@@ -1584,11 +1584,37 @@ const OSD_NAME_OK = /^[A-Za-z0-9_-]{1,31}$/;
 /* Whether this camera offers an action at all. */
 const can = name => !!ACTIONS.find(a => a.name === name);
 
+/* What an element can show without anyone typing it: rod's template
+   variables, each offered under a name and made into an element of that
+   name. Which exist is rod's; these are the words the page offers them by. */
+const OSD_VARS = [
+  ["time", "Clock"], ["uptime", "Uptime"], ["hostname", "Hostname"],
+  ["ip", "IP address"], ["ip6", "IPv6 address"], ["ae_luma", "Scene brightness"],
+  ["total_gain", "Sensor gain"], ["soc_temp", "SoC temperature"]];
+
 function buildAddElement() {
   const box = document.createElement("div"); box.className = "acts";
   const f = document.createElement("input");
   const b = document.createElement("button");
   const say = document.createElement("p"); say.className = "help";
+  /* The text goes with the request that makes the element, where the
+     camera takes one -- an older rcd makes every element empty, and then
+     there is nothing to pick from. */
+  const meta = ACTIONS.find(a => a.name === "osd-add");
+  const withText = !!(meta && (meta.args || []).find(a => a.key === "template"));
+  const pick = document.createElement("select"); pick.dataset.id = "osd.pick";
+  let tmpl = "";
+
+  const option = (value, label) => {
+    const o = document.createElement("option"); o.value = value; o.textContent = label;
+    pick.append(o); return o;
+  };
+  option("", "Custom\u2026");
+  OSD_VARS.forEach(([v, label]) => option(v, label + "  %" + v + "%"));
+  pick.addEventListener("change", () => {
+    const v = pick.value;
+    f.value = v; tmpl = v ? "%" + v + "%" : ""; say.textContent = "";
+  });
 
   f.type = "text"; f.className = "txt"; f.placeholder = "name"; f.dataset.id = "osd.new";
   b.type = "button"; b.className = "btn"; b.textContent = "Add element";
@@ -1605,13 +1631,16 @@ function buildAddElement() {
       return;
     }
     say.textContent = "";
-    if (!await fire("osd-add", {name: name})) return;
-    f.value = "";
+    const args = {name: name};
+    if (tmpl) args.template = tmpl;
+    if (!await fire("osd-add", args)) return;
+    f.value = ""; pick.value = ""; tmpl = "";
     await reloadElements();
   };
 
   b.addEventListener("click", add);
   f.addEventListener("keydown", e => { if (e.key === "Enter") add(); });
+  if (withText) box.append(pick);
   box.append(f, b, say);
   return box;
 }

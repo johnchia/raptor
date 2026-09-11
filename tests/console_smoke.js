@@ -937,12 +937,39 @@ try {
 	if (sent.some(b => b.action === "osd-add"))
 		fail("a name the camera already has was sent to it");
 
+	/*
+	 * What the element shows can be picked rather than typed: a variable,
+	 * which names the element after itself and goes with the request that
+	 * makes it, so it draws as it arrives. Custom is the old way in.
+	 */
+	const pick = sheet.querySelectorAll("select").find(s => s.dataset.id === "osd.pick");
+	if (!pick) fail("the add box offers no pick of what the element shows");
+	pick.value = "hostname";
+	pick.handlers.change[0]();
+	if (addBox.value !== "hostname")
+		fail("picking a variable did not name the element after it: " + JSON.stringify(addBox.value));
+	addBtn.handlers.click[0]();
+	await settle();
+	const picked = sent.filter(b => b.action === "osd-add");
+	if (picked.length !== 1 || picked[0].name !== "hostname" || picked[0].template !== "%hostname%")
+		fail("adding from the pick asked for " + JSON.stringify(picked));
+	if (addBox.value !== "" || pick.value !== "")
+		fail("the add box did not clear after adding");
+	p.render();
+	await settle();
+	if (!sheet.querySelectorAll(".row").find(r => r.dataset.id === "osd.hostname.template"))
+		fail("the element made from the pick did not turn up on the page");
+
+	pick.value = "";
+	pick.handlers.change[0]();
 	addBox.value = "logo";
 	addBtn.handlers.click[0]();
 	await settle();
-	const asked = sent.filter(b => b.action === "osd-add");
-	if (asked.length !== 1 || asked[0].name !== "logo")
+	const asked = sent.filter(b => b.action === "osd-add" && b.name === "logo");
+	if (asked.length !== 1)
 		fail("adding an element asked for " + JSON.stringify(asked));
+	if ("template" in asked[0])
+		fail("a custom element was given text nobody typed: " + JSON.stringify(asked[0]));
 	p.render();
 	await settle();
 	if (!sheet.querySelectorAll(".row").find(r => r.dataset.id === "osd.logo.template"))
