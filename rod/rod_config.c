@@ -218,10 +218,33 @@ void load_config(rod_state_t *st)
 
 /* ── [osd.*] section parser ── */
 
+/*
+ * The elements of the config file, in the order it lists them.
+ *
+ * rss_config prepends each section as it parses, so a walk hands them back
+ * last-first. The names are collected and then loaded from the end, because
+ * the order elements are added in is the order a place is claimed in -- and
+ * the order the file reads in is the one an author means by it, and the one
+ * rcd numbers the console's slots by (rcd_osd.h). The window keeps the first
+ * ROD_MAX_ELEMENTS of the file, which are the last the walk reaches.
+ */
 struct osd_section_ctx {
 	rod_state_t *st;
 	int count;
+	char name[ROD_MAX_ELEMENTS][64];
+	int held;
 };
+
+static void note_osd_section(const char *section, void *userdata)
+{
+	struct osd_section_ctx *ctx = userdata;
+
+	if (ctx->held == ROD_MAX_ELEMENTS) {
+		memmove(ctx->name[0], ctx->name[1], sizeof(ctx->name[0]) * (ROD_MAX_ELEMENTS - 1));
+		ctx->held--;
+	}
+	rss_strlcpy(ctx->name[ctx->held++], section, sizeof(ctx->name[0]));
+}
 
 static void load_osd_section(const char *section, void *userdata)
 {
@@ -381,8 +404,11 @@ static bool media_is_open(rss_config_t *cfg)
 
 void init_elements_from_config(rod_state_t *st)
 {
-	struct osd_section_ctx ctx = {.st = st, .count = 0};
-	rss_config_foreach_section(st->cfg, "osd.", load_osd_section, &ctx);
+	struct osd_section_ctx ctx = {.st = st, .count = 0, .held = 0};
+
+	rss_config_foreach_section(st->cfg, "osd.", note_osd_section, &ctx);
+	for (int i = ctx.held - 1; i >= 0; i--)
+		load_osd_section(ctx.name[i], &ctx);
 
 	if (ctx.count == 0)
 		RSS_WARN("no [osd.*] sections found in config -- OSD will be empty");

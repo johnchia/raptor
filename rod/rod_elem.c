@@ -346,25 +346,65 @@ static bool elem_draws(const rod_element_t *e, int s)
 	return true;
 }
 
+/* Where an element sits; an element that named no place sits where rvd puts
+ * one that named none. */
+static const char *elem_place(const rod_element_t *e)
+{
+	return e->position[0] ? e->position : "top_left";
+}
+
 /*
  * Bring the buffers into line with what the elements now draw.
  *
  * Called after anything that can change that answer rather than from each
  * place that changes it, so that adding, removing, hiding, showing and moving
  * all reach the same decision by the same route.
+ *
+ * Two elements in one place is the other thing decided here. Where the
+ * compositor gives a pixel to one region only, the second of them is not
+ * blended with the first: it replaces it, over the whole rectangle, so the
+ * element underneath disappears rather than being drawn over. Nothing about
+ * the parts makes which one survives predictable -- rvd builds its regions in
+ * the order a directory walk hands the buffers back -- so the place goes to
+ * the element that asked for it first, which is the order the config file
+ * lists them in, and the one that missed is told so rather than left to be
+ * discovered by its absence.
+ *
+ * Places are compared as written, which settles the named corners exactly and
+ * says nothing about two elements at nearby x,y coordinates: those are the
+ * author's to lay out, and their rectangles are not rod's to know.
  */
 void rod_sync_shms(rod_state_t *st)
 {
 	for (int s = 0; s < st->stream_count; s++) {
+		const char *taken[ROD_MAX_ELEMENTS];
+		int claims = 0;
+
 		for (int i = 0; i < st->elem_count; i++) {
 			rod_element_t *e = &st->elements[i];
+			bool draws = elem_draws(e, s);
+			bool blocked = false;
 
-			if (elem_draws(e, s)) {
+			for (int c = 0; draws && c < claims; c++)
+				blocked = blocked || strcmp(taken[c], elem_place(e)) == 0;
+
+			if (blocked != e->streams[s].place_taken) {
+				e->streams[s].place_taken = blocked;
+				if (blocked)
+					RSS_WARN("osd %d/%s: %s is already drawn on; this "
+						 "element is not shown there",
+						 s, e->name, elem_place(e));
+			}
+
+			if (draws && !blocked) {
 				if (!e->streams[s].shm)
 					create_elem_shm(st, e, s);
 			} else {
 				destroy_elem_shm(e, s);
 			}
+
+			if (e->streams[s].shm && claims < ROD_MAX_ELEMENTS)
+				taken[claims++] = elem_place(e);
 		}
 	}
 }

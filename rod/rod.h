@@ -67,6 +67,7 @@ typedef struct {
 	uint32_t width;
 	uint32_t height;
 	bool needs_update;
+	bool place_taken; /* another element is drawn where this one would be */
 	int font_idx;
 } rod_elem_stream_t;
 

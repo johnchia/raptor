@@ -68,6 +68,23 @@ static int handle_set_position(rod_state_t *st, const char *cmd_json, char *resp
 
 	int target_stream = -1;
 	rss_json_get_int(cmd_json, "stream", &target_stream);
+
+	/*
+	 * rod's own record of where an element sits, which is what decides
+	 * who holds a place. A move meant for one stream is rvd's alone: the
+	 * element has one position here, and claiming a place on every stream
+	 * from a move on one of them would take it from an element that is
+	 * still drawing there.
+	 */
+	if (target_stream < 0) {
+		rod_element_t *e = rod_find_element(st, element);
+
+		if (e) {
+			rss_strlcpy(e->position, pos, sizeof(e->position));
+			rod_sync_shms(st);
+		}
+	}
+
 	for (int s = 0; s < st->stream_count; s++) {
 		if (target_stream >= 0 && s != target_stream)
 			continue;
@@ -318,6 +335,7 @@ static int handle_set_element(rod_state_t *st, const char *cmd_json, char *resp,
 
 	if (rss_json_get_str(cmd_json, "position", val, sizeof(val)) == 0) {
 		rss_strlcpy(e->position, val, sizeof(e->position));
+		rod_sync_shms(st);
 		for (int s = 0; s < st->stream_count; s++) {
 			char fwd[128];
 			cJSON *j = cJSON_CreateObject();

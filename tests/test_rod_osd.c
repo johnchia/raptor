@@ -15,6 +15,8 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <sys/mman.h>
 
 #include "greatest.h"
@@ -65,6 +67,8 @@ static void setup(void)
 	forget("clock");
 	forget("spare");
 	forget("logo");
+	forget("first");
+	forget("second");
 	st.stream_count = 2;
 	st.stream_w[0] = 320;
 	st.stream_h[0] = 240;
@@ -177,10 +181,125 @@ TEST a_sub_only_element_takes_nothing_from_the_main_stream(void)
 	PASS();
 }
 
+/* ══════════════════════════════════════════════════════════════════
+ *  One element to a place
+ * ══════════════════════════════════════════════════════════════════ */
+
+/*
+ * The compositor this matters for gives a pixel to one region: the second
+ * element in a place does not blend with the first, it replaces it over the
+ * whole rectangle. Which one that was came down to the order a directory walk
+ * returned the buffers in, so the place goes to whoever asked first and the
+ * other is told.
+ */
+TEST two_elements_in_one_place_leave_the_later_one_without_a_buffer(void)
+{
+	setup();
+	element("first", "top_left");
+	element("second", "top_left");
+	rod_sync_shms(&st);
+
+	ASSERT(has_buffer("first", 0));
+	ASSERTm("both elements were drawn in one place", !has_buffer("second", 0));
+	ASSERT(rod_find_element(&st, "second")->streams[0].place_taken);
+
+	teardown();
+	PASS();
+}
+
+TEST elements_in_places_of_their_own_all_draw(void)
+{
+	setup();
+	element("first", "top_left");
+	element("second", "bottom_right");
+	rod_sync_shms(&st);
+
+	ASSERT(has_buffer("first", 0));
+	ASSERT(has_buffer("second", 0));
+
+	teardown();
+	PASS();
+}
+
+/*
+ * A place is held by a buffer and not by the wish for one. This element wants
+ * to draw and cannot -- no glyph cache, so nothing to size a buffer from --
+ * and an element that keeps a place it draws nothing in is the whole of the
+ * bug above, arrived at from the other side.
+ */
+TEST an_element_that_got_no_buffer_does_not_keep_the_place(void)
+{
+	setup();
+	rod_add_element(&st, "first", ROD_ELEM_TEXT, "x", "top_left", 0, 0, 20, ROD_UPDATE_TICK);
+	element("second", "top_left");
+	rod_sync_shms(&st);
+
+	ASSERT(!has_buffer("first", 0));
+	ASSERTm("a place was held by an element with no buffer in it", has_buffer("second", 0));
+
+	teardown();
+	PASS();
+}
+
+TEST a_place_falls_to_the_next_element_when_the_first_gives_it_up(void)
+{
+	setup();
+	element("first", "top_left");
+	element("second", "top_left");
+	rod_sync_shms(&st);
+	ASSERT(!has_buffer("second", 0));
+
+	rod_find_element(&st, "first")->visible = false;
+	rod_sync_shms(&st);
+
+	ASSERT(!has_buffer("first", 0));
+	ASSERTm("the place stayed spoken for by an element that had stopped drawing",
+		has_buffer("second", 0));
+	ASSERT(!rod_find_element(&st, "second")->streams[0].place_taken);
+
+	teardown();
+	PASS();
+}
+
+/*
+ * Which element is "first" is the order the config file lists them in -- not
+ * the order rss_config hands sections back, which is the reverse of it.
+ */
+TEST elements_arrive_in_the_order_the_file_lists_them(void)
+{
+	char path[128];
+	FILE *f;
+
+	setup();
+	snprintf(path, sizeof(path), "/tmp/rss_rod_order_%d.conf", (int)getpid());
+	f = fopen(path, "w");
+	ASSERT(f != NULL);
+	fprintf(f, "[osd.first]\ntype = text\n\n[osd.second]\ntype = text\n");
+	fclose(f);
+
+	st.cfg = rss_config_load(path);
+	ASSERT(st.cfg != NULL);
+	init_elements_from_config(&st);
+
+	ASSERT_STR_EQ("first", st.elements[0].name);
+	ASSERT_STR_EQ("second", st.elements[1].name);
+
+	rss_config_free(st.cfg);
+	st.cfg = NULL;
+	unlink(path);
+	teardown();
+	PASS();
+}
+
 SUITE(rod_osd_suite)
 {
 	RUN_TEST(an_element_that_draws_gets_a_buffer_on_every_stream);
 	RUN_TEST(a_hidden_element_holds_no_buffer);
 	RUN_TEST(hiding_an_element_gives_its_buffer_back);
 	RUN_TEST(a_sub_only_element_takes_nothing_from_the_main_stream);
+	RUN_TEST(two_elements_in_one_place_leave_the_later_one_without_a_buffer);
+	RUN_TEST(elements_in_places_of_their_own_all_draw);
+	RUN_TEST(an_element_that_got_no_buffer_does_not_keep_the_place);
+	RUN_TEST(a_place_falls_to_the_next_element_when_the_first_gives_it_up);
+	RUN_TEST(elements_arrive_in_the_order_the_file_lists_them);
 }
