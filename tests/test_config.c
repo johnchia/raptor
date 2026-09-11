@@ -229,6 +229,188 @@ TEST cfg_unwritten_knob_is_not_a_neutral_one(void)
 	PASS();
 }
 
+/* ══════════════════════════════════════════════════════════════════
+ *  Taking a whole section out
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* A config from text, which is the shape the surgical writer works on:
+ * an existing file it edits a line at a time, comments and all. */
+static rss_config_t *cfg_from(const char *text, char *path, size_t cap)
+{
+	snprintf(path, cap, "/tmp/rss_cfg_sect_%d_%ld.conf", getpid(), (long)random());
+	FILE *f = fopen(path, "w");
+	if (!f)
+		return NULL;
+	fputs(text, f);
+	fclose(f);
+	return rss_config_load(path);
+}
+
+static char *slurp(const char *path, char *buf, size_t cap)
+{
+	FILE *f = fopen(path, "r");
+	size_t n = 0;
+
+	buf[0] = '\0';
+	if (!f)
+		return buf;
+	n = fread(buf, 1, cap - 1, f);
+	buf[n] = '\0';
+	fclose(f);
+	return buf;
+}
+
+static const char *THREE = "[osd.timestamp]\n"
+			   "# the clock\n"
+			   "template = %time%\n"
+			   "position = top_left\n"
+			   "\n"
+			   "[osd.uptime]\n"
+			   "template = %uptime%\n"
+			   "position = top_right\n"
+			   "\n"
+			   "[rtsp]\n"
+			   "port = 554\n";
+
+/*
+ * A key at a time leaves the header, and a bare [osd.uptime] is not
+ * nothing: rod reads one as an element with every value defaulted,
+ * which is an element that draws and holds a place. So the header goes
+ * with the keys, and the sections either side of it do not move.
+ */
+TEST cfg_remove_section_takes_the_header_with_the_keys(void)
+{
+	char path[128], text[1024];
+	rss_config_t *cfg = cfg_from(THREE, path, sizeof(path));
+	ASSERT(cfg);
+
+	ASSERT(rss_config_remove_section(cfg, "osd.uptime"));
+	ASSERT_EQ(0, rss_config_save(cfg, path));
+	rss_config_free(cfg);
+
+	slurp(path, text, sizeof(text));
+	ASSERTm("the section header outlived its keys", strstr(text, "[osd.uptime]") == NULL);
+	ASSERT(strstr(text, "%uptime%") == NULL);
+	ASSERTm("a neighbouring section was taken too", strstr(text, "[osd.timestamp]") != NULL);
+	ASSERT(strstr(text, "# the clock") != NULL);
+	ASSERT(strstr(text, "[rtsp]") != NULL);
+	/* A section is written with a blank line above it, so one leaving
+	 * takes that with it -- or a file edited a few times fills up with
+	 * the gaps between things that are no longer there. */
+	ASSERTm("the removal left its separator behind", strstr(text, "\n\n\n") == NULL);
+
+	rss_config_t *re = rss_config_load(path);
+	ASSERT(re);
+	ASSERT_EQ(NULL, rss_config_get_str(re, "osd.uptime", "template", NULL));
+	ASSERT_STR_EQ("%time%", rss_config_get_str(re, "osd.timestamp", "template", ""));
+	ASSERT_EQ(554, rss_config_get_int(re, "rtsp", "port", 0));
+
+	rss_config_free(re);
+	unlink(path);
+	PASS();
+}
+
+/* The case unsetting reachable keys cannot cover: a section holds
+ * whatever the file put there, and a caller only knows the keys it
+ * offers. [osd.camera] stripped of those four still has its type and
+ * its max_chars, and is still an element that draws. */
+TEST cfg_remove_section_takes_the_keys_nobody_asked_about(void)
+{
+	char path[128], text[1024];
+	rss_config_t *cfg = cfg_from("[osd.timestamp]\ntemplate = %time%\n\n"
+				     "[osd.camera]\ntype = text\ntemplate = Front\n"
+				     "max_chars = 22\nsub_only = true\n",
+				     path, sizeof(path));
+	ASSERT(cfg);
+
+	ASSERT(rss_config_remove_section(cfg, "osd.camera"));
+	ASSERT_EQ(0, rss_config_save(cfg, path));
+	rss_config_free(cfg);
+
+	slurp(path, text, sizeof(text));
+	ASSERTm("a key the remover never heard of stayed behind",
+		strstr(text, "max_chars") == NULL);
+	ASSERT(strstr(text, "sub_only") == NULL);
+	ASSERT(strstr(text, "[osd.camera]") == NULL);
+	ASSERT(strstr(text, "[osd.timestamp]") != NULL);
+
+	unlink(path);
+	PASS();
+}
+
+static void note_section(const char *section, void *ud)
+{
+	char *out = ud;
+	strcat(out, section);
+	strcat(out, " ");
+}
+
+/* Gone means gone now, not gone after a save: rod walks the sections to
+ * find its elements, and a removed one has stopped being an element. */
+TEST cfg_removed_section_is_gone_from_the_walk(void)
+{
+	char path[128], seen[256] = "";
+	rss_config_t *cfg = cfg_from(THREE, path, sizeof(path));
+	ASSERT(cfg);
+
+	ASSERT(rss_config_remove_section(cfg, "osd.uptime"));
+	rss_config_foreach_section(cfg, "osd.", note_section, seen);
+
+	ASSERTm("a removed section was still walked", strstr(seen, "osd.uptime") == NULL);
+	ASSERT(strstr(seen, "osd.timestamp") != NULL);
+	ASSERT_EQ(NULL, rss_config_get_str(cfg, "osd.uptime", "position", NULL));
+
+	rss_config_free(cfg);
+	unlink(path);
+	PASS();
+}
+
+/* A name that was never there is not a removal, and owes the file
+ * nothing -- a save that rewrites flash for a no-op is the thing the
+ * dirty flag exists to prevent. */
+TEST cfg_removing_a_section_that_is_not_there_says_so(void)
+{
+	char path[128];
+	rss_config_t *cfg = cfg_from(THREE, path, sizeof(path));
+	ASSERT(cfg);
+
+	ASSERT_FALSE(rss_config_remove_section(cfg, "osd.nothing"));
+	ASSERT_FALSEm("a removal that removed nothing owed the file a write",
+		      rss_config_has_dirty(cfg));
+
+	rss_config_free(cfg);
+	unlink(path);
+	PASS();
+}
+
+/* Writing into a removed section puts it back, the way writing a key an
+ * unset took out puts that back -- an element added under a name just
+ * used is an element, not a ghost. */
+TEST cfg_writing_into_a_removed_section_puts_it_back(void)
+{
+	char path[128], text[1024];
+	rss_config_t *cfg = cfg_from(THREE, path, sizeof(path));
+	ASSERT(cfg);
+
+	ASSERT(rss_config_remove_section(cfg, "osd.uptime"));
+	rss_config_set_str(cfg, "osd.uptime", "template", "%hostname%");
+	ASSERT_EQ(0, rss_config_save(cfg, path));
+	rss_config_free(cfg);
+
+	slurp(path, text, sizeof(text));
+	ASSERTm("the section did not come back", strstr(text, "[osd.uptime]") != NULL);
+
+	rss_config_t *re = rss_config_load(path);
+	ASSERT(re);
+	ASSERT_STR_EQ("%hostname%", rss_config_get_str(re, "osd.uptime", "template", ""));
+	ASSERTm("a key from before the removal came back with it",
+		rss_config_get_str(re, "osd.uptime", "position", NULL) == NULL);
+
+	rss_config_free(re);
+	unlink(path);
+	PASS();
+}
+
 SUITE(config_suite)
 {
 	RUN_TEST(cfg_default_is_display_only);
@@ -239,4 +421,9 @@ SUITE(config_suite)
 	RUN_TEST(cfg_null_probe_is_order_free);
 	RUN_TEST(cfg_fresh_file_save_skips_defaults);
 	RUN_TEST(cfg_unwritten_knob_is_not_a_neutral_one);
+	RUN_TEST(cfg_remove_section_takes_the_header_with_the_keys);
+	RUN_TEST(cfg_remove_section_takes_the_keys_nobody_asked_about);
+	RUN_TEST(cfg_removed_section_is_gone_from_the_walk);
+	RUN_TEST(cfg_removing_a_section_that_is_not_there_says_so);
+	RUN_TEST(cfg_writing_into_a_removed_section_puts_it_back);
 }
