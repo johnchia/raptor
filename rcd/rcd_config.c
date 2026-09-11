@@ -1002,7 +1002,13 @@ static void emit_value(cJSON *arr, const rcd_key_t *k, const char *sect, rss_con
 
 	if (from_daemon) {
 		const cJSON *v = cJSON_GetObjectItemCaseSensitive(from_daemon, k->key);
-		if (cJSON_IsString(v))
+		/*
+		 * Empty is a getter's placeholder, not a value: a daemon that
+		 * parses a key itself resolves it with "" and applies its real
+		 * default afterwards, and "" read as a number is 0 -- a size on
+		 * the scale, below its floor, and shown as chosen.
+		 */
+		if (cJSON_IsString(v) && v->valuestring[0])
 			raw = v->valuestring;
 	}
 

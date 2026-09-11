@@ -2192,6 +2192,70 @@ TEST state_leaves_out_an_isp_knob_rvd_could_not_read(void)
 }
 
 /*
+ * A daemon that parses a key itself resolves it with "" for a default and
+ * applies its own afterwards -- rod reads its font size that way, and its
+ * config-get-section then carries font_size as the empty string. Read as a
+ * number that is 0: below the key's floor, and shown as though somebody chose
+ * it. Empty is no value. The key is unset, as the file says it is.
+ */
+TEST an_empty_value_from_a_daemon_is_no_value(void)
+{
+	fake_daemon_t d;
+	rcd_state_t st;
+	char path[256];
+	FILE *f;
+
+	if (!sysconf_dir_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	snprintf(path, sizeof(path), "%s/raptor.conf", RCD_SYSCONF_DIR);
+	f = fopen(path, "w");
+	ASSERT(f);
+	fputs("[osd]\nfont_stroke = 2\n", f);
+	fclose(f);
+
+	memset(&st, 0, sizeof(st));
+	st.config_path = path;
+	if (!fake_daemon_start_reply(&d, "rod",
+				     "{\"status\":\"ok\",\"keys\":{\"font_size\":\"\","
+				     "\"font_stroke\":\"2\"}}"))
+		SKIPm("cannot listen on " RSS_RUN_DIR " -- run the suite under unshare -rm");
+
+	cJSON *req = cJSON_Parse("{\"section\":\"osd\"}");
+	ASSERT(req);
+	cJSON *r = rcd_cmd_get(&st, req);
+	cJSON_Delete(req);
+	fake_daemon_stop(&d, "rod");
+	ASSERT(r);
+
+	const cJSON *vals = cJSON_GetObjectItemCaseSensitive(r, "values");
+	const cJSON *size = NULL, *stroke = NULL, *v = NULL;
+
+	cJSON_ArrayForEach(v, vals)
+	{
+		const char *key = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(v, "key"));
+
+		if (key && strcmp(key, "font_size") == 0)
+			size = v;
+		else if (key && strcmp(key, "font_stroke") == 0)
+			stroke = v;
+	}
+	ASSERT(size && stroke);
+	ASSERTm("an empty string from the daemon was served as a value",
+		cJSON_GetObjectItemCaseSensitive(size, "value") == NULL);
+	ASSERTm("a key the daemon resolved with nothing is unset",
+		cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(size, "set")));
+	/* And one it resolved with something is still the daemon's answer. */
+	const cJSON *sv = cJSON_GetObjectItemCaseSensitive(stroke, "value");
+
+	ASSERT(cJSON_IsNumber(sv));
+	ASSERT_EQ(2, sv->valueint);
+
+	cJSON_Delete(r);
+	PASS();
+}
+
+/*
  * The comment over section_from_daemon has always said one round trip per
  * section rather than per key. It was true of a request naming a section and
  * false of one naming keys, which asked the daemon again for every key -- and
@@ -4557,6 +4621,7 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(a_section_rod_would_not_draw_is_not_an_element);
 	RUN_TEST(a_config_with_no_elements_lists_none);
 	RUN_TEST(the_pattern_answers_with_every_element_by_name);
+	RUN_TEST(an_empty_value_from_a_daemon_is_no_value);
 	RUN_TEST(the_pattern_with_no_elements_is_not_an_error);
 	RUN_TEST(a_key_for_an_element_that_is_not_there_makes_no_element);
 	RUN_TEST(the_pattern_is_not_a_section_to_write_to);
