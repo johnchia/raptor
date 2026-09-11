@@ -44,10 +44,12 @@ struct rcd_state;
 #define RCD_GETS_MAX 64
 
 /*
- * Sections one `get` may hold answers for. Larger than the table has, which a
- * test asserts -- so the lookup never has to decide what to do when full.
+ * Sections one `get` may hold answers for. Larger than a camera can have,
+ * which a test asserts -- so the lookup never has to decide what to do when
+ * full. A camera's count is the table's, except that its one repeat row
+ * stands for as many overlay elements as rod draws.
  */
-#define RCD_LIVE_MAX 32
+#define RCD_LIVE_MAX 48
 
 /*
  * How long a burst of live edits may go unsaved.
@@ -71,6 +73,14 @@ struct rcd_state;
  */
 typedef struct {
 	const struct rcd_key *k;
+	/*
+	 * The section this edit is for, which is `k`'s own name for every key
+	 * but an element's: a repeat row is named "osd.*" and stands for the
+	 * section the request asked about. Carried per edit because that is
+	 * where the answer is, and losing it here is how an edit for one
+	 * element would land in another.
+	 */
+	char section[RCD_SECT_MAX];
 	char rendered[RCD_VAL_MAX];
 	double num;
 	bool is_num;

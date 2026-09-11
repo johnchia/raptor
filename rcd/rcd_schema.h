@@ -33,7 +33,13 @@
  * grammar that refuses a hash this camera's own libc can produce -- would be a
  * limit nobody could see the reason for.
  */
-#define RCD_SECT_MAX 24
+/*
+ * Section names run to "osd." plus an element name, and rod holds one of
+ * those in 32 bytes -- so 36 is the real bound and 40 is it rounded. The
+ * fixed sections are all far shorter; this is the width the protocol has
+ * to carry, not the width they use.
+ */
+#define RCD_SECT_MAX 40
 #define RCD_KEY_MAX  32
 #define RCD_VAL_MAX  128
 
@@ -479,6 +485,20 @@ typedef struct {
 	const char *note;
 } rcd_action_t;
 
+/*
+ * Whether `section` is one of the sections a table row stands for.
+ *
+ * Almost every row names its section outright. A row whose name ends in
+ * ".*" is a repeat: it stands for every section under that prefix, which
+ * is how a table fixed at compile time reaches sections a camera's own
+ * config named. What keys such a section has is the row; which of them
+ * exist is the config file, and nothing here asks the second question.
+ */
+bool rcd_section_is(const char *row, const char *section);
+
+/* Whether this row is one of those. */
+bool rcd_row_repeats(const char *row);
+
 const rcd_key_t *rcd_key_find(const char *section, const char *key);
 const rcd_action_t *rcd_action_find(const char *name);
 
@@ -493,7 +513,15 @@ rcd_daemon_t rcd_section_owner(const char *section);
  * does not exist are the same answer from out here. */
 const char *rcd_section_reader(const char *section);
 
-/* Serialize the whole table, or one section of it, into `out`. */
+/*
+ * Serialize the whole table, or one section of it, into `out`.
+ *
+ * Repeat rows go into `repeat_keys` rather than `keys`: a client renders
+ * one form per section it finds, and one that has never heard of them
+ * sees exactly the table it saw before they existed. `keys` stays the
+ * same on every camera with this build, which is what lets a client
+ * cache it against `rev`.
+ */
 void rcd_schema_emit(cJSON *out, const char *section_filter);
 
 #endif /* RCD_SCHEMA_H */

@@ -421,10 +421,11 @@ static int pct_tenths(const char *s)
  * grammar; see rcd_schema.h for why that is safe and why it does not
  * generalise.
  */
-static const char *render(const rcd_key_t *k, const cJSON *v, rcd_edit_t *e, char *err,
-			  size_t errsz)
+static const char *render(const rcd_key_t *k, const char *section, const cJSON *v, rcd_edit_t *e,
+			  char *err, size_t errsz)
 {
 	e->k = k;
+	rss_strlcpy(e->section, section, sizeof(e->section));
 	e->is_num = false;
 	e->num = 0;
 	e->reset = false;
@@ -951,7 +952,8 @@ static cJSON *typed_value(const rcd_key_t *k, const char *raw)
 	return cJSON_CreateString(raw);
 }
 
-static void emit_value(cJSON *arr, const rcd_key_t *k, rss_config_t *file, const cJSON *from_daemon)
+static void emit_value(cJSON *arr, const rcd_key_t *k, const char *sect, rss_config_t *file,
+		       const cJSON *from_daemon)
 {
 	/* A credential is settable and never readable. Reporting the key with
 	 * no value is the honest rendering: the client draws the input and
@@ -960,7 +962,7 @@ static void emit_value(cJSON *arr, const rcd_key_t *k, rss_config_t *file, const
 		cJSON *o = cJSON_CreateObject();
 		if (!o)
 			return;
-		cJSON_AddStringToObject(o, "section", k->section);
+		cJSON_AddStringToObject(o, "section", sect);
 		cJSON_AddStringToObject(o, "key", k->key);
 		cJSON_AddBoolToObject(o, "readable", false);
 		/*
@@ -1004,12 +1006,6 @@ static void emit_value(cJSON *arr, const rcd_key_t *k, rss_config_t *file, const
 			raw = v->valuestring;
 	}
 
-	/* An overlay slot is an ordinal and the file knows it by name. The
-	 * reply still says `osd.N`: what a client addressed is what it is
-	 * answered about, and the name behind it is this daemon's business. */
-	char store[RCD_OSD_SECT_MAX];
-	const char *sect = rcd_osd_store(file, k->section, store, sizeof(store));
-
 	if (!raw && file) {
 		raw = rss_config_get_str(file, sect, k->key, NULL);
 		source = "file";
@@ -1017,7 +1013,7 @@ static void emit_value(cJSON *arr, const rcd_key_t *k, rss_config_t *file, const
 	cJSON *o = cJSON_CreateObject();
 	if (!o)
 		return;
-	cJSON_AddStringToObject(o, "section", k->section);
+	cJSON_AddStringToObject(o, "section", sect);
 	cJSON_AddStringToObject(o, "key", k->key);
 
 	/*
@@ -1090,7 +1086,7 @@ typedef struct {
 	cJSON *live; /* owned */
 } live_cache_t;
 
-static cJSON *live_for(live_cache_t *cache, int *count, const char *section, rss_config_t *file)
+static cJSON *live_for(live_cache_t *cache, int *count, const char *section)
 {
 	for (int i = 0; i < *count; i++) {
 		if (strcmp(cache[i].section, section) == 0)
@@ -1098,7 +1094,7 @@ static cJSON *live_for(live_cache_t *cache, int *count, const char *section, rss
 	}
 
 	/*
-	 * Unreachable: the table has fewer sections than the cache has room
+	 * Unreachable: a camera has fewer sections than the cache has room
 	 * for, and a test asserts it. Answering without the daemon's values
 	 * rather than asking uncached, because falling back to the thing this
 	 * function exists to prevent is not a fallback.
@@ -1106,14 +1102,8 @@ static cJSON *live_for(live_cache_t *cache, int *count, const char *section, rss
 	if (*count >= RCD_LIVE_MAX)
 		return NULL;
 
-	/* Cached under the name the caller used -- an ordinal is stable for
-	 * the length of one request, because the file is loaded once -- and
-	 * asked of the daemon under the name the daemon has. */
-	char store[RCD_OSD_SECT_MAX];
-
 	cache[*count].section = section;
-	cache[*count].live =
-		section_from_daemon(rcd_osd_store(file, section, store, sizeof(store)));
+	cache[*count].live = section_from_daemon(section);
 	return cache[(*count)++].live;
 }
 
@@ -1141,23 +1131,49 @@ cJSON *rcd_cmd_get(rcd_state_t *st, const cJSON *root)
 	rss_config_t *file = rss_config_load(st->config_path);
 
 	if (cJSON_IsString(sec) && sec->valuestring) {
-		/* Walk the table rather than the daemon's reply: what a client
-		 * may act on is what the table names, and a raw section dump
-		 * would otherwise carry keys nothing here can validate. */
-		char store[RCD_OSD_SECT_MAX];
-		cJSON *live = section_from_daemon(
-			rcd_osd_store(file, sec->valuestring, store, sizeof(store)));
-		int found = 0;
-		for (int i = 0;; i++) {
-			const rcd_key_t *k = rcd_key_at(i);
-			if (!k)
-				break;
-			if (strcmp(k->section, sec->valuestring) != 0)
-				continue;
-			emit_value(out, k, file, live);
-			found++;
+		/*
+		 * A pattern asks about every section it stands for, and is the
+		 * way a client learns which overlay elements a camera has: the
+		 * shape of one is the schema, the list of them is here, in the
+		 * same reply as their values and in the file's own order. An
+		 * overlay with nothing in it answers with no values rather
+		 * than with "no such section" -- it is a real question with an
+		 * empty answer.
+		 */
+		char named[RCD_OSD_MAX][RCD_SECT_MAX];
+		bool repeats = rcd_row_repeats(sec->valuestring);
+		int nsec = 1;
+
+		if (repeats)
+			nsec = rcd_osd_elements(file, named, RCD_OSD_MAX);
+		else
+			rss_strlcpy(named[0], sec->valuestring, sizeof(named[0]));
+
+		/* A pattern is a question the table can answer whatever the
+		 * file says, so an overlay with nothing in it reports no
+		 * values rather than "no such section". A name is not: one
+		 * the table does not have is a client's mistake. */
+		int found = repeats ? 1 : 0;
+
+		for (int e = 0; e < nsec; e++) {
+			/* Walk the table rather than the daemon's reply: what a
+			 * client may act on is what the table names, and a raw
+			 * section dump would otherwise carry keys nothing here
+			 * can validate. */
+			cJSON *live = section_from_daemon(named[e]);
+
+			for (int i = 0;; i++) {
+				const rcd_key_t *k = rcd_key_at(i);
+
+				if (!k)
+					break;
+				if (!rcd_section_is(k->section, named[e]))
+					continue;
+				emit_value(out, k, named[e], file, live);
+				found++;
+			}
+			cJSON_Delete(live);
 		}
-		cJSON_Delete(live);
 
 		if (!found) {
 			cJSON_Delete(resp);
@@ -1204,7 +1220,7 @@ cJSON *rcd_cmd_get(rcd_state_t *st, const cJSON *root)
 		if (!k)
 			continue;
 
-		emit_value(out, k, file, live_for(cache, &cached, k->section, file));
+		emit_value(out, k, s->valuestring, file, live_for(cache, &cached, s->valuestring));
 	}
 
 	live_cache_free(cache, cached);
@@ -1261,16 +1277,16 @@ static bool reset_request(const rcd_key_t *k, char *out, size_t outsz)
 	cJSON_Delete(req);
 	return fit;
 }
-
-/* Whether any edit in this request gives the slot a template to draw. */
-static bool request_fills_slot(const rcd_edit_t *edits, int n, const char *section)
+/* Whether the file has this element -- asked the way the rest of rcd asks,
+ * so a section rod would not draw is not one that can be written to either. */
+static bool element_exists(rss_config_t *file, const char *section)
 {
-	for (int i = 0; i < n; i++) {
-		if (edits[i].reset || strcmp(edits[i].k->section, section) != 0)
-			continue;
-		if (strcmp(edits[i].k->key, "template") == 0 && edits[i].rendered[0])
+	char named[RCD_OSD_MAX][RCD_SECT_MAX];
+	int n = rcd_osd_elements(file, named, RCD_OSD_MAX);
+
+	for (int i = 0; i < n; i++)
+		if (strcasecmp(named[i], section) == 0)
 			return true;
-	}
 	return false;
 }
 
@@ -1300,35 +1316,20 @@ static int write_file(rcd_state_t *st, rcd_edit_t *edits, const bool *to_file, b
 		 * defaults is mostly keys that were already at them, and
 		 * charging a restart for those would make the button useless.
 		 */
-		/*
-		 * An overlay slot is written to the section it stands for, and
-		 * resolved per edit rather than once: a slot with no element
-		 * yet resolves to its own name, so the first edit of a request
-		 * creates the section and the rest of them find it. See
-		 * rcd_osd.h.
-		 */
-		char store[RCD_OSD_SECT_MAX];
-		const char *sect = rcd_osd_store(cfg, edits[i].k->section, store, sizeof(store));
+		const char *sect = edits[i].section;
 
 		/*
-		 * An empty slot is filled by the key that gives it something
-		 * to draw, and by nothing else. A form has a value in every
-		 * field whether or not anybody typed one, so applying a page
-		 * with an empty element on it wrote a `visible = false` into
-		 * a section that did not exist -- which created one, and an
-		 * element drawing nothing still takes a place on the picture
-		 * away from the element that was drawing there.
-		 *
-		 * Asked of the request rather than of this edit, so that a
-		 * position typed beside the text it belongs to is kept: any
-		 * template in the request fills the slot, and the rest of its
-		 * edits then land in the section that template made.
+		 * A key is written into a section that exists, and an element
+		 * is made by asking for one -- see the osd-add action. Setting
+		 * a key would make it too, because a section is created by
+		 * being written to, and then a form's untouched fields would
+		 * be enough: a page listing four elements has a value in every
+		 * field of each whether or not anybody typed one, and applying
+		 * it created a fifth that drew nothing and took a place on the
+		 * picture from the element that was drawing there.
 		 */
-		if (rcd_osd_slot_is_empty(cfg, edits[i].k->section) &&
-		    !request_fills_slot(edits, n, edits[i].k->section)) {
-			RSS_INFO("set: [%s] has no element; %s ignored (an element needs a "
-				 "template first)",
-				 sect, edits[i].k->key);
+		if (rcd_row_repeats(edits[i].k->section) && !element_exists(cfg, sect)) {
+			RSS_INFO("set: no element called %s; %s ignored", sect, edits[i].k->key);
 			changed[i] = false;
 			continue;
 		}
@@ -1390,11 +1391,12 @@ cJSON *rcd_set_validate(const cJSON *root, rcd_edit_t *edits, int *count)
 		}
 
 		char err[192];
-		const char *code = render(k, cJSON_GetObjectItemCaseSensitive(root, "value"),
+		const char *code = render(k, one_sec->valuestring,
+					  cJSON_GetObjectItemCaseSensitive(root, "value"),
 					  &edits[0], err, sizeof(err));
 		if (code) {
 			cJSON *e = rcd_err(code, err);
-			rcd_err_where(e, k->section, k->key);
+			rcd_err_where(e, one_sec->valuestring, k->key);
 			return e;
 		}
 		*count = 1;
@@ -1422,11 +1424,12 @@ cJSON *rcd_set_validate(const cJSON *root, rcd_edit_t *edits, int *count)
 		}
 
 		char err[192];
-		const char *code = render(k, cJSON_GetObjectItemCaseSensitive(item, "value"),
-					  &edits[*count], err, sizeof(err));
+		const char *code =
+			render(k, s->valuestring, cJSON_GetObjectItemCaseSensitive(item, "value"),
+			       &edits[*count], err, sizeof(err));
 		if (code) {
 			cJSON *e = rcd_err(code, err);
-			rcd_err_where(e, k->section, k->key);
+			rcd_err_where(e, s->valuestring, k->key);
 			return e;
 		}
 		(*count)++;
@@ -1457,7 +1460,7 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		if (rcd_key_available(st, edits[i].k))
 			continue;
 		cJSON *e = rcd_err(RCD_E_UNSUPPORTED, "this camera has no such control");
-		rcd_err_where(e, edits[i].k->section, edits[i].k->key);
+		rcd_err_where(e, edits[i].section, edits[i].k->key);
 		return e;
 	}
 
@@ -1628,14 +1631,13 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		if (edits[i].reset && to_file[i] && !changed[i] && !restored[i])
 			note[i] = "already at its default";
 		/*
-		 * The one other way a write can leave the file alone: an
-		 * overlay slot with no element in it, which is not filled by
-		 * a key that gives it nothing to draw. The reply says so,
-		 * because a client that is told "applied" and reads the key
-		 * back unset has been lied to.
+		 * The one other way a write can leave the file alone: a key
+		 * addressed to an element this camera does not have. The reply
+		 * says so, because a client that is told "applied" and reads
+		 * the key back unset has been lied to.
 		 */
 		else if (!edits[i].reset && to_file[i] && !changed[i])
-			note[i] = "no element in that slot yet -- text in it makes one";
+			note[i] = "no element of that name -- add one first";
 	}
 
 	int saved = 0;
@@ -1646,8 +1648,8 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		}
 		if (!to_file[i] || !changed[i] || restored[i])
 			continue;
-		rcd_stale_add(st, edits[i].k->section, edits[i].k->key,
-			      rcd_section_owner(edits[i].k->section));
+		rcd_stale_add(st, edits[i].section, edits[i].k->key,
+			      rcd_section_owner(edits[i].section));
 		saved++;
 	}
 	if (saved)
@@ -1657,7 +1659,7 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		cJSON *o = cJSON_CreateObject();
 		if (!o)
 			continue;
-		cJSON_AddStringToObject(o, "section", edits[i].k->section);
+		cJSON_AddStringToObject(o, "section", edits[i].section);
 		cJSON_AddStringToObject(o, "key", edits[i].k->key);
 
 		/* Echoed in the type the schema declares, not as the string the

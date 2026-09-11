@@ -192,6 +192,56 @@ TEST no_credential_is_ever_readable(void)
 	PASS();
 }
 
+/*
+ * A repeat row is served apart from the keys, and every key served is a
+ * section a client may address.
+ *
+ * `keys` is what a client renders into forms and caches against `rev`, so it
+ * has to be the same table on every camera with this build -- which is why a
+ * row standing for sections the config named goes in a field of its own
+ * instead. A client that has never heard of the field sees exactly the page
+ * it saw before, and one that has knows it must ask the file which sections
+ * exist before it can draw them.
+ */
+TEST a_repeat_row_is_served_apart_from_the_keys(void)
+{
+	cJSON *out = cJSON_CreateObject();
+	rcd_schema_emit(out, NULL);
+
+	const cJSON *keys = cJSON_GetObjectItemCaseSensitive(out, "keys");
+	const cJSON *reps = cJSON_GetObjectItemCaseSensitive(out, "repeat_keys");
+	const cJSON *k = NULL;
+	int n = 0;
+
+	ASSERT(cJSON_IsArray(keys));
+	ASSERTm("the schema did not say what a repeat row is", cJSON_IsArray(reps));
+
+	cJSON_ArrayForEach(k, keys)
+	{
+		const cJSON *sec = cJSON_GetObjectItemCaseSensitive(k, "section");
+
+		ASSERT(cJSON_IsString(sec));
+		ASSERT_EQm("a row standing for many sections was served as one", false,
+			   rcd_row_repeats(sec->valuestring));
+	}
+
+	cJSON_ArrayForEach(k, reps)
+	{
+		const cJSON *sec = cJSON_GetObjectItemCaseSensitive(k, "section");
+
+		ASSERT(cJSON_IsString(sec));
+		ASSERT_STR_EQ("osd.*", sec->valuestring);
+		/* rod re-reads them, and says so, the same as any other key. */
+		ASSERT_STR_EQ("rod",
+			      cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(k, "owner")));
+		n++;
+	}
+	ASSERT_EQm("an element is four keys", 4, n);
+
+	cJSON_Delete(out);
+	PASS();
+}
+
 TEST refuses_unlisted_actions(void)
 {
 	ASSERT_ACTION_REFUSED("{\"action\":\"set-brightness\",\"value\":10}");
@@ -850,16 +900,18 @@ TEST every_daynight_threshold_is_a_live_key(void)
 }
 
 /*
- * The four overlay slots differ in nothing but which element they stand for.
+ * An element has the same four keys whatever this camera called it.
  *
- * They are spelled out one section at a time rather than expanded from a
- * macro, so this is what holds them equal: a slot that gained a key, lost one,
- * or bounded one differently would render as an element that behaves unlike
- * the other three for no reason anybody could find.
+ * The table cannot name a section a person has not written yet, so it names
+ * the shape instead -- one `osd.*` row set, reached through every name an
+ * element might have. These four are made up on the spot for that reason: if
+ * the pattern only answered for names somebody had thought of, it would be
+ * the ordinals again under another spelling.
  */
-TEST the_four_slots_carry_the_same_keys(void)
+TEST an_element_carries_the_same_keys_whatever_it_is_called(void)
 {
-	static const char *const slots[] = {"osd.1", "osd.2", "osd.3", "osd.4", NULL};
+	static const char *const slots[] = {"osd.timestamp", "osd.a-name_2", "osd.4", "osd.x",
+					    NULL};
 	static const char *const expect[] = {"template", "position", "align", "visible", NULL};
 
 	for (int p = 0; slots[p]; p++) {
@@ -868,7 +920,7 @@ TEST the_four_slots_carry_the_same_keys(void)
 			const rcd_key_t *k = rcd_key_at(i);
 			if (!k)
 				break;
-			if (strcmp(k->section, slots[p]) != 0)
+			if (!rcd_section_is(k->section, slots[p]))
 				continue;
 			n++;
 
@@ -902,6 +954,13 @@ TEST the_four_slots_carry_the_same_keys(void)
 		ASSERT_EQ(RCD_D_ROD, rcd_section_owner(slots[p]));
 		ASSERT_STR_EQ("rod", rcd_section_reader(slots[p]));
 	}
+
+	/* And the overlay's own section is not one of them: [osd] holds the
+	 * type every element is drawn in, and matching it here would put a
+	 * template and a place on the whole overlay. */
+	ASSERT_FALSE(rcd_section_is("osd.*", "osd"));
+	ASSERT_EQ(NULL, rcd_key_find("osd", "template"));
+	ASSERT(rcd_key_find("osd", "font_size"));
 	PASS();
 }
 
@@ -998,51 +1057,190 @@ static rss_config_t *osd_config(const char *const *sections)
 	return rss_config_load(path);
 }
 
-/* What a slot resolves to, as a string, so a test reads as the question. */
-static const char *resolved(rss_config_t *cfg, const char *slot, char *buf, size_t bufsz)
+/* The elements a config has, as one string, so a test reads as the question. */
+static const char *listed(rss_config_t *cfg, char *buf, size_t bufsz)
 {
-	return rcd_osd_store(cfg, slot, buf, bufsz);
+	char named[RCD_OSD_MAX][RCD_SECT_MAX];
+	int n = rcd_osd_elements(cfg, named, RCD_OSD_MAX);
+
+	buf[0] = '\0';
+	for (int i = 0; i < n; i++)
+		snprintf(buf + strlen(buf), bufsz - strlen(buf), "%s%s", i ? " " : "", named[i]);
+	return buf;
 }
 
 /*
- * A slot is an ordinal into the file, so it stands for whatever the camera's
- * own config put there -- which is the whole point of the change: the six
- * place-named sections could not see an element called [osd.timestamp], and
- * every camera in the field has one.
+ * The list is the file's, in the file's own order.
+ *
+ * rss_config prepends each section as it parses, so a walk of the store hands
+ * them back backwards. A list that trusted the walk would show every camera's
+ * elements in reverse -- harmless-looking until two of them want one place,
+ * which rod settles by the order the file lists them in.
  */
-TEST a_slot_stands_for_the_element_the_file_has(void)
+TEST the_elements_are_listed_the_way_the_file_reads(void)
 {
 	if (!sysconf_dir_ready())
 		SKIP();
 
-	static const char *const three[] = {"osd.timestamp", "osd.uptime", "osd.camera", NULL};
-	rss_config_t *cfg = osd_config(three);
-	char buf[RCD_OSD_SECT_MAX];
+	static const char *const five[] = {"osd.first",	 "osd.second", "osd.third",
+					   "osd.fourth", "osd.fifth",  NULL};
+	rss_config_t *cfg = osd_config(five);
+	char buf[256];
 
 	ASSERT(cfg);
-	ASSERT_STR_EQ("osd.timestamp", resolved(cfg, "osd.1", buf, sizeof(buf)));
-	ASSERT_STR_EQ("osd.uptime", resolved(cfg, "osd.2", buf, sizeof(buf)));
-	ASSERT_STR_EQ("osd.camera", resolved(cfg, "osd.3", buf, sizeof(buf)));
-
-	/*
-	 * The fourth stands for nothing yet and answers with its own name,
-	 * which is what makes an empty slot work in both directions: read,
-	 * the keys come back unset; written, the section is created.
-	 */
-	ASSERT_STR_EQ("osd.4", resolved(cfg, "osd.4", buf, sizeof(buf)));
+	ASSERT_STR_EQ("osd.first osd.second osd.third osd.fourth osd.fifth",
+		      listed(cfg, buf, sizeof(buf)));
 
 	rss_config_free(cfg);
 	PASS();
 }
 
 /*
- * A page of forms has a value in every field whether or not anybody typed one,
- * so applying the overlay page sent `visible = false` for an element that did
- * not exist -- and that wrote [osd.4], which rod then drew: an element with
- * nothing in it, sitting at the default place, taking that place away from the
- * element already drawn there. The camera this was found on lost its clock.
+ * A section rod would not draw is not an element. rod ignores one with an
+ * empty name and one whose name it cannot hold, so listing them would offer
+ * an element that nothing draws and no edit reaches -- and [osd] itself is
+ * the overlay's own settings rather than an element at all.
  */
-TEST an_empty_slot_is_not_made_an_element_by_a_form_nobody_filled_in(void)
+TEST a_section_rod_would_not_draw_is_not_an_element(void)
+{
+	if (!sysconf_dir_ready())
+		SKIP();
+
+	static const char *const mixed[] = {
+		"osd.", "osd.thisnameislongerthanrodwillholdinanelement", "osd.real", NULL};
+	rss_config_t *cfg = osd_config(mixed);
+	char buf[256];
+
+	ASSERT(cfg);
+	ASSERT_STR_EQ("osd.real", listed(cfg, buf, sizeof(buf)));
+
+	rss_config_free(cfg);
+	PASS();
+}
+
+/* An overlay with nothing in it is a camera, not an error. */
+TEST a_config_with_no_elements_lists_none(void)
+{
+	if (!sysconf_dir_ready())
+		SKIP();
+
+	static const char *const none[] = {NULL};
+	rss_config_t *cfg = osd_config(none);
+	char buf[256];
+
+	ASSERT(cfg);
+	ASSERT_STR_EQ("", listed(cfg, buf, sizeof(buf)));
+
+	rss_config_free(cfg);
+	PASS();
+}
+
+/*
+ * The pattern is how a client asks which elements a camera has: one reply,
+ * every element, each value under the name its own section carries. The
+ * shape of an element is the schema and does not vary; which of them exist
+ * is this, and it is the config file like any other question about it.
+ */
+TEST the_pattern_answers_with_every_element_by_name(void)
+{
+	rcd_state_t st;
+	char path[256];
+	FILE *f;
+
+	if (!sysconf_dir_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	snprintf(path, sizeof(path), "%s/raptor.conf", RCD_SYSCONF_DIR);
+	f = fopen(path, "w");
+	ASSERT(f);
+	fputs("[osd.timestamp]\ntemplate = %time%\nposition = top_left\n\n"
+	      "[osd.uptime]\ntemplate = %uptime%\nposition = top_right\n",
+	      f);
+	fclose(f);
+
+	memset(&st, 0, sizeof(st));
+	st.config_path = path;
+
+	cJSON *req = cJSON_Parse("{\"section\":\"osd.*\"}");
+	ASSERT(req);
+	cJSON *r = rcd_cmd_get(&st, req);
+	cJSON_Delete(req);
+	ASSERT(r);
+
+	const cJSON *vals = cJSON_GetObjectItemCaseSensitive(r, "values");
+	int stamp = 0, up = 0, pattern = 0;
+	const cJSON *v = NULL;
+
+	cJSON_ArrayForEach(v, vals)
+	{
+		const char *sect =
+			cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(v, "section"));
+
+		if (!sect)
+			continue;
+		if (strcmp(sect, "osd.timestamp") == 0)
+			stamp++;
+		else if (strcmp(sect, "osd.uptime") == 0)
+			up++;
+		else if (strcmp(sect, "osd.*") == 0)
+			pattern++;
+	}
+
+	ASSERT_EQm("an element was not answered for with all four of its keys", 4, stamp);
+	ASSERT_EQ(4, up);
+	ASSERTm("the pattern answered under its own name instead of the elements'", pattern == 0);
+
+	cJSON_Delete(r);
+	unlink(path);
+	PASS();
+}
+
+/* And with none of them, which is a camera with no overlay rather than a
+ * client asking about a section that does not exist. */
+TEST the_pattern_with_no_elements_is_not_an_error(void)
+{
+	rcd_state_t st;
+	char path[256];
+	FILE *f;
+
+	if (!sysconf_dir_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	snprintf(path, sizeof(path), "%s/raptor.conf", RCD_SYSCONF_DIR);
+	f = fopen(path, "w");
+	ASSERT(f);
+	fputs("[osd]\nfont_size = 24\n", f);
+	fclose(f);
+
+	memset(&st, 0, sizeof(st));
+	st.config_path = path;
+
+	cJSON *req = cJSON_Parse("{\"section\":\"osd.*\"}");
+	ASSERT(req);
+	cJSON *r = rcd_cmd_get(&st, req);
+	cJSON_Delete(req);
+	ASSERT(r);
+
+	ASSERT_STR_EQ("ok", cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(r, "status")));
+	ASSERT_EQ(0, cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(r, "values")));
+
+	cJSON_Delete(r);
+	unlink(path);
+	PASS();
+}
+
+/*
+ * A key is written into an element that exists, and nothing else makes one.
+ *
+ * A section is created by being written to, so before this a form's untouched
+ * fields were enough: the overlay page had a value in every field of every
+ * element whether or not anybody typed one, and applying it wrote a
+ * `visible = false` into a section that did not exist. That created an
+ * element -- one with nothing in it, at the default place, taking that place
+ * from the element already drawn there. The camera it was found on lost its
+ * clock.
+ */
+TEST a_key_for_an_element_that_is_not_there_makes_no_element(void)
 {
 	rcd_state_t st;
 	char path[256], text[1024] = "";
@@ -1060,8 +1258,10 @@ TEST an_empty_slot_is_not_made_an_element_by_a_form_nobody_filled_in(void)
 	memset(&st, 0, sizeof(st));
 	st.config_path = path;
 
-	cJSON *req = cJSON_Parse(
-		"{\"edits\":[{\"section\":\"osd.2\",\"key\":\"visible\",\"value\":false}]}");
+	cJSON *req =
+		cJSON_Parse("{\"edits\":["
+			    "{\"section\":\"osd.spare\",\"key\":\"visible\",\"value\":false},"
+			    "{\"section\":\"osd.spare\",\"key\":\"template\",\"value\":\"x\"}]}");
 	ASSERT(req);
 	cJSON *resp = rcd_cmd_set(&st, req);
 	cJSON_Delete(req);
@@ -1078,7 +1278,10 @@ TEST an_empty_slot_is_not_made_an_element_by_a_form_nobody_filled_in(void)
 	fread(text, 1, sizeof(text) - 1, f);
 	fclose(f);
 
-	ASSERTm("a form nobody filled in created an element", strstr(text, "[osd.2]") == NULL);
+	/* Neither key made it, the template included: an element is made by
+	 * asking for one, and text is not the asking. */
+	ASSERTm("a key created the element it was addressed to",
+		strstr(text, "[osd.spare]") == NULL);
 	ASSERT(strstr(text, "[osd.timestamp]") != NULL);
 	ASSERTm("the reply did not say the edit had gone nowhere", said_nothing_landed);
 
@@ -1086,9 +1289,9 @@ TEST an_empty_slot_is_not_made_an_element_by_a_form_nobody_filled_in(void)
 	PASS();
 }
 
-/* And the way to fill one is to give it something to draw, in the same request
- * as everything else the form says about it. */
-TEST an_empty_slot_is_made_an_element_by_the_text_put_in_it(void)
+/* The pattern is not a section either: a client that sends it where a name
+ * belongs writes nothing, rather than a [osd.*] nothing would ever draw. */
+TEST the_pattern_is_not_a_section_to_write_to(void)
 {
 	rcd_state_t st;
 	char path[256], text[1024] = "";
@@ -1100,18 +1303,14 @@ TEST an_empty_slot_is_made_an_element_by_the_text_put_in_it(void)
 	snprintf(path, sizeof(path), "%s/raptor.conf", RCD_SYSCONF_DIR);
 	f = fopen(path, "w");
 	ASSERT(f);
-	fputs("[osd.timestamp]\ntype = text\ntemplate = %time%\nposition = top_left\n", f);
+	fputs("[osd.timestamp]\ntemplate = %time%\n", f);
 	fclose(f);
 
 	memset(&st, 0, sizeof(st));
 	st.config_path = path;
 
-	/* The position first, as a form serialises it, and the template after:
-	 * what fills the slot arrives behind an edit that needs it filled. */
 	cJSON *req = cJSON_Parse(
-		"{\"edits\":["
-		"{\"section\":\"osd.2\",\"key\":\"position\",\"value\":\"bottom_left\"},"
-		"{\"section\":\"osd.2\",\"key\":\"template\",\"value\":\"Hello\"}]}");
+		"{\"edits\":[{\"section\":\"osd.*\",\"key\":\"template\",\"value\":\"x\"}]}");
 	ASSERT(req);
 	cJSON *resp = rcd_cmd_set(&st, req);
 	cJSON_Delete(req);
@@ -1123,94 +1322,59 @@ TEST an_empty_slot_is_made_an_element_by_the_text_put_in_it(void)
 	fread(text, 1, sizeof(text) - 1, f);
 	fclose(f);
 
-	ASSERTm("text typed into an empty slot did not make an element",
-		strstr(text, "[osd.2]") != NULL);
-	ASSERT(strstr(text, "Hello") != NULL);
-	ASSERTm("the place typed beside the text was dropped", strstr(text, "bottom_left") != NULL);
+	ASSERTm("the pattern was written to the file as a section",
+		strstr(text, "[osd.*]") == NULL);
 
 	unlink(path);
 	PASS();
 }
 
 /*
- * The order is the file's, and nothing else's.
- *
- * rss_config prepends each section as it parses, so a walk of the store hands
- * them back backwards. A resolver that trusted the walk would number every
- * camera's elements in reverse, and the only sign would be that editing the
- * top-left clock moved the bottom-right logo.
+ * Editing an element the table never heard of. This is the whole of what the
+ * ordinals were working around: a camera set up by hand with [osd.timestamp]
+ * and [osd.uptime] had two elements no client could name.
  */
-TEST the_slots_are_numbered_the_way_the_file_reads(void)
+TEST an_element_the_camera_named_is_edited_under_that_name(void)
 {
+	rcd_state_t st;
+	char path[256], text[1024] = "";
+	FILE *f;
+
 	if (!sysconf_dir_ready())
-		SKIP();
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
 
-	static const char *const five[] = {"osd.first",	 "osd.second", "osd.third",
-					   "osd.fourth", "osd.fifth",  NULL};
-	rss_config_t *cfg = osd_config(five);
-	char buf[RCD_OSD_SECT_MAX];
+	snprintf(path, sizeof(path), "%s/raptor.conf", RCD_SYSCONF_DIR);
+	f = fopen(path, "w");
+	ASSERT(f);
+	fputs("[osd.timestamp]\ntemplate = %time%\nposition = top_left\n", f);
+	fclose(f);
 
-	ASSERT(cfg);
-	ASSERT_STR_EQ("osd.first", resolved(cfg, "osd.1", buf, sizeof(buf)));
-	ASSERT_STR_EQ("osd.second", resolved(cfg, "osd.2", buf, sizeof(buf)));
-	ASSERT_STR_EQ("osd.third", resolved(cfg, "osd.3", buf, sizeof(buf)));
-	ASSERT_STR_EQ("osd.fourth", resolved(cfg, "osd.4", buf, sizeof(buf)));
+	memset(&st, 0, sizeof(st));
+	st.config_path = path;
 
-	/* The fifth is rod's, still drawn, and simply not on the page. */
-	rss_config_free(cfg);
-	PASS();
-}
+	cJSON *req = cJSON_Parse("{\"edits\":[{\"section\":\"osd.timestamp\","
+				 "\"key\":\"position\",\"value\":\"bottom_right\"}]}");
+	ASSERT(req);
+	cJSON *resp = rcd_cmd_set(&st, req);
+	cJSON_Delete(req);
+	ASSERT(resp);
 
-/*
- * A section rod would not draw takes no slot. rod ignores an element with an
- * empty name and one whose name it cannot hold, so counting them here would
- * point every slot below at the wrong element -- and [osd] itself is the
- * overlay's own settings rather than an element at all.
- */
-TEST a_section_rod_would_not_draw_takes_no_slot(void)
-{
-	if (!sysconf_dir_ready())
-		SKIP();
+	const cJSON *one = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(resp, "results"), 0);
+	const char *said = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(one, "section"));
 
-	static const char *const mixed[] = {
-		"osd.", "osd.thisnameislongerthanrodwillholdinanelement", "osd.real", NULL};
-	rss_config_t *cfg = osd_config(mixed);
-	char buf[RCD_OSD_SECT_MAX];
+	ASSERTm("the reply answered about a section other than the one asked about",
+		said && strcmp(said, "osd.timestamp") == 0);
+	cJSON_Delete(resp);
 
-	ASSERT(cfg);
-	ASSERT_STR_EQ("osd.real", resolved(cfg, "osd.1", buf, sizeof(buf)));
-	ASSERT_STR_EQ("osd.2", resolved(cfg, "osd.2", buf, sizeof(buf)));
+	f = fopen(path, "r");
+	ASSERT(f);
+	fread(text, 1, sizeof(text) - 1, f);
+	fclose(f);
 
-	rss_config_free(cfg);
-	PASS();
-}
+	ASSERT(strstr(text, "bottom_right") != NULL);
+	ASSERT(strstr(text, "top_left") == NULL);
 
-/*
- * Everything else is a section name like any other and comes back untouched.
- * A camera whose config really does say [osd.top_left] still has it read and
- * written under that name -- it is an element, and it takes a slot like one.
- */
-TEST only_the_four_ordinals_resolve(void)
-{
-	if (!sysconf_dir_ready())
-		SKIP();
-
-	static const char *const one[] = {"osd.top_left", NULL};
-	rss_config_t *cfg = osd_config(one);
-	char buf[RCD_OSD_SECT_MAX];
-
-	ASSERT(cfg);
-	ASSERT_STR_EQ("osd.top_left", resolved(cfg, "osd.1", buf, sizeof(buf)));
-
-	/* Not ordinals: a name, the overlay's own section, a number past the
-	 * slots, and one with more digits than a slot has. */
-	ASSERT_STR_EQ("osd.top_left", resolved(cfg, "osd.top_left", buf, sizeof(buf)));
-	ASSERT_STR_EQ("osd", resolved(cfg, "osd", buf, sizeof(buf)));
-	ASSERT_STR_EQ("osd.5", resolved(cfg, "osd.5", buf, sizeof(buf)));
-	ASSERT_STR_EQ("osd.10", resolved(cfg, "osd.10", buf, sizeof(buf)));
-	ASSERT_STR_EQ("network", resolved(cfg, "network", buf, sizeof(buf)));
-
-	rss_config_free(cfg);
+	unlink(path);
 	PASS();
 }
 
@@ -2060,7 +2224,7 @@ TEST get_refuses_more_keys_than_a_request_may_carry(void)
 TEST the_live_cache_holds_every_section_the_table_has(void)
 {
 	const char *seen[RCD_LIVE_MAX * 4];
-	int n = 0;
+	int n = 0, repeats = 0;
 
 	for (int i = 0; rcd_key_at(i); i++) {
 		const rcd_key_t *k = rcd_key_at(i);
@@ -2071,11 +2235,18 @@ TEST the_live_cache_holds_every_section_the_table_has(void)
 		if (have)
 			continue;
 		ASSERT(n < (int)(sizeof(seen) / sizeof(seen[0])));
+		if (rcd_row_repeats(k->section))
+			repeats++;
 		seen[n++] = k->section;
 	}
 
 	ASSERT(n > 0);
-	ASSERT_EQm("more sections than the get cache can hold", true, n <= RCD_LIVE_MAX);
+	/* A repeat row is one section here and as many as rod draws on a
+	 * camera, so what has to fit is the table's count with that row's
+	 * worth of elements in place of the row. */
+	int worst = n - repeats + repeats * RCD_OSD_MAX;
+
+	ASSERT_EQm("more sections than the get cache can hold", true, worst <= RCD_LIVE_MAX);
 	PASS();
 }
 
@@ -4224,6 +4395,7 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(refuses_the_named_hazards);
 	RUN_TEST(keeps_credential_sections_unreadable);
 	RUN_TEST(no_credential_is_ever_readable);
+	RUN_TEST(a_repeat_row_is_served_apart_from_the_keys);
 	RUN_TEST(refuses_unlisted_actions);
 	RUN_TEST(refuses_near_misses);
 	RUN_TEST(restarting_is_rcds_own_and_says_what_it_costs);
@@ -4258,13 +4430,15 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(a_live_command_is_sent_the_field_it_asks_for);
 	RUN_TEST(a_selector_names_the_key_that_carries_it);
 	RUN_TEST(every_daynight_threshold_is_a_live_key);
-	RUN_TEST(the_four_slots_carry_the_same_keys);
-	RUN_TEST(a_slot_stands_for_the_element_the_file_has);
-	RUN_TEST(an_empty_slot_is_not_made_an_element_by_a_form_nobody_filled_in);
-	RUN_TEST(an_empty_slot_is_made_an_element_by_the_text_put_in_it);
-	RUN_TEST(the_slots_are_numbered_the_way_the_file_reads);
-	RUN_TEST(a_section_rod_would_not_draw_takes_no_slot);
-	RUN_TEST(only_the_four_ordinals_resolve);
+	RUN_TEST(an_element_carries_the_same_keys_whatever_it_is_called);
+	RUN_TEST(the_elements_are_listed_the_way_the_file_reads);
+	RUN_TEST(a_section_rod_would_not_draw_is_not_an_element);
+	RUN_TEST(a_config_with_no_elements_lists_none);
+	RUN_TEST(the_pattern_answers_with_every_element_by_name);
+	RUN_TEST(the_pattern_with_no_elements_is_not_an_error);
+	RUN_TEST(a_key_for_an_element_that_is_not_there_makes_no_element);
+	RUN_TEST(the_pattern_is_not_a_section_to_write_to);
+	RUN_TEST(an_element_the_camera_named_is_edited_under_that_name);
 	RUN_TEST(every_writable_key_has_an_owner);
 	RUN_TEST(impact_separates_the_pipeline_from_the_stream);
 	RUN_TEST(the_zone_table_is_two_arrays_of_one_length);

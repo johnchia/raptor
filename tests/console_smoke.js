@@ -248,16 +248,42 @@ const ISP_STATE = {
  * reset control are drawn on every tab rather than whichever the bench camera
  * happened to have.
  */
-/* An empty object is a slot with no element in it: every key unset. */
+/*
+ * The overlay as a camera in the field has it: elements named by whoever set
+ * the camera up, two drawn in places of their own, one switched off, and one
+ * with no text in it. Each of the four differs in what a place dropdown may
+ * offer, and a uniform fixture -- every element drawn, all of them top_left --
+ * is the one arrangement that hides that.
+ */
 const OSD_ELEMENTS = {
-	"osd.1": {template: "%time%", position: "top_left", align: "left", visible: true},
-	"osd.2": {template: "%uptime%", position: "top_right", align: "right", visible: true},
-	"osd.3": {template: "Camera", position: "bottom_left", align: "left", visible: false},
-	"osd.4": {},
+	"osd.timestamp": {template: "%time%", position: "top_left", align: "left", visible: true},
+	"osd.uptime": {template: "%uptime%", position: "top_right", align: "right", visible: true},
+	"osd.camera": {template: "Camera", position: "bottom_left", align: "left", visible: false},
+	"osd.blank": {position: "center", align: "left", visible: true},
 };
 
 function valuesFor(section) {
 	const out = [];
+
+	/*
+	 * The pattern stands for every element the config has, so one request
+	 * answers with the list and its values together -- and each value
+	 * under the name of the section it came from, not the pattern's.
+	 */
+	if (section === "osd.*") {
+		Object.keys(OSD_ELEMENTS).forEach(sec => {
+			SCHEMA.repeat_keys.forEach(k => {
+				const o = {section: sec, key: k.key};
+				const e = OSD_ELEMENTS[sec];
+
+				if (e[k.key] === undefined) o.set = false;
+				else o.value = e[k.key];
+				out.push(o);
+			});
+		});
+		return out;
+	}
+
 	SCHEMA.keys.filter(k => k.section === section).forEach((k, i) => {
 		const o = {section: k.section, key: k.key};
 		if (k.type === "credential") { o.set = true; out.push(o); return; }
@@ -286,21 +312,6 @@ function valuesFor(section) {
 		if (k.section === "osd" && k.key === "font_size") {
 			o.value = "3.6%";
 			o.source = "daemon";
-			out.push(o);
-			return;
-		}
-		/*
-		 * The overlay's four elements, as a camera in the field has
-		 * them: two drawn in places of their own, one switched off,
-		 * and a fourth slot with nothing in it at all. What a place
-		 * dropdown may offer differs in all four cases, and the
-		 * uniform fixture below -- every element drawn, all of them
-		 * top_left -- is the one arrangement that hides that.
-		 */
-		if (OSD_ELEMENTS[k.section]) {
-			const e = OSD_ELEMENTS[k.section];
-			if (e[k.key] === undefined) o.set = false;
-			else o.value = e[k.key];
 			out.push(o);
 			return;
 		}
@@ -805,65 +816,84 @@ try {
 	 * The camera draws one element in a place, so a dropdown offering a
 	 * place another element is drawn in is offering a choice that ends in
 	 * an element nobody can see -- which is how the clock disappeared off
-	 * the camera this came from. Element 1 is drawn top_left and element 2
-	 * top_right; element 3 is switched off, which holds nothing, and
-	 * element 4 is an empty slot, which holds nothing either.
+	 * the camera this came from. timestamp is drawn top_left and uptime
+	 * top_right; camera is switched off, which holds nothing, and blank
+	 * has no text in it, which holds nothing either.
 	 */
-	const placeSel = n => {
+	const placeSel = name => {
 		const row = sheet.querySelectorAll(".row")
-				 .find(r => r.dataset.id === "osd." + n + ".position");
-		if (!row) fail("the overlay tab drew no position row for element " + n);
+				 .find(r => r.dataset.id === "osd." + name + ".position");
+		if (!row) fail("the overlay tab drew no position row for " + name);
 		return row.querySelectorAll("select")[0];
 	};
 	const optFor = (sel, place) => sel.querySelectorAll("option")
 					  .find(o => o.value === place);
 
-	const two = placeSel(2);
-	if (!optFor(two, "top_left").disabled)
-		fail("element 2 was offered top_left, where element 1 is drawn");
-	if (!/Element 1/.test(optFor(two, "top_left").textContent))
-		fail("the place element 1 holds was disabled without saying whose it is");
-	if (optFor(two, "top_right").disabled)
-		fail("element 2 could not choose the place it is already drawn in");
-	if (optFor(two, "bottom_left").disabled)
-		fail("element 2 was refused bottom_left, which only a hidden element names");
-	if (optFor(two, "center").disabled)
-		fail("element 2 was refused a place nothing is drawn in");
+	const up = placeSel("uptime");
+	if (!optFor(up, "top_left").disabled)
+		fail("uptime was offered top_left, where timestamp is drawn");
+	if (!/timestamp/.test(optFor(up, "top_left").textContent))
+		fail("the place timestamp holds was disabled without saying whose it is");
+	if (optFor(up, "top_right").disabled)
+		fail("uptime could not choose the place it is already drawn in");
+	if (optFor(up, "bottom_left").disabled)
+		fail("uptime was refused bottom_left, which only a hidden element names");
+	if (optFor(up, "center").disabled)
+		fail("uptime was refused a place nothing is drawn in");
 
-	const four = placeSel(4);
-	if (!optFor(four, "top_left").disabled || !optFor(four, "top_right").disabled)
-		fail("an empty slot was offered places that are already drawn in");
+	const blank = placeSel("blank");
+	if (!optFor(blank, "top_left").disabled || !optFor(blank, "top_right").disabled)
+		fail("an element with no text was offered places that are already drawn in");
 
 	/*
-	 * And it follows the page. Switching element 1 off gives its place up,
-	 * which element 2 may then take -- without a reload, because the
-	 * operator making room is the operator about to use it.
+	 * And it follows the page. Switching timestamp off gives its place up,
+	 * which uptime may then take -- without a reload, because the operator
+	 * making room is the operator about to use it.
 	 */
-	const vis1 = sheet.querySelectorAll(".row")
-			  .find(r => r.dataset.id === "osd.1.visible")
-			  .querySelectorAll("input")[0];
-	vis1.checked = false;
-	vis1.handlers.change[0]();
+	const visStamp = sheet.querySelectorAll(".row")
+			      .find(r => r.dataset.id === "osd.timestamp.visible")
+			      .querySelectorAll("input")[0];
+	visStamp.checked = false;
+	visStamp.handlers.change[0]();
 	await settle();
-	if (optFor(placeSel(2), "top_left").disabled)
-		fail("element 1 was switched off and still held its place");
+	if (optFor(placeSel("uptime"), "top_left").disabled)
+		fail("timestamp was switched off and still held its place");
 
 	/*
 	 * A camera whose config already puts two elements in one place -- hand
 	 * written, or written by a page that did not know better -- still has
-	 * to show each of them where it is. A field that offered element 2
-	 * every place except the one it is drawn in would make moving the
-	 * other element the only way to see its own setting.
+	 * to show each of them where it is. A field that offered uptime every
+	 * place except the one it is drawn in would make moving the other
+	 * element the only way to see its own setting.
 	 */
-	p.V["osd.1.visible"] = true;
-	p.V["osd.2.position"] = "top_left";
+	p.V["osd.timestamp.visible"] = true;
+	p.V["osd.uptime.position"] = "top_left";
 	p.render();
 	await settle();
-	if (optFor(placeSel(1), "top_left").disabled ||
-	    optFor(placeSel(2), "top_left").disabled)
+	if (optFor(placeSel("timestamp"), "top_left").disabled ||
+	    optFor(placeSel("uptime"), "top_left").disabled)
 		fail("an element already drawn in a place was not shown that place");
-	if (!optFor(placeSel(4), "top_left").disabled)
-		fail("an empty slot was offered a place two elements are already in");
+	if (!optFor(placeSel("blank"), "top_left").disabled)
+		fail("an element with no text was offered a place two elements are in");
+
+	/*
+	 * The elements are the camera's own, named as its config names them
+	 * and listed in the order the file lists them -- which is the order
+	 * rod settles two of them wanting one place in, so a page showing any
+	 * other order would be describing a different camera.
+	 */
+	/* The heading carries the group's own controls too, so the name is
+	   taken from the front of it rather than the whole. */
+	const names = sheet.querySelectorAll("h3").map(h => h.textContent)
+			   .map(t => (t.match(/^(timestamp|uptime|camera|blank)/) || [])[1])
+			   .filter(Boolean);
+	if (names.join(" ") !== "timestamp uptime camera blank")
+		fail("the overlay listed its elements as " + JSON.stringify(names.join(" ")));
+	/* And the pattern is not one of them: it describes the shape of an
+	   element, and a page that rendered it would offer a form headed
+	   "osd.*" and write whatever was typed into a section nothing draws. */
+	if (p.getKeys().some(k => k.section === "osd.*"))
+		fail("the pattern was taken for a section and given keys of its own");
 
 	/*
 	 * The password key is a settings row like any other and must be drawn

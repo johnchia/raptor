@@ -114,11 +114,9 @@ static const struct {
 	{"timelapse", "rmr"},
 	{"rtsp", "rsd"},
 	{"http", "rhd"},
-	/* One per overlay element; see the [osd.*] keys below. */
-	{"osd.1", "rod"},
-	{"osd.2", "rod"},
-	{"osd.3", "rod"},
-	{"osd.4", "rod"},
+	/* Every overlay element, whatever this camera called them; see
+	 * the [osd.*] keys below. */
+	{"osd.*", "rod"},
 	{NULL, NULL},
 };
 
@@ -142,18 +140,39 @@ static const struct {
 	{"device", RCD_D_COUNT},
 	{"network", RCD_D_COUNT},
 	{"wifi", RCD_D_COUNT},
-	/* One per overlay element; see the [osd.*] keys below. */
-	{"osd.1", RCD_D_ROD},
-	{"osd.2", RCD_D_ROD},
-	{"osd.3", RCD_D_ROD},
-	{"osd.4", RCD_D_ROD},
+	/* Every overlay element, whatever this camera called them; see
+	 * the [osd.*] keys below. */
+	{"osd.*", RCD_D_ROD},
 	{NULL, RCD_D_COUNT},
 };
+
+bool rcd_row_repeats(const char *row)
+{
+	size_t n = row ? strlen(row) : 0;
+
+	return n >= 2 && strcmp(row + n - 2, ".*") == 0;
+}
+
+bool rcd_section_is(const char *row, const char *section)
+{
+	size_t n;
+
+	if (!row || !section)
+		return false;
+	if (!rcd_row_repeats(row))
+		return strcmp(row, section) == 0;
+
+	/* "osd.*" is every name under "osd." with something after the dot.
+	 * The pattern itself counts as one of them, which is what lets a
+	 * client ask about the shape without naming an element. */
+	n = strlen(row) - 1;
+	return strncmp(section, row, n) == 0 && section[n] != '\0';
+}
 
 const char *rcd_section_reader(const char *section)
 {
 	for (int i = 0; section && readable[i].section; i++) {
-		if (strcmp(section, readable[i].section) == 0)
+		if (rcd_section_is(readable[i].section, section))
 			return readable[i].daemon;
 	}
 	return NULL;
@@ -162,7 +181,7 @@ const char *rcd_section_reader(const char *section)
 rcd_daemon_t rcd_section_owner(const char *section)
 {
 	for (int i = 0; section && writable[i].section; i++) {
-		if (strcmp(section, writable[i].section) == 0)
+		if (rcd_section_is(writable[i].section, section))
 			return writable[i].owner;
 	}
 	return RCD_D_COUNT;
@@ -450,27 +469,35 @@ static const rcd_key_t keys[] = {
 	{"osd", "font_stroke", V_INT, 0, 5, NULL, SAVED},
 
 	/*
-	 * -- The first four elements of the overlay. --
+	 * -- Every element of the overlay. --
 	 *
 	 * rod's overlay is a list of elements, each named by whoever wrote the
-	 * config and placed by a `position` line -- which is the right model
-	 * for what it can draw and the wrong one for a table of keys fixed at
-	 * compile time, because nothing here can name a section a person has
-	 * not written yet.
+	 * config and placed by a `position` line. A table fixed at compile
+	 * time cannot name a section a person has not written yet, so this row
+	 * set does not try: `osd.*` stands for every [osd.<name>] the config
+	 * file has, whatever this camera called them.
 	 *
-	 * These four are ordinals into that list rather than names in it:
-	 * `osd.1` is the first [osd.*] section of the config file, whatever it
-	 * is called, and rcd_osd.h has the reasoning and what the ordinal
-	 * costs. It replaces a scheme that named the six places on the picture
-	 * and offered those as the sections, which read well and worked badly
-	 * -- a camera configured with [osd.timestamp] and [osd.uptime] drew two
-	 * elements no client could reach, beside six corners that were empty
-	 * because nothing had ever been in them.
+	 * The split that makes that work is worth stating. What keys an
+	 * element has is compile-time and the same on every camera ever built
+	 * -- these four, with these types and these choices. Which elements
+	 * exist is the config file, and a client asks for that the way it asks
+	 * for anything else the file holds: `get` on the pattern, which
+	 * answers one set of values per element. So the table served by
+	 * `schema` stays identical across cameras with this build, and `rev`
+	 * goes on meaning what it says.
 	 *
-	 * `position` is therefore a key here, and the value it always was to
-	 * rod. Its choices are rod's seven place names and not a pixel pair:
-	 * rod reads `x,y` too, and a coordinate is a value somebody gets wrong
-	 * with nothing to say so until they look at the video.
+	 * It replaces ordinals -- `osd.1` for the first section of the file,
+	 * whatever it was called -- which in turn replaced a scheme that named
+	 * the six places on the picture. Both failed the same way, by
+	 * addressing an element as something other than itself: the places
+	 * could not reach [osd.timestamp] at all, and the ordinals moved under
+	 * a client when a section was added above them, and neither could say
+	 * that a slot was empty because there was nothing there to be empty.
+	 *
+	 * `position` is a key here, and the value it always was to rod. Its
+	 * choices are rod's seven place names and not a pixel pair: rod reads
+	 * `x,y` too, and a coordinate is a value somebody gets wrong with
+	 * nothing to say so until they look at the video.
 	 *
 	 * A template is the one value in this table that a person composes
 	 * rather than chooses, so it is the widest grammar here -- V_TEXT, the
@@ -480,35 +507,16 @@ static const rcd_key_t keys[] = {
 	 * own limit is longer -- a template past it is still settable by hand
 	 * and through rod's `set-element`.
 	 *
-	 * Spelled out four times rather than expanded from a macro, because a
-	 * macro here formats badly enough to be worth avoiding and the four
-	 * are meant to be greppable by section name. What keeps them identical
-	 * is a test that walks them, which a macro could not have caught
-	 * anyway: the drift that matters is one slot gaining a key the others
-	 * lack.
-	 *
 	 * What an element is, and not how it is drawn: the type is the
 	 * overlay's and is set once in [osd]. rod reads a per-element
 	 * `font_size` and `max_chars` and honours both, and they stay
-	 * hand-edited -- four copies of a size that is meant to match is a way
-	 * to end up with four sizes that do not.
+	 * hand-edited -- a size that is meant to match every element is worse
+	 * off spelled out once per element.
 	 */
-	{"osd.1", "template", V_TEXT, 0, 71, NULL, SAVED},
-	{"osd.1", "position", V_ENUM, 0, 0, choices_position, SAVED},
-	{"osd.1", "align", V_ENUM, 0, 0, choices_align, SAVED},
-	{"osd.1", "visible", V_BOOL, 0, 0, NULL, SAVED},
-	{"osd.2", "template", V_TEXT, 0, 71, NULL, SAVED},
-	{"osd.2", "position", V_ENUM, 0, 0, choices_position, SAVED},
-	{"osd.2", "align", V_ENUM, 0, 0, choices_align, SAVED},
-	{"osd.2", "visible", V_BOOL, 0, 0, NULL, SAVED},
-	{"osd.3", "template", V_TEXT, 0, 71, NULL, SAVED},
-	{"osd.3", "position", V_ENUM, 0, 0, choices_position, SAVED},
-	{"osd.3", "align", V_ENUM, 0, 0, choices_align, SAVED},
-	{"osd.3", "visible", V_BOOL, 0, 0, NULL, SAVED},
-	{"osd.4", "template", V_TEXT, 0, 71, NULL, SAVED},
-	{"osd.4", "position", V_ENUM, 0, 0, choices_position, SAVED},
-	{"osd.4", "align", V_ENUM, 0, 0, choices_align, SAVED},
-	{"osd.4", "visible", V_BOOL, 0, 0, NULL, SAVED},
+	{"osd.*", "template", V_TEXT, 0, 71, NULL, SAVED},
+	{"osd.*", "position", V_ENUM, 0, 0, choices_position, SAVED},
+	{"osd.*", "align", V_ENUM, 0, 0, choices_align, SAVED},
+	{"osd.*", "visible", V_BOOL, 0, 0, NULL, SAVED},
 
 	/* -- Day/night: how the board is wired, and what nightfall is. -- */
 	{"ircut", "enabled", V_BOOL, 0, 0, NULL, SAVED},
@@ -791,7 +799,7 @@ const rcd_key_t *rcd_key_find(const char *section, const char *key)
 	if (!section || !key)
 		return NULL;
 	for (int i = 0; keys[i].section; i++) {
-		if (strcmp(keys[i].section, section) == 0 && strcmp(keys[i].key, key) == 0)
+		if (rcd_section_is(keys[i].section, section) && strcmp(keys[i].key, key) == 0)
 			return &keys[i];
 	}
 	return NULL;
@@ -1159,10 +1167,19 @@ static void emit_action(cJSON *arr, const rcd_action_t *a)
 void rcd_schema_emit(cJSON *out, const char *section_filter)
 {
 	cJSON *karr = cJSON_AddArrayToObject(out, "keys");
-	for (int i = 0; karr && keys[i].section; i++) {
-		if (section_filter && strcmp(section_filter, keys[i].section) != 0)
+	/*
+	 * A repeat row describes a shape rather than a section, so it goes in
+	 * a field of its own: a client that renders `keys` straight into forms
+	 * would otherwise draw one headed "osd.*" and let somebody fill it in.
+	 * Built whether or not there are any, so a client can tell an old
+	 * daemon from one with no repeat rows left.
+	 */
+	cJSON *rarr = cJSON_AddArrayToObject(out, "repeat_keys");
+
+	for (int i = 0; karr && rarr && keys[i].section; i++) {
+		if (section_filter && !rcd_section_is(keys[i].section, section_filter))
 			continue;
-		emit_key(karr, &keys[i]);
+		emit_key(rcd_row_repeats(keys[i].section) ? rarr : karr, &keys[i]);
 	}
 
 	/* Actions belong to no section, so a filtered schema leaves them out

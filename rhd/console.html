@@ -464,28 +464,32 @@ const L = {
 ["width","height","codec","profile","rc_mode","bitrate","gop","fps","osd_enabled","jpeg"]
   .forEach(k => { if (L["stream0." + k]) L["stream1." + k] = L["stream0." + k]; });
 
-/* The four elements take the same four keys, so they take the same four
-   labels. Written once for the same reason the schema pins them equal. */
-const SLOTS = [1, 2, 3, 4];
-SLOTS.forEach(n => {
-  L["osd." + n + ".template"] =
-    ["Text","","Empty draws nothing, and leaves the element where it is."];
-  L["osd." + n + ".position"] = ["Position","",
-    "Where on the picture it sits. The camera draws one element to a place, " +
-    "so a place another element is already drawn in is offered but cannot be " +
-    "chosen until that one moves or is switched off."];
-  L["osd." + n + ".align"] = ["Align","","Which way the text grows as it gets longer."];
-  L["osd." + n + ".visible"] = ["Show","","Keeps the text but stops drawing it."];
-});
+/* Every element takes the same four keys, so they take the same four labels.
+   Written under the pattern the schema uses and reached through it, because
+   an element is called whatever this camera called it. */
+const OSD_PATTERN = "osd.*";
+L["osd.*.template"] = ["Text","","Empty draws nothing, and leaves the element where it is."];
+L["osd.*.position"] = ["Position","",
+  "Where on the picture it sits. The camera draws one element to a place, " +
+  "so a place another element is already drawn in is offered but cannot be " +
+  "chosen until that one moves or is switched off."];
+L["osd.*.align"] = ["Align","","Which way the text grows as it gets longer."];
+L["osd.*.visible"] = ["Show","","Keeps the text but stops drawing it."];
 
 const pretty = s => s.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
 /* A section name may hold a dot ([osd.top_left]) and a key name never does,
    so an id splits at its last one. */
 const sect_of = id => id.slice(0, id.lastIndexOf("."));
 const key_of  = id => id.slice(id.lastIndexOf(".") + 1);
-const label = id => (L[id] && L[id][0]) || pretty(key_of(id));
-const unit  = id => (L[id] && L[id][1]) || "";
-const help  = id => (L[id] && L[id][2]) || "";
+/* An element's keys are labelled under the pattern: "osd.timestamp.position"
+   is looked up as "osd.*.position", because the name is the camera's and the
+   label is this page's. */
+const isElement = sec => sec.startsWith("osd.") && sec !== "osd";
+const labels_of = id => L[id] ||
+  (isElement(sect_of(id)) ? L[OSD_PATTERN + "." + key_of(id)] : null);
+const label = id => (labels_of(id) || [])[0] || pretty(key_of(id));
+const unit  = id => (labels_of(id) || [])[1] || "";
+const help  = id => (labels_of(id) || [])[2] || "";
 
 /* Which sections sit on which page, and in what order. Sections the schema
  * reports that no tab claims are collected onto a final page, so a new one
@@ -521,23 +525,25 @@ const TABS = [
  {id:"services",name:"Services",    groups:[{title:"RTSP", section:"rtsp"},
                                             {title:"Snapshots & MJPEG", section:"http"}]},
  /*
-  * The overlay is its own page: what it draws is four independent elements
-  * plus the type they share, which is more than fits beside the servers it
-  * used to sit with. The four groups are built rather than written out --
-  * they differ in nothing but which element they are, and the schema pins
-  * them equal.
+  * The overlay is its own page: what it draws is a list of independent
+  * elements plus the type they share, which is more than fits beside the
+  * servers it used to sit with.
   *
-  * An element is the camera's own, in the order its config lists them, so
-  * what these edit is whatever this camera was set up to draw rather than a
-  * fixed set of corners. Elements past the fourth are still drawn and are
-  * hand-edited; see rcd_osd.h.
+  * Its groups are a getter rather than an array, because how many there are
+  * is this camera's answer and not this file's: one per [osd.<name>] the
+  * config has, named as the config names it, in the order it lists them --
+  * which is also the order rod settles two elements wanting one place in.
+  * They differ in nothing but which element they are, and the schema's one
+  * row set pins them equal.
   */
  {id:"overlay", name:"Overlay",
-  groups:[{title:"Overlay", section:"osd",
-           note:"One typeface and one size for every element. Any element's text may hold %time%, %uptime%, %hostname%, %ip%, %ae_luma%, %total_gain% or %soc_temp%, each replaced as it is drawn; long text is cut off at the width the element reserves."}]
-          .concat(SLOTS.map(n => ({title:"Element " + n, section:"osd." + n})))
-          .concat([{title:"Actions", actions:["osd-enable","osd-disable"],
-                    note:"Stops and resumes drawing. Persists nothing — a reboot restores what is configured here."}])}
+  get groups() {
+    return [{title:"Overlay", section:"osd",
+             note:"One typeface and one size for every element. Any element's text may hold %time%, %uptime%, %hostname%, %ip%, %ae_luma%, %total_gain% or %soc_temp%, each replaced as it is drawn; long text is cut off at the width the element reserves."}]
+      .concat(ELEMENTS.map(sec => ({title: sec.slice(4), section: sec})))
+      .concat([{title:"Actions", actions:["osd-enable","osd-disable"],
+                note:"Stops and resumes drawing. Persists nothing — a reboot restores what is configured here."}]);
+  }}
 ];
 const ACTION_UI = {
  "request-idr":{label:"Force a keyframe"},
@@ -561,6 +567,18 @@ const CONFIRM_MS = 5000;
 
 /* ═══ live model ═════════════════════════════════════════════════════════ */
 let KEYS = [];            /* the schema, as served */
+/*
+ * The shape of one overlay element, and which of them this camera has.
+ *
+ * The schema is the same on every camera with this build -- these four keys,
+ * these types, these choices -- and says nothing about how many elements
+ * there are or what they are called. That is the config file, and it arrives
+ * the way anything else in the file does, through `get`. KEYS gains a row per
+ * element per repeat row once both halves are in, and from there an element's
+ * keys are keys like any other.
+ */
+let REPEAT = [];
+let ELEMENTS = [];
 let ACTIONS = [];
 /*
  * What the camera says an action's state is, for the few that have one.
@@ -903,7 +921,10 @@ async function commit(id, val, el) {
   V[id] = val;
   /* A place taken or given up changes what the other elements may choose --
      including by a slot becoming an element, which is what text in it does. */
-  if (/^osd\.[1-9]\.(position|visible|template)$/.test(id)) refreshPlaces();
+  /* What an element draws and where it draws it decides what the other
+     elements may be moved to, so the dropdowns are told rather than redrawn. */
+  if (isElement(sect_of(id)) && ["position", "visible", "template"].includes(key_of(id)))
+    refreshPlaces();
   /* Typing into a field the operator has just asked to put back means they
      changed their mind about the reset, not that they want both. */
   RESET.delete(id);
@@ -1104,8 +1125,8 @@ function buildControl(id, onChange) {
         const op = document.createElement("option"); op.value = op.textContent = o;
         if (cur === o) op.selected = true; s.append(op);
       });
-      const slot = placeSlotOf(k);
-      if (slot) { placeFields[slot] = s; markPlaces(s, slot); }
+      const place = placeSectOf(k);
+      if (place) { placeFields[place] = s; markPlaces(s, place); }
       s.addEventListener("change", () => send(s.value));
       wrap.append(s); return wrap;
     }
@@ -1368,68 +1389,62 @@ function chip(k) {
  * draw is a worse answer than a choice this page would not offer. So a place
  * another element holds is drawn disabled, named for the element holding it.
  *
- * Only the four elements this page reaches can be seen from here. A camera
- * with more of them hand-edited into its config still has rod to arbitrate,
- * and rod says in the log which element lost a place and where.
+ * Every element this camera has is on the page, so every one of them can be
+ * seen from here -- and rod still arbitrates, and still says in the log which
+ * element lost a place and where.
  */
-const OSD_KEYS = ["template", "position", "align", "visible"];
 
 /*
- * Whether a slot has an element in it that is drawn. An empty slot holds no
- * place -- there is nothing in it until somebody puts text there, which is
- * what makes the element -- and neither does one switched off, which is the
- * whole of the [osd.4] business this came from.
+ * Whether an element is drawn. One switched off holds no place, and neither
+ * does one with no text in it: text is the whole of what a text element
+ * draws, which rod settles the same way.
  */
-function slotDraws(n) {
-  const has = OSD_KEYS.some(key => V["osd." + n + "." + key] !== undefined);
-  return has && V["osd." + n + ".visible"] !== false;
+function elemDraws(sec) {
+  return V[sec + ".visible"] !== false && !!V[sec + ".template"];
 }
 
 /* Which element is drawn in each place, leaving out the one doing the asking. */
 function placeOwners(except) {
   const owners = {};
-  SLOTS.forEach(n => {
-    if (n === except || !slotDraws(n)) return;
-    const p = V["osd." + n + ".position"];
+  ELEMENTS.forEach(sec => {
+    if (sec === except || !elemDraws(sec)) return;
+    const p = V[sec + ".position"];
     /* The first element in the file has the place, which is rod's rule and
        so the one to name here. */
-    if (typeof p === "string" && p && !owners[p]) owners[p] = n;
+    if (typeof p === "string" && p && !owners[p]) owners[p] = sec;
   });
   return owners;
 }
 
-/* The element a position key belongs to, or 0 for every other key. */
-const placeSlotOf = k => (k && k.key === "position" && /^osd\.[1-9]$/.test(k.section)
-                          ? Number(k.section.slice(4)) : 0);
+/* The element a position key belongs to, or "" for every other key. */
+const placeSectOf = k => (k && k.key === "position" && isElement(k.section) ? k.section : "");
 
 /* What a place dropdown offers, given who holds what. A place is never taken
  * away from the element standing in it: where two already overlap -- a config
  * written by hand, or by a page that did not know better -- the field has to
  * go on showing what the file says, or moving the other one out of the way
  * would be the only way to see it. */
-function markPlaces(sel, slot) {
-  const owners = placeOwners(slot);
-  const mine = V["osd." + slot + ".position"];
+function markPlaces(sel, sec) {
+  const owners = placeOwners(sec);
+  const mine = V[sec + ".position"];
 
   sel.querySelectorAll("option").forEach(op => {
     const owner = owners[op.value];
-    op.textContent = owner ? op.value + " \u2014 Element " + owner : op.value;
+    op.textContent = owner ? op.value + " \u2014 " + owner.slice(4) : op.value;
     op.disabled = !!owner && op.value !== mine;
   });
 }
 
 /* The place dropdowns on the page now, by element. Kept as they are built
- * rather than looked up again: a place moving has to reach the other three,
- * and the row it has to reach them through is one this page made. */
+ * rather than looked up again: a place moving has to reach the others, and
+ * the row it has to reach them through is one this page made. */
 const placeFields = {};
 
 /* The dropdowns already drawn, after one of the places moved. Applied to them
  * rather than by redrawing the page, which would take it out from under
  * whoever is typing in the next field. */
 function refreshPlaces() {
-  SLOTS.forEach(n => {
-    if (placeFields[n]) markPlaces(placeFields[n], n);
-  });
+  Object.keys(placeFields).forEach(sec => markPlaces(placeFields[sec], sec));
 }
 
 function buildRow(id) {
@@ -1665,7 +1680,7 @@ function render() {
   const sheet = document.getElementById("sheet");
   sheet.textContent = "";
   /* The rows about to be thrown away take their place dropdowns with them. */
-  SLOTS.forEach(n => delete placeFields[n]);
+  Object.keys(placeFields).forEach(sec => delete placeFields[sec]);
   const tab = TABS.find(t => t.id === active);
 
   /*
@@ -2255,39 +2270,69 @@ function banner(title, detail) {
   sheet.append(b);
 }
 
+/*
+ * Which elements this camera draws, with their values, in one request.
+ *
+ * The pattern the schema publishes stands for every [osd.<name>] section the
+ * config has, so this is both halves of the question -- the list and what is
+ * in it -- and the reply is in the file's own order. Runs before the values
+ * below, because the rows it adds to KEYS are what those are keyed on.
+ */
+async function loadElements() {
+  ELEMENTS = [];
+  let r;
+  try { r = await api({cmd:"get", section: OSD_PATTERN}, true); } catch (e) { return; }
+  (r.values || []).forEach(v => {
+    if (v.section && !ELEMENTS.includes(v.section)) ELEMENTS.push(v.section);
+  });
+  ELEMENTS.forEach(sec => REPEAT.filter(usable).forEach(k => {
+    const row = Object.assign({}, k, {section: sec});
+    KEYS.push(row);
+    byId[id_of(row)] = row;
+  }));
+  absorb(r.values || []);
+}
+
 async function loadValues() {
-  const sections = [...new Set(KEYS.map(k => k.section))];
+  /* The elements answered for themselves, in one request, above. */
+  const sections = [...new Set(KEYS.map(k => k.section))].filter(s => !ELEMENTS.includes(s));
   /* One request per section, not one carrying every key: rcd asks the owning
    * daemon once per section, and a single hundred-key request would make it
    * open the daemon socket a hundred times. */
   for (const sec of sections) {
     let r;
     try { r = await api({cmd:"get", section: sec}, true); } catch (e) { continue; }
-    (r.values || []).forEach(v => {
-      const id = v.section + "." + v.key;
-      if (!byId[id]) return;
-      /* A secret is reported without its value. `configured` is the bit a
-         form needs -- whether there is one to change -- and is present only
-         where a store can be asked; `set` is what an older rcd said. */
-      if (byId[id].type === "credential" || byId[id].type === "password") {
-        CREDSET[id] = v.configured === true || v.set === true;
-        return;
-      }
-      if (v.set === false || v.value === undefined || v.value === null) {
-        DEFAULTED.add(id);
-        /* Nobody has ever set it and no daemon answered for it, so its value
-         * is whatever the daemon's own default turns out to be. Drawing a
-         * switch here would claim "off" about something that may well be on,
-         * which is exactly what [rtsp] did before rcd would answer for it. */
-        UNSET.add(id);
-        return;
-      }
-      UNSET.delete(id);
-      if (v.configured === false) DEFAULTED.add(id); else DEFAULTED.delete(id);
-      V[id] = v.value;
-      SAVED[id] = v.value;
-    });
+    absorb(r.values || []);
   }
+}
+
+/* What a `get` reply leaves behind. Shared by both of the calls above, which
+   ask different questions and get the same shape of answer back. */
+function absorb(values) {
+  values.forEach(v => {
+    const id = v.section + "." + v.key;
+    if (!byId[id]) return;
+    /* A secret is reported without its value. `configured` is the bit a
+       form needs -- whether there is one to change -- and is present only
+       where a store can be asked; `set` is what an older rcd said. */
+    if (byId[id].type === "credential" || byId[id].type === "password") {
+      CREDSET[id] = v.configured === true || v.set === true;
+      return;
+    }
+    if (v.set === false || v.value === undefined || v.value === null) {
+      DEFAULTED.add(id);
+      /* Nobody has ever set it and no daemon answered for it, so its value
+       * is whatever the daemon's own default turns out to be. Drawing a
+       * switch here would claim "off" about something that may well be on,
+       * which is exactly what [rtsp] did before rcd would answer for it. */
+      UNSET.add(id);
+      return;
+    }
+    UNSET.delete(id);
+    if (v.configured === false) DEFAULTED.add(id); else DEFAULTED.delete(id);
+    V[id] = v.value;
+    SAVED[id] = v.value;
+  });
 }
 
 async function loadPending() {
@@ -2447,6 +2492,15 @@ async function boot() {
   const dropped = all.length - KEYS.length;
   if (dropped) wlog("sys", dropped + " keys hidden: not on this SoC or daemon not installed");
   KEYS.forEach(k => byId[id_of(k)] = k);
+  /*
+   * A repeat row is the shape of a section rather than one, and describes as
+   * many as this camera's config named -- so it takes a second question to
+   * turn into keys, and that question is the config file. Asked here, before
+   * the tabs are counted and before the other values are fetched, because
+   * both of those are drawn from KEYS.
+   */
+  REPEAT = s.repeat_keys || [];
+  await loadElements();
   learnImpacts();
 
   /* Any section no tab claims still gets a page, so a key added to rcd cannot
