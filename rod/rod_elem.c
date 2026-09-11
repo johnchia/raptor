@@ -343,6 +343,14 @@ static bool elem_draws(const rod_element_t *e, int s)
 		return false;
 	if (e->sub_streams_only && s == 0)
 		return false;
+	/* Text is the whole of what a text element draws, so one with none is
+	 * one switched off -- and an element with nothing in it is how a place
+	 * ends up held by something invisible. The other types keep their
+	 * buffers empty on purpose: a receipt fills as lines arrive, and an
+	 * overlay is drawn into from outside. An image with no bitmap takes
+	 * nothing either, which create_elem_shm settles by size. */
+	if (e->type == ROD_ELEM_TEXT && !e->tmpl[0])
+		return false;
 	return true;
 }
 

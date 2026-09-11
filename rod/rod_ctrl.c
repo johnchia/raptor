@@ -331,6 +331,9 @@ static int handle_set_element(rod_state_t *st, const char *cmd_json, char *resp,
 		rss_strlcpy(e->tmpl, val, sizeof(e->tmpl));
 		e->last_expanded[0] = '\0';
 		mark_element_dirty(e, st->stream_count);
+		/* Emptying a text element is switching it off, and filling one
+		 * is switching it on, so both change what has a buffer. */
+		rod_sync_shms(st);
 	}
 
 	if (rss_json_get_str(cmd_json, "position", val, sizeof(val)) == 0) {

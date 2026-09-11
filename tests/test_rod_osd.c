@@ -69,6 +69,8 @@ static void setup(void)
 	forget("logo");
 	forget("first");
 	forget("second");
+	forget("blank");
+	forget("words");
 	st.stream_count = 2;
 	st.stream_w[0] = 320;
 	st.stream_h[0] = 240;
@@ -88,6 +90,26 @@ static void teardown(void)
 static void element(const char *name, const char *position)
 {
 	rod_add_element(&st, name, ROD_ELEM_OVERLAY, "", position, 0, 0, 20, ROD_UPDATE_TICK);
+}
+
+/*
+ * A text element, whose buffer is a character count times the font metrics --
+ * so a font stands in, metrics only, which is all the sizing reads. Without
+ * one no text element gets a buffer at all and the question these ask cannot
+ * be put.
+ */
+static void text_element(const char *name, const char *position, const char *tmpl)
+{
+	rod_add_element(&st, name, ROD_ELEM_TEXT, tmpl, position, 0, 0, 20, ROD_UPDATE_TICK);
+
+	rod_element_t *e = rod_find_element(&st, name);
+	if (!e)
+		return;
+	for (int s = 0; s < st.stream_count; s++) {
+		st.fonts[s][0].max_text_width = 240;
+		st.fonts[s][0].text_height = 16;
+		e->streams[s].font_idx = 0;
+	}
 }
 
 /* rvd's question, asked the way rvd asks it. */
@@ -176,6 +198,68 @@ TEST a_sub_only_element_takes_nothing_from_the_main_stream(void)
 
 	ASSERT(!has_buffer("logo", 0));
 	ASSERT(has_buffer("logo", 1));
+
+	teardown();
+	PASS();
+}
+
+/*
+ * A text element with no text is one of these in every way but the one that
+ * matters: it is active, it is visible, and a form that offers a place and an
+ * alignment makes one the moment somebody presses Apply. What it draws is
+ * nothing, so what it may hold is nothing -- or an empty element is a way to
+ * blank a drawn one without ever seeing what did it.
+ */
+TEST an_element_with_no_text_holds_nothing(void)
+{
+	setup();
+	text_element("blank", "top_left", "");
+	rod_sync_shms(&st);
+
+	ASSERTm("an element with nothing to draw reserved a region", !has_buffer("blank", 0));
+	ASSERT(!has_buffer("blank", 1));
+
+	teardown();
+	PASS();
+}
+
+/* And it is not holding the place either -- the element that does draw there
+ * draws, whichever of the two the file lists first. */
+TEST an_element_with_no_text_leaves_the_place_to_one_that_draws(void)
+{
+	setup();
+	text_element("blank", "top_left", "");
+	element("clock", "top_left");
+	rod_sync_shms(&st);
+
+	ASSERTm("an empty element kept a place it draws nothing in", has_buffer("clock", 0));
+	ASSERT(has_buffer("clock", 1));
+
+	teardown();
+	PASS();
+}
+
+/* Text arriving is the element arriving: `set-element template` on an empty
+ * one is what the console's Apply comes to, and what it leaves behind has to
+ * be drawn. */
+TEST text_put_into_an_empty_element_gives_it_a_buffer(void)
+{
+	setup();
+	text_element("words", "bottom_left", "");
+	rod_sync_shms(&st);
+	ASSERT(!has_buffer("words", 0));
+
+	rss_strlcpy(rod_find_element(&st, "words")->tmpl, "%time%", ROD_TMPL_LEN);
+	rod_sync_shms(&st);
+
+	ASSERTm("text put into an element did not get it drawn", has_buffer("words", 0));
+	ASSERT(has_buffer("words", 1));
+
+	/* And taking the text away takes the buffer with it. */
+	rod_find_element(&st, "words")->tmpl[0] = '\0';
+	rod_sync_shms(&st);
+	ASSERT(!has_buffer("words", 0));
+	ASSERT(!has_buffer("words", 1));
 
 	teardown();
 	PASS();
@@ -297,6 +381,9 @@ SUITE(rod_osd_suite)
 	RUN_TEST(a_hidden_element_holds_no_buffer);
 	RUN_TEST(hiding_an_element_gives_its_buffer_back);
 	RUN_TEST(a_sub_only_element_takes_nothing_from_the_main_stream);
+	RUN_TEST(an_element_with_no_text_holds_nothing);
+	RUN_TEST(an_element_with_no_text_leaves_the_place_to_one_that_draws);
+	RUN_TEST(text_put_into_an_empty_element_gives_it_a_buffer);
 	RUN_TEST(two_elements_in_one_place_leave_the_later_one_without_a_buffer);
 	RUN_TEST(elements_in_places_of_their_own_all_draw);
 	RUN_TEST(an_element_that_got_no_buffer_does_not_keep_the_place);
