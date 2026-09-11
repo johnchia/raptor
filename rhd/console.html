@@ -2190,7 +2190,7 @@ function startPreview(retrying) {
     previewTimer = setTimeout(() => startPreview(true), PREVIEW_RETRY_MS);
   };
   /* Cache-buster: a restarted pipeline serves a new stream on the same URL. */
-  const n = previewStream();
+  const n = previewShown = previewStream();
   cam.src = "/mjpeg?stream=" + n + "&t=" + Date.now();
 
   document.getElementById("tagL").textContent =
@@ -2202,12 +2202,17 @@ function startPreview(retrying) {
   pick.title = "Show the " + (n === 0 ? "sub" : "main") + " stream";
 }
 /* The sub-stream when there is one: the preview should not cost the main
- * stream's bitrate on every open page. Whoever asked for the other one
- * has it until they ask again. */
-let previewPick = null;
+ * stream's bitrate on every open page. Looking closer -- zoomed in, or
+ * over the whole window -- is what the main stream's pixels are for, so
+ * it is shown then, and the sub again only when the view is back to the
+ * fit and shrunk. Whoever asked for the other one has it until they ask
+ * again or the view changes state, whichever is first: a choice made
+ * about a fitted picture says nothing about a zoomed one. */
+let previewPick = null, previewShown = null;
 function previewStream() {
   const streams = previewStreams();
   if (previewPick !== null && streams.includes(previewPick)) return previewPick;
+  if (viewActive() && streams.includes(0)) return 0;
   return streams.includes(1) ? 1 : 0;
 }
 /* The streams a JPEG can be had from. Without one there is nothing to show
@@ -2227,6 +2232,12 @@ function previewStreams() {
    scene, and looking at a corner of the sub is looking at that corner. */
 const VIEW = {s: 1, x: 0, y: 0};
 const VIEW_MAX = 8;
+let viewWasActive = false;
+
+/* Zoomed in or expanded: the view is being looked at, not glanced at. */
+function viewActive() {
+  return VIEW.s > 1 || document.getElementById("screen").classList.contains("big");
+}
 
 function viewApply() {
   const screen = document.getElementById("screen");
@@ -2240,6 +2251,16 @@ function viewApply() {
   const fit = document.getElementById("camFit");
   fit.hidden = !zoomed;
   fit.textContent = zoomed ? VIEW.s.toFixed(1).replace(/\.0$/, "") + "× · fit" : "fit";
+  viewSync();
+}
+
+/* The stream follows the view. A change of state forgets a choice made in
+ * the other one; the picture is re-attached only when the stream it
+ * wants is not the one showing. */
+function viewSync() {
+  const act = viewActive();
+  if (act !== viewWasActive) { viewWasActive = act; previewPick = null; }
+  if (previewShown !== null && previewStream() !== previewShown) startPreview();
 }
 
 /* Keep every edge of the picture at or past the box's: a box showing its

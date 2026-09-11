@@ -1132,7 +1132,8 @@ try {
 	 * The viewer. The wheel zooms about the pointer and a drag moves the
 	 * picture, and neither ever shows the box behind it; the other stream
 	 * is a button away and named for where it goes; the expanded box is
-	 * the same box, and Escape leaves it.
+	 * the same box, and Escape leaves it. Looking closer shows the main
+	 * stream, and the sub comes back only at the fit, shrunk.
 	 */
 	{
 		const screen = nodes.screen, cam = nodes.cam;
@@ -1159,6 +1160,17 @@ try {
 		if (!screen.classList.contains("zoomed") || fit.hidden || !/2\.7× · fit/.test(fit.textContent))
 			fail("a zoomed picture did not say so: " + JSON.stringify(fit.textContent) +
 			     " hidden=" + fit.hidden + " class=" + screen.className);
+		if (!/stream=0/.test(cam.src) || !/· main ·/.test(nodes.tagL.textContent) || pick.textContent !== "sub")
+			fail("zooming in did not go to the main stream: src=" + cam.src + " tag=" +
+			     nodes.tagL.textContent + " pick=" + pick.textContent);
+		/* Asking for the sub while zoomed is honoured, for as long as the
+		 * picture stays zoomed. */
+		const src0 = cam.src;
+		pick.handlers.click[0]();
+		if (!/stream=1/.test(cam.src)) fail("the sub could not be asked for while zoomed: " + cam.src);
+		screen.handlers.wheel[0](ev(160, 90, {deltaY: -100}));
+		if (!/stream=1/.test(cam.src)) fail("zooming further forgot the sub that was asked for: " + cam.src);
+		void src0;
 
 		const x0 = V.x, y0 = V.y;
 		screen.handlers.pointerdown[0](ev(100, 100));
@@ -1182,13 +1194,18 @@ try {
 		if (V.s !== 1 || V.x !== 0 || V.y !== 0 || cam.style.transform !== "")
 			fail("wheeling out did not come back to the fit: " + JSON.stringify(V));
 		if (screen.classList.contains("zoomed") || !fit.hidden) fail("a fitted picture still says zoomed");
+		if (!/stream=1/.test(cam.src)) fail("the fit did not come back to the sub: " + cam.src);
 		screen.handlers.pointerdown[0](ev(100, 100));
 		if (screen.classList.contains("dragging")) fail("a press on the fitted picture took hold");
 
+		/* And zooming in again is a new look: the main, whatever was
+		 * asked for last time. */
 		screen.handlers.dblclick[0](ev(0, 0));
 		if (V.s !== 2 || V.x !== 0 || V.y !== 0) fail("a double click did not zoom 2x on the corner: " + JSON.stringify(V));
+		if (!/stream=0/.test(cam.src)) fail("zooming in again kept the sub asked for last time: " + cam.src);
 		fit.handlers.click[0]();
 		if (V.s !== 1 || cam.style.transform !== "") fail("fit did not fit");
+		if (!/stream=1/.test(cam.src)) fail("fit did not come back to the sub: " + cam.src);
 
 		/* Both streams are on in the fixture, so the sub shows first and
 		 * the button offers the main. */
@@ -1212,14 +1229,22 @@ try {
 		p.V["stream1.enabled"] = true;
 		p.startPreview();
 
+		/* Expanding at the fit is looking closer too: the main, even
+		 * though the sub was the one asked for a moment ago. */
 		big.handlers.click[0]();
 		if (!screen.classList.contains("big") || big.textContent !== "shrink")
 			fail("expand did not expand: " + screen.className + " " + big.textContent);
 		if (!root.classList.contains("big")) fail("the page kept scrolling under the expanded picture");
+		if (!/stream=0/.test(cam.src)) fail("expanding did not go to the main stream: " + cam.src);
+		/* Zooming inside the expanded box and back out is not leaving it. */
+		screen.handlers.wheel[0](ev(160, 90, {deltaY: -100}));
+		screen.handlers.wheel[0](ev(160, 90, {deltaY: 5000}));
+		if (!/stream=0/.test(cam.src)) fail("fitting inside the expanded box let go of the main: " + cam.src);
 		document.handlers.keydown[0]({key: "Escape"});
 		if (root.classList.contains("big")) fail("the page did not get its scroll back");
 		if (screen.classList.contains("big") || big.textContent !== "expand")
 			fail("Escape did not leave the expanded picture: " + screen.className + " " + big.textContent);
+		if (!/stream=1/.test(cam.src)) fail("shrinking did not come back to the sub: " + cam.src);
 	}
 
 	/*
@@ -1261,5 +1286,5 @@ try {
 		    "day/night override wired, image knobs on the camera's own " +
 		    "ranges, " + live_reset + " reset live and " + staged_reset +
 		    " staged, " + served + " requests served, viewer zooms, pans, " +
-		    "switches and expands, claim card drawn");
+		    "switches and expands and the stream follows, claim card drawn");
 })();
