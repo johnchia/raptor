@@ -213,6 +213,28 @@ void rod_remove_element(rod_state_t *st, const char *name)
 	}
 }
 
+/*
+ * The first named place no element is at. A hidden element counts: it comes
+ * back to its place when shown. One at coordinates holds no named place.
+ */
+bool rod_free_place(const rod_state_t *st, char *out, size_t outsz)
+{
+	for (int p = 0;; p++) {
+		const char *name = rod_place_name(p);
+		bool held = false;
+
+		if (!name)
+			return false;
+		for (int i = 0; i < st->elem_count && !held; i++)
+			held = st->elements[i].active &&
+			       strcmp(st->elements[i].position, name) == 0;
+		if (!held) {
+			rss_strlcpy(out, name, outsz);
+			return true;
+		}
+	}
+}
+
 /* ── Element state helpers ── */
 
 void mark_all_dirty(rod_state_t *st)

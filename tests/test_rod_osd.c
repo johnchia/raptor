@@ -372,6 +372,51 @@ TEST a_place_falls_to_the_next_element_when_the_first_gives_it_up(void)
 	PASS();
 }
 
+/* A new element is offered the first place nothing is at, in the order the
+ * places are listed -- a hidden element holding one included, since showing
+ * it puts it back there. */
+TEST a_new_element_is_offered_a_place_nothing_is_at(void)
+{
+	char place[32];
+
+	setup();
+	element("clock", "top_left");
+	element("spare", "top_center");
+	ASSERT(rod_free_place(&st, place, sizeof(place)));
+	ASSERT_STR_EQ("top_right", place);
+
+	element("logo", "top_right");
+	rod_find_element(&st, "logo")->visible = false;
+	ASSERT(rod_free_place(&st, place, sizeof(place)));
+	ASSERT_STR_EQ("bottom_left", place);
+
+	/* One taken away gives its place back. */
+	rod_remove_element(&st, "spare");
+	ASSERT(rod_free_place(&st, place, sizeof(place)));
+	ASSERT_STR_EQ("top_center", place);
+	teardown();
+	PASS();
+}
+
+/* With every named place held there is none to offer, and the caller keeps
+ * its own default -- unrecorded, as a default and not a choice. */
+TEST no_free_place_is_no_offer(void)
+{
+	char place[32] = "";
+
+	setup();
+	for (int p = 0; rod_place_name(p); p++) {
+		char name[16];
+
+		snprintf(name, sizeof(name), "e%d", p);
+		element(name, rod_place_name(p));
+	}
+	ASSERT(!rod_free_place(&st, place, sizeof(place)));
+	ASSERT_STR_EQ("", place);
+	teardown();
+	PASS();
+}
+
 /*
  * Which element is "first" is the order the config file lists them in -- not
  * the order rss_config hands sections back, which is the reverse of it.
@@ -417,4 +462,6 @@ SUITE(rod_osd_suite)
 	RUN_TEST(an_element_that_got_no_buffer_does_not_keep_the_place);
 	RUN_TEST(a_place_falls_to_the_next_element_when_the_first_gives_it_up);
 	RUN_TEST(elements_arrive_in_the_order_the_file_lists_them);
+	RUN_TEST(a_new_element_is_offered_a_place_nothing_is_at);
+	RUN_TEST(no_free_place_is_no_offer);
 }

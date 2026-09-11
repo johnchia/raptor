@@ -44,6 +44,13 @@ static const struct {
 	{"bottom_center", 1}, {"bottom_right", 2}, {"center", 1},
 };
 
+const char *rod_place_name(int i)
+{
+	if (i < 0 || (size_t)i >= sizeof(slots) / sizeof(slots[0]))
+		return NULL;
+	return slots[i].name;
+}
+
 static int slot_of(const char *name)
 {
 	for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); i++) {

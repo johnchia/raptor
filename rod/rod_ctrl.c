@@ -247,6 +247,11 @@ static int handle_add_element(rod_state_t *st, const char *cmd_json, char *resp,
 	rss_json_get_str(cmd_json, "type", type_str, sizeof(type_str));
 	rss_json_get_str(cmd_json, "template", tmpl, sizeof(tmpl));
 	bool placed = rss_json_get_str(cmd_json, "position", position, sizeof(position)) == 0;
+	/* Nobody said where: a place nothing is at, since one that is held
+	 * is where the new element would draw nothing and appear not to work.
+	 * With every place held it goes where rod has always put one. */
+	if (!placed)
+		placed = rod_free_place(st, position, sizeof(position));
 	cmd_font_size(cmd_json, "font_size", &font_size, &font_pct);
 	rss_json_get_int(cmd_json, "max_chars", &max_chars);
 	rss_json_get_int(cmd_json, "align", &align);
@@ -330,10 +335,10 @@ static int handle_add_element(rod_state_t *st, const char *cmd_json, char *resp,
 	rss_config_set_str(st->cfg, section, "type", type_str);
 	if (tmpl[0])
 		rss_config_set_str(st->cfg, section, "template", tmpl);
-	/* Only a place somebody asked for. The default below is rod's own and
-	 * writing it down would make it a choice, which is a different thing
-	 * to whoever reads the file next -- and to a page that offers to put
-	 * a key back. */
+	/* A place asked for, or the free one chosen for this element -- which
+	 * has to be written down, or the next start chooses again against a
+	 * different set of neighbours. rod's own fallback is neither, and
+	 * writing it would make it a choice to whoever reads the file next. */
 	if (placed)
 		rss_config_set_str(st->cfg, section, "position", position);
 

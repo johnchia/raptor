@@ -219,6 +219,7 @@ int rod_add_element(rod_state_t *st, const char *name, rod_elem_type_t type, con
 		    const char *position, int align, int font_size, int max_chars,
 		    rod_update_mode_t update_mode);
 void rod_remove_element(rod_state_t *st, const char *name);
+bool rod_free_place(const rod_state_t *st, char *out, size_t outsz);
 int rod_alloc_font(rod_state_t *st, int stream_idx, int font_size);
 void rod_format_font_size(char *out, size_t n, int px, int pct);
 int rod_font_for_elem(const rod_state_t *st, const rod_element_t *e, int stream_idx);
@@ -235,6 +236,8 @@ void rod_sync_shms(rod_state_t *st);
 int rod_expand_template(rod_state_t *st, const char *tmpl, char *out, int out_size);
 
 /* rod_config.c */
+/* The named places in the order a new element is offered them; NULL past the last. */
+const char *rod_place_name(int i);
 void load_config(rod_state_t *st);
 void init_elements_from_config(rod_state_t *st);
 
