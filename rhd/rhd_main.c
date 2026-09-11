@@ -63,6 +63,47 @@ static const char *jpeg_ring_names[RHD_MAX_JPEG] = {"jpeg0",	"jpeg1",    "s1_jpe
  * request that lands while a slot is closed costs one open, not a
  * 404. Safe to call with the slot already open.
  */
+/* ── Frames shared between clients ── */
+
+static rhd_frame_t *rhd_frame_alloc(uint32_t cap)
+{
+	rhd_frame_t *f = malloc(sizeof(*f) + cap);
+	if (!f)
+		return NULL;
+	atomic_init(&f->refs, 1);
+	f->len = 0;
+	return f;
+}
+
+static rhd_frame_t *rhd_frame_new(const uint8_t *data, uint32_t len)
+{
+	rhd_frame_t *f = rhd_frame_alloc(len);
+	if (!f)
+		return NULL;
+	f->len = len;
+	memcpy(f->data, data, len);
+	return f;
+}
+
+static void rhd_frame_unref(rhd_frame_t *f)
+{
+	if (f && atomic_fetch_sub(&f->refs, 1) == 1)
+		free(f);
+}
+
+/*
+ * The shared frame, free to be written: the one in hand if no client still
+ * holds it, else a fresh one, and the old is left to the clients sending it.
+ */
+static rhd_frame_t *frame_for_writing(rhd_server_t *srv)
+{
+	if (srv->frame_buf && atomic_load(&srv->frame_buf->refs) > 1) {
+		rhd_frame_unref(srv->frame_buf);
+		srv->frame_buf = rhd_frame_alloc(srv->frame_buf_cap);
+	}
+	return srv->frame_buf;
+}
+
 static int64_t rhd_now_ms(void)
 {
 	struct timespec ts;
@@ -87,23 +128,14 @@ static rss_ring_t *jpeg_ring_open_slot(rhd_server_t *srv, int j)
 	uint32_t mfs = rss_ring_max_frame_size(ring);
 	uint32_t cap = mfs + RSS_JPEG_EXIF_MAX + RSS_JPEG_SIG_SEGMENT;
 	if (mfs > srv->frame_buf_size || !srv->frame_buf) {
-		free(srv->frame_buf);
+		rhd_frame_unref(srv->frame_buf);
 		srv->frame_buf_size = mfs;
 		srv->frame_buf_cap = cap;
-		srv->frame_buf = malloc(cap);
+		srv->frame_buf = rhd_frame_alloc(cap);
 		if (!srv->frame_buf) {
 			RSS_WARN("failed to allocate frame buffer (%u bytes)", cap);
 			srv->frame_buf_size = 0;
 			srv->frame_buf_cap = 0;
-		}
-	}
-	if (cap > srv->snap_buf_size) {
-		free(srv->snap_buf);
-		srv->snap_buf_size = cap;
-		srv->snap_buf = malloc(cap);
-		if (!srv->snap_buf) {
-			RSS_WARN("failed to allocate snapshot buffer (%u bytes)", cap);
-			srv->snap_buf_size = 0;
 		}
 	}
 	if (j + 1 > srv->jpeg_ring_count)
@@ -169,7 +201,7 @@ static int rhd_sendq_init(rhd_sendq_t *q)
 static void rhd_sendq_destroy(rhd_sendq_t *q)
 {
 	while (q->count > 0) {
-		free(q->entries[q->tail].data);
+		rhd_frame_unref(q->entries[q->tail].frame);
 		q->tail = (q->tail + 1) % RHD_SENDQ_SLOTS;
 		q->count--;
 	}
@@ -180,7 +212,7 @@ static void rhd_sendq_destroy(rhd_sendq_t *q)
 static void rhd_sendq_flush_locked(rhd_sendq_t *q)
 {
 	while (q->count > 0) {
-		free(q->entries[q->tail].data);
+		rhd_frame_unref(q->entries[q->tail].frame);
 		q->tail = (q->tail + 1) % RHD_SENDQ_SLOTS;
 		q->count--;
 	}
@@ -188,8 +220,18 @@ static void rhd_sendq_flush_locked(rhd_sendq_t *q)
 	q->tail = 0;
 }
 
-static int rhd_sendq_push(rhd_sendq_t *q, uint8_t type, const uint8_t *data, uint32_t len,
-			  int codec, int sample_rate)
+/*
+ * Queue a frame for one client; the queue takes its own reference.
+ *
+ * An MJPEG frame is a whole picture, so a client not yet sent the last one
+ * is owed only the newest: it replaces the picture already waiting rather
+ * than lining up behind it. That holds a slow client to one frame of
+ * memory, which matters when a frame is a megabyte and the board has a few
+ * of those to spare. Audio is a sequence and keeps its order; only when
+ * that backs up is the queue emptied.
+ */
+static int rhd_sendq_push(rhd_sendq_t *q, uint8_t type, rhd_frame_t *frame, int codec,
+			  int sample_rate)
 {
 	pthread_mutex_lock(&q->lock);
 	if (q->shutdown) {
@@ -197,21 +239,26 @@ static int rhd_sendq_push(rhd_sendq_t *q, uint8_t type, const uint8_t *data, uin
 		return -1;
 	}
 
-	if (q->count >= RHD_SENDQ_SLOTS) {
-		rhd_sendq_flush_locked(q);
-		/* For MJPEG, dropping is fine — each frame is independent */
+	atomic_fetch_add(&frame->refs, 1);
+
+	if (type == RHD_FRAME_MJPEG) {
+		for (int i = 0, k = q->tail; i < q->count; i++, k = (k + 1) % RHD_SENDQ_SLOTS) {
+			rhd_sendq_entry_t *e = &q->entries[k];
+			if (e->type != RHD_FRAME_MJPEG)
+				continue;
+			rhd_frame_unref(e->frame);
+			e->frame = frame;
+			pthread_cond_signal(&q->cond);
+			pthread_mutex_unlock(&q->lock);
+			return RHD_SENDQ_OK;
+		}
 	}
 
-	uint8_t *copy = malloc(len);
-	if (!copy) {
-		pthread_mutex_unlock(&q->lock);
-		return -1;
-	}
-	memcpy(copy, data, len);
+	if (q->count >= RHD_SENDQ_SLOTS)
+		rhd_sendq_flush_locked(q);
 
 	rhd_sendq_entry_t *slot = &q->entries[q->head];
-	slot->data = copy;
-	slot->len = len;
+	slot->frame = frame;
 	slot->type = type;
 	slot->codec = codec;
 	slot->sample_rate = sample_rate;
@@ -242,17 +289,19 @@ static void *rhd_client_send_thread(void *arg)
 		}
 
 		rhd_sendq_entry_t entry = q->entries[q->tail];
-		q->entries[q->tail].data = NULL;
+		q->entries[q->tail].frame = NULL;
 		q->tail = (q->tail + 1) % RHD_SENDQ_SLOTS;
 		q->count--;
 		pthread_mutex_unlock(&q->lock);
 
+		const uint8_t *data = entry.frame->data;
+		uint32_t len = entry.frame->len;
 		int ret = 0;
 		if (entry.type == RHD_FRAME_MJPEG) {
-			ret = http_send_mjpeg_frame(c, entry.data, entry.len);
+			ret = http_send_mjpeg_frame(c, data, len);
 		} else {
-			ret = rhd_audio_send_frame(c, entry.codec, entry.sample_rate, entry.data,
-						   entry.len, c->audio_page_seq, c->audio_granule);
+			ret = rhd_audio_send_frame(c, entry.codec, entry.sample_rate, data, len,
+						   c->audio_page_seq, c->audio_granule);
 			if (ret >= 0) {
 				c->audio_page_seq++;
 				if (entry.codec == RHD_CODEC_OPUS)
@@ -260,11 +309,11 @@ static void *rhd_client_send_thread(void *arg)
 				else if (entry.codec == RHD_CODEC_AAC)
 					c->audio_granule += 1024;
 				else
-					c->audio_granule += entry.len / 2;
+					c->audio_granule += len / 2;
 			}
 		}
 
-		free(entry.data);
+		rhd_frame_unref(entry.frame);
 
 		if (ret < 0) {
 			/* Send failed — mark for shutdown, main loop will remove.
@@ -437,9 +486,11 @@ static void snap_poll(rhd_server_t *srv)
 		uint32_t len = 0;
 		rss_ring_slot_t meta;
 		uint64_t pre_seq = c->snap_seq;
-		int ret = srv->snap_buf ? rss_ring_read(ring, &c->snap_seq, srv->snap_buf,
-							srv->snap_buf_size, &len, &meta)
-					: -1;
+		rhd_frame_t *f = frame_for_writing(srv);
+		uint8_t *buf = f ? f->data : NULL;
+		int ret = buf ? rss_ring_read(ring, &c->snap_seq, buf, srv->frame_buf_size, &len,
+					      &meta)
+			      : -1;
 
 		/* No progress means the ring was recreated, not lapped. The
 		 * request keeps its deadline and is served from the new ring
@@ -463,22 +514,20 @@ static void snap_poll(rhd_server_t *srv)
 			continue;
 		}
 
-		if (ret == 0 && len >= 2 && srv->snap_buf[0] == 0xFF && srv->snap_buf[1] == 0xD8) {
+		if (ret == 0 && len >= 2 && buf[0] == 0xFF && buf[1] == 0xD8) {
 			c->snap_pending = false;
 			if (srv->exif_timestamp) {
-				int n = rss_jpeg_insert_exif(srv->snap_buf, srv->snap_buf_size, len,
+				int n = rss_jpeg_insert_exif(buf, srv->frame_buf_cap, len,
 							     jpeg_frame_utc(ring, &meta));
 				if (n > 0)
 					len = (uint32_t)n;
 			}
 			if (srv->sign_ok) {
-				int n = rss_jpeg_sign(srv->snap_buf, srv->snap_buf_size, len,
-						      &srv->sign_key);
+				int n = rss_jpeg_sign(buf, srv->frame_buf_cap, len, &srv->sign_key);
 				if (n > 0)
 					len = (uint32_t)n;
 			}
-			if (http_send_async(c, srv->epoll_fd, "image/jpeg", srv->snap_buf, len) <
-			    0) {
+			if (http_send_async(c, srv->epoll_fd, "image/jpeg", buf, len) < 0) {
 				http_error(c, "500 Internal Server Error", "Out of memory");
 				remove_client(srv, i);
 			}
@@ -672,7 +721,8 @@ static void handle_request(rhd_server_t *srv, rhd_client_t *c)
 
 /* ── MJPEG streaming ── */
 
-static void stream_mjpeg_frame(rhd_server_t *srv, int stream, const uint8_t *data, uint32_t len)
+/* The one copy of the frame goes to everyone; each queue takes a reference. */
+static void stream_mjpeg_frame(rhd_server_t *srv, int stream, rhd_frame_t *frame)
 {
 	for (int i = srv->client_count - 1; i >= 0; i--) {
 		rhd_client_t *c = srv->clients[i];
@@ -683,7 +733,7 @@ static void stream_mjpeg_frame(rhd_server_t *srv, int stream, const uint8_t *dat
 			continue;
 		}
 		/* Push returns -1 if shutdown — send thread flagged an error */
-		if (rhd_sendq_push(&c->sendq, RHD_FRAME_MJPEG, data, len, 0, 0) < 0)
+		if (rhd_sendq_push(&c->sendq, RHD_FRAME_MJPEG, frame, 0, 0) < 0)
 			remove_client(srv, i);
 	}
 }
@@ -819,8 +869,8 @@ static void server_run(rhd_server_t *srv)
 	if (srv->jpeg_ring_count == 0 && !srv->audio_ring)
 		RSS_INFO("no rings available at startup, waiting for producers...");
 
-	if (srv->jpeg_ring_count > 0 && (!srv->frame_buf || !srv->snap_buf)) {
-		RSS_FATAL("failed to allocate frame buffers");
+	if (srv->jpeg_ring_count > 0 && !srv->frame_buf) {
+		RSS_FATAL("failed to allocate frame buffer");
 		return;
 	}
 
@@ -874,12 +924,14 @@ static void server_run(rhd_server_t *srv)
 			for (int j = 0; j < RHD_MAX_JPEG; j++) {
 				if (!srv->jpeg_rings[j] || !ring_wanted[j])
 					continue;
+				rhd_frame_t *f = frame_for_writing(srv);
+				if (!f)
+					break;
 				uint32_t len;
 				rss_ring_slot_t meta;
 				uint64_t pre_seq = srv->jpeg_read_seqs[j];
 				int ret = rss_ring_read(srv->jpeg_rings[j], &srv->jpeg_read_seqs[j],
-							srv->frame_buf, srv->frame_buf_size, &len,
-							&meta);
+							f->data, srv->frame_buf_size, &len, &meta);
 				if (ret == RSS_EOVERFLOW && srv->jpeg_read_seqs[j] == pre_seq) {
 					jpeg_ring_drop(srv, j);
 					continue;
@@ -898,19 +950,20 @@ static void server_run(rhd_server_t *srv)
 					 * stale frame whose arena bytes the new
 					 * session was already overwriting. */
 					ret = rss_ring_read(srv->jpeg_rings[j],
-							    &srv->jpeg_read_seqs[j], srv->frame_buf,
+							    &srv->jpeg_read_seqs[j], f->data,
 							    srv->frame_buf_size, &len, &meta);
 				}
-				if (ret == 0 && len >= 2 && srv->frame_buf[0] == 0xFF &&
-				    srv->frame_buf[1] == 0xD8) {
+				if (ret == 0 && len >= 2 && f->data[0] == 0xFF &&
+				    f->data[1] == 0xD8) {
 					if (srv->exif_timestamp) {
 						int n = rss_jpeg_insert_exif(
-							srv->frame_buf, srv->frame_buf_cap, len,
+							f->data, srv->frame_buf_cap, len,
 							jpeg_frame_utc(srv->jpeg_rings[j], &meta));
 						if (n > 0)
 							len = (uint32_t)n;
 					}
-					stream_mjpeg_frame(srv, j, srv->frame_buf, len);
+					f->len = len;
+					stream_mjpeg_frame(srv, j, f);
 				}
 			}
 		}
@@ -972,18 +1025,22 @@ static void server_run(rhd_server_t *srv)
 				if (ret != 0 || alen == 0)
 					break;
 
+				rhd_frame_t *frame = NULL;
 				for (int i = srv->client_count - 1; i >= 0; i--) {
 					rhd_client_t *ac = srv->clients[i];
 					if (!ac->is_audio)
 						continue;
+					if (!frame && !(frame = rhd_frame_new(audio_buf, alen)))
+						break;
 					if (!ac->send_thread_running ||
-					    rhd_sendq_push(&ac->sendq, RHD_FRAME_AUDIO, audio_buf,
-							   alen, srv->audio_codec,
+					    rhd_sendq_push(&ac->sendq, RHD_FRAME_AUDIO, frame,
+							   srv->audio_codec,
 							   srv->audio_codec == RHD_CODEC_AAC
 								   ? srv->audio_adts_rate
 								   : srv->audio_sample_rate) < 0)
 						remove_client(srv, i);
 				}
+				rhd_frame_unref(frame);
 			}
 		}
 
@@ -1225,8 +1282,7 @@ static void server_run(rhd_server_t *srv)
 	for (int i = srv->client_count - 1; i >= 0; i--)
 		remove_client(srv, i);
 
-	free(srv->frame_buf);
-	free(srv->snap_buf);
+	rhd_frame_unref(srv->frame_buf);
 	for (int j = 0; j < RHD_MAX_JPEG; j++) {
 		if (srv->jpeg_rings[j]) {
 			if (srv->jpeg_acquired[j])

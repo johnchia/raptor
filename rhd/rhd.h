@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <signal.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
@@ -49,9 +50,19 @@
 #define RHD_SENDQ_OK	  0
 #define RHD_SENDQ_DROPPED 1
 
+/*
+ * A frame on its way out: one copy, however many clients are sent it. The
+ * count is touched from the main loop and every send thread, hence atomic;
+ * whoever drops it to zero frees it.
+ */
 typedef struct {
-	uint8_t *data;
+	atomic_int refs;
 	uint32_t len;
+	uint8_t data[];
+} rhd_frame_t;
+
+typedef struct {
+	rhd_frame_t *frame;
 	uint8_t type;
 	uint32_t codec;
 	int sample_rate;
@@ -159,12 +170,13 @@ typedef struct {
 	int audio_sample_rate; /* sample rate from ring header */
 	int audio_adts_rate;   /* rate declared in ADTS (core rate for HE-AAC) */
 
-	/* Snapshot read buffer (shared, single-threaded) */
-	uint8_t *snap_buf;
-	uint32_t snap_buf_size;
-
-	/* MJPEG fan-out buffer and per-ring read cursors (main loop only) */
-	uint8_t *frame_buf;
+	/*
+	 * The frame being read, and sent: one copy for every client, written
+	 * over for the next frame once no client still holds it, and borrowed
+	 * as scratch by snapshots between times. Main loop only, with the
+	 * per-ring read cursors.
+	 */
+	rhd_frame_t *frame_buf;
 	uint32_t frame_buf_size; /* largest ring frame */
 	uint32_t frame_buf_cap;	 /* + EXIF and signing headroom */
 	uint64_t jpeg_read_seqs[RHD_MAX_JPEG];

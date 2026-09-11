@@ -291,19 +291,28 @@ int http_send_mjpeg_frame(rhd_client_t *c, const uint8_t *data, uint32_t len)
 			    "\r\n",
 			    len);
 
-	/* Combine header + JPEG + CRLF into a single write to avoid
-	 * TLS record fragmentation that causes render flicker in browsers. */
 	if (hlen < 0)
 		return -1;
-	size_t total = (size_t)hlen + len + 2;
-	uint8_t *frame = malloc(total);
-	if (!frame)
+#ifdef RSS_HAS_TLS
+	/* Under TLS the part goes as one write: a header in a record of its
+	 * own is rendered as flicker by browsers. */
+	if (c->tls) {
+		size_t total = (size_t)hlen + len + 2;
+		uint8_t *frame = malloc(total);
+		if (!frame)
+			return -1;
+		memcpy(frame, part_hdr, (size_t)hlen);
+		memcpy(frame + hlen, data, len);
+		frame[hlen + len] = '\r';
+		frame[hlen + len + 1] = '\n';
+		int ret = nb_write_all(c, frame, total);
+		free(frame);
+		return ret;
+	}
+#endif
+	/* Over plain TCP the socket takes the pieces as they are, and the
+	 * frame is not copied once more just to be sent. */
+	if (nb_write_all(c, part_hdr, (size_t)hlen) < 0 || nb_write_all(c, data, len) < 0)
 		return -1;
-	memcpy(frame, part_hdr, (size_t)hlen);
-	memcpy(frame + hlen, data, len);
-	frame[hlen + len] = '\r';
-	frame[hlen + len + 1] = '\n';
-	int ret = nb_write_all(c, frame, total);
-	free(frame);
-	return ret;
+	return nb_write_all(c, "\r\n", 2);
 }
