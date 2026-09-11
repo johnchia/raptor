@@ -338,6 +338,44 @@ TEST cfg_remove_section_takes_the_keys_nobody_asked_about(void)
 	PASS();
 }
 
+/* The file is not this config's memory of it. rod loaded [osd.probe] when
+ * it made the element; rcd then wrote the template under it, into the file
+ * alone. Removing the section by the keys rod held left that line behind,
+ * under whatever section came before it in the file. A section removed is
+ * every line under its header. */
+TEST cfg_remove_section_takes_lines_it_never_loaded(void)
+{
+	char path[128], text[1024];
+	FILE *f;
+	rss_config_t *cfg = cfg_from("[osd.timestamp]\ntemplate = %time%\n\n"
+				     "[osd.probe]\ntype = text\n",
+				     path, sizeof(path));
+	ASSERT(cfg);
+
+	/* Another writer's key, and a comment, under the section since the load. */
+	f = fopen(path, "a");
+	ASSERT(f);
+	fputs("# added by hand\ntemplate = Probe\n\n[log]\nlevel = info\n", f);
+	fclose(f);
+
+	ASSERT(rss_config_remove_section(cfg, "osd.probe"));
+	ASSERT_EQ(0, rss_config_save(cfg, path));
+	rss_config_free(cfg);
+
+	slurp(path, text, sizeof(text));
+	ASSERTm("a key another writer put under the section stayed behind",
+		strstr(text, "template = Probe") == NULL);
+	ASSERTm("the section's comment stayed behind", strstr(text, "added by hand") == NULL);
+	ASSERT(strstr(text, "[osd.probe]") == NULL);
+	ASSERT(strstr(text, "[osd.timestamp]") != NULL);
+	ASSERT(strstr(text, "[log]\nlevel = info") != NULL);
+	ASSERTm("the sections around it lost their separator",
+		strstr(text, "%time%\n\n[log]") != NULL);
+
+	unlink(path);
+	PASS();
+}
+
 static void note_section(const char *section, void *ud)
 {
 	char *out = ud;
@@ -423,6 +461,7 @@ SUITE(config_suite)
 	RUN_TEST(cfg_unwritten_knob_is_not_a_neutral_one);
 	RUN_TEST(cfg_remove_section_takes_the_header_with_the_keys);
 	RUN_TEST(cfg_remove_section_takes_the_keys_nobody_asked_about);
+	RUN_TEST(cfg_remove_section_takes_lines_it_never_loaded);
 	RUN_TEST(cfg_removed_section_is_gone_from_the_walk);
 	RUN_TEST(cfg_removing_a_section_that_is_not_there_says_so);
 	RUN_TEST(cfg_writing_into_a_removed_section_puts_it_back);
