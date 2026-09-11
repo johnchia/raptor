@@ -147,6 +147,7 @@ const ids = [...html.matchAll(/getElementById\("([a-zA-Z0-9_]+)"\)/g)].map(m => 
 
 let served = 0;
 const sent = [];          /* every request body, so a test can read the last one */
+let HOLD = null;          /* {cmd, until}: a request the fake does not answer yet */
 /* The value the camera insists on for the next `set`, or null to take it. */
 let refuseNext = null;
 
@@ -364,6 +365,9 @@ const sandbox = {
 			return {ok: true, status: 200, json: async () => st, text: async () => ""};
 		}
 		const body = opt && opt.body ? JSON.parse(opt.body) : {};
+		/* A request a test is holding open, to see what the page shows
+		 * while it waits. */
+		if (HOLD && HOLD.cmd === body.cmd) await HOLD.until;
 		return {ok: true, status: 200, json: async () => reply(body), text: async () => ""};
 	},
 	Image: function () {},
@@ -1019,6 +1023,37 @@ try {
 		fail("the element that was removed left its keys behind");
 	if (p.dirty.has("osd.logo.template") || p.V["osd.logo.template"] !== undefined)
 		fail("an edit staged against an element outlived the element");
+
+	/*
+	 * Waiting on the camera is shown. An apply on the service tier goes
+	 * straight through the button, and while rcd has not answered the
+	 * button says so and turns; when it has, the button is itself again.
+	 */
+	{
+		let release;
+		HOLD = {cmd: "apply", until: new Promise(r => { release = r; })};
+		/* Only this change, so nothing staged earlier raises the cost
+		 * to one the button asks to confirm first. */
+		p.dirty.clear(); p.RESET.clear();
+		p.V["osd.font_size"] = "4%";
+		p.dirty.add("osd.font_size");
+		p.refreshBar();
+		const apply = nodes.btnApply;
+		const clicked = apply.handlers.click[0]();
+		await settle();
+		if (!apply.classList.contains("busy") || !/Applying/.test(apply.textContent))
+			fail("while the apply was unanswered the button read " +
+			     JSON.stringify(apply.textContent) + " with class " +
+			     JSON.stringify(apply.className) + " disabled=" + apply.disabled);
+		if (!apply.disabled) fail("the apply button could be pressed again mid-apply");
+		release();
+		HOLD = null;
+		await clicked;
+		await settle();
+		if (apply.classList.contains("busy") || apply.disabled)
+			fail("the apply button stayed busy after the camera answered");
+		if (p.dirty.size) fail("the apply left changes pending: " + [...p.dirty]);
+	}
 
 	/*
 	 * The password key is a settings row like any other and must be drawn

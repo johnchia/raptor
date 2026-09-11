@@ -59,6 +59,15 @@ main{display:flex;flex-direction:column;min-width:0;min-height:100vh}
                  place-items:center;font-size:12px;letter-spacing:.16em;text-transform:uppercase;
                  color:var(--amber);text-align:center;padding:12px}
 .screen.busy .curtain{display:grid}
+/* Waiting on the camera is shown, not implied: a ring in the button that
+   asked, and in the curtain while the picture is down. */
+@keyframes turn{to{transform:rotate(360deg)}}
+.btn.busy::before,.screen .curtain::before{content:"";display:inline-block;width:10px;height:10px;
+   border:2px solid currentColor;border-right-color:transparent;border-radius:50%;
+   vertical-align:-1px;margin-right:8px;animation:turn .8s linear infinite}
+.screen .curtain::before{display:block;width:18px;height:18px;margin:0 auto 10px}
+@media (prefers-reduced-motion:reduce){
+  .btn.busy::before,.screen .curtain::before{animation:none;border-right-color:currentColor;opacity:.5}}
 .screen .fallback{color:var(--ink-faint);font-size:12px;padding:14px;text-align:center;display:none}
 .screen.noimg img{display:none}
 .screen.noimg .fallback{display:block}
@@ -1888,14 +1897,27 @@ btnApply.addEventListener("click", async () => {
   await doApply(worst);
 });
 
-document.getElementById("btnRevert").addEventListener("click", async () => {
-  /* Ask rcd what is on disk rather than trusting this page's memory of it. */
-  dirty.clear();
-  RESET.clear();
-  await loadValues();
+document.getElementById("btnRevert").addEventListener("click", async e => {
+  const done = busy(e.currentTarget, "Reverting\u2026");
+  try {
+    /* Ask rcd what is on disk rather than trusting this page's memory of it. */
+    dirty.clear();
+    RESET.clear();
+    await loadValues();
+  } finally {
+    done();
+  }
   refreshBar(); render();
   wlog("sys", "reverted to the saved configuration");
 });
+
+/* A button that is waiting on the camera says so, and comes back as it was
+   when the answer arrives. */
+function busy(btn, label) {
+  const was = btn.textContent;
+  btn.disabled = true; btn.classList.add("busy"); btn.textContent = label;
+  return () => { btn.disabled = false; btn.classList.remove("busy"); btn.textContent = was; };
+}
 
 async function doApply(worst) {
   const edits = [...dirty].map(id => {
@@ -1905,7 +1927,9 @@ async function doApply(worst) {
     if (RESET.has(id)) return {section: k.section, key: k.key, value: null};
     return {section: k.section, key: k.key, value: k.labels ? labelOf(k, V[id]) : V[id]};
   });
-  btnApply.disabled = true; document.getElementById("btnRevert").disabled = true;
+  const btnRevert = document.getElementById("btnRevert");
+  const done = busy(btnApply, "Applying\u2026");
+  btnRevert.disabled = true;
   const screen = document.getElementById("screen");
   const cam = document.getElementById("cam");
   try {
@@ -1948,7 +1972,7 @@ async function doApply(worst) {
     wlog("err", "! apply: " + e.message);
     banner("The apply did not finish", e.message);
   } finally {
-    btnApply.disabled = false; document.getElementById("btnRevert").disabled = false;
+    done(); btnRevert.disabled = false;
     screen.classList.remove("busy");
     /*
      * Twice, and the second one is the one that matters. An <img> showing a
