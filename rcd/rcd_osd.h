@@ -31,6 +31,7 @@
 #ifndef RCD_OSD_H
 #define RCD_OSD_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include <rss_common.h>
@@ -56,5 +57,18 @@
  * where the ordinal already says it belongs.
  */
 const char *rcd_osd_store(rss_config_t *file, const char *section, char *out, size_t outsz);
+
+/*
+ * Whether `section` is one of the ordinals and stands for no element yet.
+ *
+ * A page of forms has a value in every field whether or not anybody typed
+ * one, so an empty slot's controls read as a position, an alignment and an
+ * unticked Show long before there is an element to apply them to. Writing
+ * those creates a section, and a section is an element: rod draws it, and it
+ * takes a place on the picture that the element already drawn there then
+ * loses. So an empty slot is filled only by the key that gives it something
+ * to draw.
+ */
+bool rcd_osd_slot_is_empty(rss_config_t *file, const char *section);
 
 #endif /* RCD_OSD_H */

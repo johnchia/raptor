@@ -1262,6 +1262,18 @@ static bool reset_request(const rcd_key_t *k, char *out, size_t outsz)
 	return fit;
 }
 
+/* Whether any edit in this request gives the slot a template to draw. */
+static bool request_fills_slot(const rcd_edit_t *edits, int n, const char *section)
+{
+	for (int i = 0; i < n; i++) {
+		if (edits[i].reset || strcmp(edits[i].k->section, section) != 0)
+			continue;
+		if (strcmp(edits[i].k->key, "template") == 0 && edits[i].rendered[0])
+			return true;
+	}
+	return false;
+}
+
 static int write_file(rcd_state_t *st, rcd_edit_t *edits, const bool *to_file, bool *changed, int n)
 {
 	int wanted = 0;
@@ -1297,6 +1309,29 @@ static int write_file(rcd_state_t *st, rcd_edit_t *edits, const bool *to_file, b
 		 */
 		char store[RCD_OSD_SECT_MAX];
 		const char *sect = rcd_osd_store(cfg, edits[i].k->section, store, sizeof(store));
+
+		/*
+		 * An empty slot is filled by the key that gives it something
+		 * to draw, and by nothing else. A form has a value in every
+		 * field whether or not anybody typed one, so applying a page
+		 * with an empty element on it wrote a `visible = false` into
+		 * a section that did not exist -- which created one, and an
+		 * element drawing nothing still takes a place on the picture
+		 * away from the element that was drawing there.
+		 *
+		 * Asked of the request rather than of this edit, so that a
+		 * position typed beside the text it belongs to is kept: any
+		 * template in the request fills the slot, and the rest of its
+		 * edits then land in the section that template made.
+		 */
+		if (rcd_osd_slot_is_empty(cfg, edits[i].k->section) &&
+		    !request_fills_slot(edits, n, edits[i].k->section)) {
+			RSS_INFO("set: [%s] has no element; %s ignored (an element needs a "
+				 "template first)",
+				 sect, edits[i].k->key);
+			changed[i] = false;
+			continue;
+		}
 
 		if (edits[i].reset) {
 			changed[i] = rss_config_unset(cfg, sect, edits[i].k->key);
@@ -1589,9 +1624,19 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 		return rcd_err(RCD_E_IO, "the config file could not be written");
 	}
 
-	for (int i = 0; i < n; i++)
+	for (int i = 0; i < n; i++) {
 		if (edits[i].reset && to_file[i] && !changed[i] && !restored[i])
 			note[i] = "already at its default";
+		/*
+		 * The one other way a write can leave the file alone: an
+		 * overlay slot with no element in it, which is not filled by
+		 * a key that gives it nothing to draw. The reply says so,
+		 * because a client that is told "applied" and reads the key
+		 * back unset has been lied to.
+		 */
+		else if (!edits[i].reset && to_file[i] && !changed[i])
+			note[i] = "no element in that slot yet -- text in it makes one";
+	}
 
 	int saved = 0;
 	for (int i = 0; i < n; i++) {

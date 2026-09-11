@@ -1036,6 +1036,103 @@ TEST a_slot_stands_for_the_element_the_file_has(void)
 }
 
 /*
+ * A page of forms has a value in every field whether or not anybody typed one,
+ * so applying the overlay page sent `visible = false` for an element that did
+ * not exist -- and that wrote [osd.4], which rod then drew: an element with
+ * nothing in it, sitting at the default place, taking that place away from the
+ * element already drawn there. The camera this was found on lost its clock.
+ */
+TEST an_empty_slot_is_not_made_an_element_by_a_form_nobody_filled_in(void)
+{
+	rcd_state_t st;
+	char path[256], text[1024] = "";
+	FILE *f;
+
+	if (!sysconf_dir_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	snprintf(path, sizeof(path), "%s/raptor.conf", RCD_SYSCONF_DIR);
+	f = fopen(path, "w");
+	ASSERT(f);
+	fputs("[osd.timestamp]\ntype = text\ntemplate = %time%\nposition = top_left\n", f);
+	fclose(f);
+
+	memset(&st, 0, sizeof(st));
+	st.config_path = path;
+
+	cJSON *req = cJSON_Parse(
+		"{\"edits\":[{\"section\":\"osd.2\",\"key\":\"visible\",\"value\":false}]}");
+	ASSERT(req);
+	cJSON *resp = rcd_cmd_set(&st, req);
+	cJSON_Delete(req);
+	ASSERT(resp);
+
+	const cJSON *one = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(resp, "results"), 0);
+	const cJSON *said = cJSON_GetObjectItemCaseSensitive(one, "note");
+	bool said_nothing_landed = cJSON_IsString(said) && strstr(said->valuestring, "no element");
+
+	cJSON_Delete(resp);
+
+	f = fopen(path, "r");
+	ASSERT(f);
+	fread(text, 1, sizeof(text) - 1, f);
+	fclose(f);
+
+	ASSERTm("a form nobody filled in created an element", strstr(text, "[osd.2]") == NULL);
+	ASSERT(strstr(text, "[osd.timestamp]") != NULL);
+	ASSERTm("the reply did not say the edit had gone nowhere", said_nothing_landed);
+
+	unlink(path);
+	PASS();
+}
+
+/* And the way to fill one is to give it something to draw, in the same request
+ * as everything else the form says about it. */
+TEST an_empty_slot_is_made_an_element_by_the_text_put_in_it(void)
+{
+	rcd_state_t st;
+	char path[256], text[1024] = "";
+	FILE *f;
+
+	if (!sysconf_dir_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	snprintf(path, sizeof(path), "%s/raptor.conf", RCD_SYSCONF_DIR);
+	f = fopen(path, "w");
+	ASSERT(f);
+	fputs("[osd.timestamp]\ntype = text\ntemplate = %time%\nposition = top_left\n", f);
+	fclose(f);
+
+	memset(&st, 0, sizeof(st));
+	st.config_path = path;
+
+	/* The position first, as a form serialises it, and the template after:
+	 * what fills the slot arrives behind an edit that needs it filled. */
+	cJSON *req = cJSON_Parse(
+		"{\"edits\":["
+		"{\"section\":\"osd.2\",\"key\":\"position\",\"value\":\"bottom_left\"},"
+		"{\"section\":\"osd.2\",\"key\":\"template\",\"value\":\"Hello\"}]}");
+	ASSERT(req);
+	cJSON *resp = rcd_cmd_set(&st, req);
+	cJSON_Delete(req);
+	ASSERT(resp);
+	cJSON_Delete(resp);
+
+	f = fopen(path, "r");
+	ASSERT(f);
+	fread(text, 1, sizeof(text) - 1, f);
+	fclose(f);
+
+	ASSERTm("text typed into an empty slot did not make an element",
+		strstr(text, "[osd.2]") != NULL);
+	ASSERT(strstr(text, "Hello") != NULL);
+	ASSERTm("the place typed beside the text was dropped", strstr(text, "bottom_left") != NULL);
+
+	unlink(path);
+	PASS();
+}
+
+/*
  * The order is the file's, and nothing else's.
  *
  * rss_config prepends each section as it parses, so a walk of the store hands
@@ -4163,6 +4260,8 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(every_daynight_threshold_is_a_live_key);
 	RUN_TEST(the_four_slots_carry_the_same_keys);
 	RUN_TEST(a_slot_stands_for_the_element_the_file_has);
+	RUN_TEST(an_empty_slot_is_not_made_an_element_by_a_form_nobody_filled_in);
+	RUN_TEST(an_empty_slot_is_made_an_element_by_the_text_put_in_it);
 	RUN_TEST(the_slots_are_numbered_the_way_the_file_reads);
 	RUN_TEST(a_section_rod_would_not_draw_takes_no_slot);
 	RUN_TEST(only_the_four_ordinals_resolve);

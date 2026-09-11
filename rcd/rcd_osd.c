@@ -48,18 +48,28 @@ static void note(const char *section, void *userdata)
 	w->seen++;
 }
 
+/* One digit, and one of ours. "osd.top_left" and "osd.10" are section names
+ * like any other, and answer 0. */
+static int slot_of(const char *section)
+{
+	if (strncmp(section, "osd.", 4) != 0)
+		return 0;
+	if (section[4] < '1' || section[4] > '0' + RCD_OSD_SLOTS || section[5] != '\0')
+		return 0;
+	return section[4] - '0';
+}
+
 const char *rcd_osd_store(rss_config_t *file, const char *section, char *out, size_t outsz)
 {
-	if (!file || !section || !out || strncmp(section, "osd.", 4) != 0)
-		return section;
-
-	/* One digit, and one of ours. "osd.top_left" and "osd.10" are section
-	 * names like any other and are left exactly as they came. */
-	if (section[4] < '1' || section[4] > '0' + RCD_OSD_SLOTS || section[5] != '\0')
-		return section;
-
-	int slot = section[4] - '0';
+	int slot;
 	struct window w = {.held = 0, .seen = 0};
+
+	if (!file || !section || !out)
+		return section;
+
+	slot = slot_of(section);
+	if (!slot)
+		return section;
 
 	rss_config_foreach_section(file, "osd.", note, &w);
 
@@ -69,4 +79,20 @@ const char *rcd_osd_store(rss_config_t *file, const char *section, char *out, si
 
 	rss_strlcpy(out, w.name[w.held - slot], outsz);
 	return out;
+}
+
+bool rcd_osd_slot_is_empty(rss_config_t *file, const char *section)
+{
+	int slot;
+	struct window w = {.held = 0, .seen = 0};
+
+	if (!file || !section)
+		return false;
+
+	slot = slot_of(section);
+	if (!slot)
+		return false;
+
+	rss_config_foreach_section(file, "osd.", note, &w);
+	return w.seen < slot;
 }
