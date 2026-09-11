@@ -598,7 +598,6 @@ static void release_region(rvd_state_t *st, int s, rvd_osd_region_t *reg)
 	reg->local_buf = NULL;
 	reg->width = 0;
 	reg->height = 0;
-	reg->no_update_ticks = 0;
 	reg->active = false;
 	reg->name[0] = '\0';
 }
@@ -707,7 +706,6 @@ static void try_open_shm(rvd_state_t *st, int s, rvd_osd_region_t *reg)
 	if (reg->hal_handle < 0)
 		return;
 
-	reg->no_update_ticks = 0;
 	read_shm_and_push(st, s, reg);
 	rss_osd_clear_dirty(reg->shm);
 
@@ -903,11 +901,9 @@ void rvd_osd_check(rvd_state_t *st)
 						goto do_update;
 					}
 				}
-				reg->no_update_ticks++;
 				continue;
 			}
 		do_update:
-			reg->no_update_ticks = 0;
 			read_shm_and_push(st, s, reg);
 			rss_osd_clear_dirty(reg->shm);
 

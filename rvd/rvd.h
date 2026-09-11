@@ -59,7 +59,6 @@ typedef struct {
 	uint8_t *local_buf;
 	bool active;
 	bool shown;
-	int no_update_ticks;
 	int layer;
 } rvd_osd_region_t;
 

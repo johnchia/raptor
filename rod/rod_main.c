@@ -120,7 +120,7 @@ static void render_detections(rod_state_t *st, rod_element_t *e)
 static void render_tick(rod_state_t *st)
 {
 	if (st->paused)
-		goto heartbeat;
+		return;
 
 	for (int i = 0; i < st->elem_count; i++) {
 		rod_element_t *e = &st->elements[i];
@@ -179,17 +179,6 @@ static void render_tick(rod_state_t *st)
 					rod_render_receipt(st, e, s);
 				}
 				e->receipt.dirty = false;
-			}
-		}
-	}
-
-heartbeat:
-	for (int s = 0; s < st->stream_count; s++) {
-		for (int i = 0; i < st->elem_count; i++) {
-			rod_element_t *e = &st->elements[i];
-			if (e->active && e->streams[s].shm) {
-				rss_osd_heartbeat(e->streams[s].shm);
-				break;
 			}
 		}
 	}
