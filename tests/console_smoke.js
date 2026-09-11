@@ -93,14 +93,24 @@ class El {
 		if (n === this) return true;
 		return this.children.some(c => c instanceof El && c.contains(n));
 	}
-	/* Depth-first walk; enough for the ".chip" and ".tab" lookups the page does. */
+	/*
+	 * Depth-first walk over ".class", "tag", and "tag[attr=value]" -- the
+	 * last because the page finds a slider by input[type=range], and a
+	 * shim that matched nothing there answered "no such control" to a
+	 * lookup the real DOM always satisfies.
+	 */
 	querySelectorAll(sel) {
 		const want = sel.replace(/^\./, "");
 		const byClass = sel.startsWith(".");
+		const attr = /^([a-z]+)\[([a-z]+)=([a-z]+)\]$/i.exec(sel);
+		const hit = c => byClass ? c.classes.has(want)
+			     : attr ? c.tagName === attr[1].toUpperCase() &&
+				      String(c[attr[2]]) === attr[3]
+				    : c.tagName === sel.toUpperCase();
 		const out = [];
 		const walk = e => e.children.forEach(c => {
 			if (c instanceof El) {
-				if (byClass ? c.classes.has(want) : c.tagName === sel.toUpperCase())
+				if (hit(c))
 					out.push(c);
 				walk(c);
 			}
@@ -191,6 +201,7 @@ function reply(body) {
 				    uptime: 3 * 3600 + 20 * 60,
 				    mem: {total_kb: 61440, avail_kb: 7680,
 					  avail_from: "MemAvailable"},
+				    stream0: {resolution: "2688x1520", fps: 25},
 				    ir: {mode: "auto", state: "day",
 					 total_gain: 1080, ae_luma: 47},
 				    image: ISP_STATE};
@@ -255,6 +266,18 @@ function valuesFor(section) {
 			if (k.key === "defog_strength") { o.value = "auto"; o.source = "daemon"; }
 			else if (k.key === "contrast") { o.value = 65; o.source = "daemon"; }
 			else o.set = false;
+			out.push(o);
+			return;
+		}
+		/*
+		 * The overlay's font size is the one key that may be written
+		 * on either of two scales, and this camera has it on the
+		 * second -- which is the reading a page drawing only the pixel
+		 * track puts somewhere the camera never said.
+		 */
+		if (k.section === "osd" && k.key === "font_size") {
+			o.value = "3.6%";
+			o.source = "daemon";
 			out.push(o);
 			return;
 		}
@@ -706,6 +729,52 @@ try {
 		fail("rotation has four settings and the page did not draw them as one choice");
 	if (!/270/.test(rot.textContent))
 		fail("the rotation control did not offer every angle the camera takes");
+
+	/*
+	 * The overlay's font size: one setting on two scales.
+	 *
+	 * A size in pixels is a size on one picture, so the same key also
+	 * takes a percentage of the height -- and the camera here is
+	 * configured with one. The row has to come up on that scale: a slider
+	 * running 8 to 96 cannot show 3.6, and the position it would land on
+	 * instead is one nobody chose.
+	 */
+	p.setActive("overlay");
+	p.render();
+	await settle();
+	const fs = sheet.querySelectorAll(".row").find(r => r.dataset.id === "osd.font_size");
+	if (!fs) fail("the overlay tab drew no font size row");
+	const unit = fs.querySelectorAll("button").find(b => /px|%/.test(b.textContent));
+	if (!unit) fail("the font size row offered no choice of unit");
+	if (unit.getAttribute("aria-pressed") !== "true")
+		fail("the camera's size is a percentage and the row drew it as pixels");
+	const fsl = sliderIn(fs);
+	if (Number(fsl.max) !== 10 || Number(fsl.value) !== 3.6)
+		fail("the percentage scale drew " + fsl.value + " of " + fsl.max +
+		     ", not the camera's own value on its own range");
+
+	/*
+	 * And switching units keeps the text the size it is now, converted
+	 * through the picture the camera says it is encoding -- 1520 lines
+	 * here, which is the reading and not the configured 1080 that
+	 * [stream0] does not carry. A conversion through the wrong height is
+	 * the whole failure this scale exists to avoid.
+	 */
+	unit.handlers.click[0]();
+	await settle();
+	/* Staged rather than sent: the overlay reads its size when it starts,
+	   so this key is on the restart tier and waits for Apply. */
+	if (p.V["osd.font_size"] !== 55)
+		fail("switching to pixels staged " + JSON.stringify(p.V["osd.font_size"]) +
+		     ", not 3.6% of the 1520 lines the camera is encoding");
+	if (Number(sliderIn(fs).max) !== 96)
+		fail("the row stayed on the percentage scale after switching to pixels");
+
+	unit.handlers.click[0]();
+	await settle();
+	if (p.V["osd.font_size"] !== "3.6%")
+		fail("switching back staged " + JSON.stringify(p.V["osd.font_size"]) +
+		     ", not a percentage of the picture");
 
 	/*
 	 * The password key is a settings row like any other and must be drawn

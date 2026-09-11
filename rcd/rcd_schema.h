@@ -363,7 +363,35 @@ typedef struct rcd_key {
 	 * the restart, so naming one can only improve on the old behaviour.
 	 */
 	const char *live_reset; /* NULL: a reset waits for the restart */
+
+	/*
+	 * A share of the picture is a value for this key as well as a count of
+	 * pixels, and is stored and reported as it was written: "4%".
+	 *
+	 * It is the overlay's font size and only it. A size in pixels is a
+	 * size on one picture, and the same number is a caption on a 1520-line
+	 * encode and a banner on a 360-line one -- so "a twenty-fifth of the
+	 * height" is a second thing to say and not a value on the pixel scale.
+	 *
+	 * Two ranges, one key: `min` and `max` bound the pixels, and the
+	 * percentage is bounded by RCD_PCT_MIN and RCD_PCT_MAX below. A client
+	 * is told both, because a form drawn from the pixel range alone can
+	 * only offer half of what the key takes.
+	 */
+	bool pct_ok;
 } rcd_key_t;
+
+/*
+ * What a percentage may be, in tenths of one.
+ *
+ * Tenths because whole percent is too coarse to steer with: one percent of a
+ * 1520-line encode is fifteen pixels. The ends bracket what the pixel range
+ * comes to across the encodes a camera actually makes -- 8 to 96 pixels is
+ * 0.7% to 8.9% of a 1080-line picture and 0.5% to 6.3% of a 1520-line one --
+ * so neither spelling can ask for a size the other cannot.
+ */
+#define RCD_PCT_MIN 5	/* 0.5% */
+#define RCD_PCT_MAX 100 /* 10% */
 
 /*
  * What a client is told about when a key takes effect.

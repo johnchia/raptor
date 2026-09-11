@@ -3121,6 +3121,66 @@ TEST only_the_isp_knobs_take_it(void)
 }
 
 /*
+ * The overlay's font size takes a share of the picture as well as a count of
+ * pixels, and keeps it as written.
+ *
+ * A size in pixels is a size on one picture: 24 is a caption on a 1520-line
+ * encode and a banner on a 360-line one. "4%" is the second thing to say and
+ * is not a point on the pixel scale, so it stays a string all the way to the
+ * file, where rod reads it the same way.
+ */
+TEST a_font_size_takes_a_share_of_the_picture(void)
+{
+	rcd_edit_t e[RCD_EDITS_MAX];
+	int n = 0;
+
+	ASSERT_SET_OK("{\"section\":\"osd\",\"key\":\"font_size\",\"value\":\"4%\"}", e, &n);
+	ASSERT_STR_EQ("4%", e[0].rendered);
+	ASSERTm("a percentage reached the daemon as a number", !e[0].is_num);
+
+	/* One decimal place, because a whole percent of a 1520-line encode is
+	 * a fifteen-pixel step. */
+	ASSERT_SET_OK("{\"section\":\"osd\",\"key\":\"font_size\",\"value\":\"4.5%\"}", e, &n);
+	ASSERT_STR_EQ("4.5%", e[0].rendered);
+
+	/* And the pixels still are pixels. */
+	ASSERT_SET_OK("{\"section\":\"osd\",\"key\":\"font_size\",\"value\":55}", e, &n);
+	ASSERT_STR_EQ("55", e[0].rendered);
+	ASSERT(e[0].is_num);
+	PASS();
+}
+
+/*
+ * The ends are the percentage's own. A share outside them is a size no
+ * picture makes legible or a banner across the frame, and both are likelier
+ * to be a misplaced digit than a request.
+ */
+TEST a_share_of_the_picture_has_its_own_range(void)
+{
+	ASSERT_SET_REFUSED("{\"section\":\"osd\",\"key\":\"font_size\",\"value\":\"0.1%\"}");
+	ASSERT_STR_EQ(RCD_E_RANGE, code);
+	ASSERT_SET_REFUSED("{\"section\":\"osd\",\"key\":\"font_size\",\"value\":\"40%\"}");
+	ASSERT_STR_EQ(RCD_E_RANGE, code);
+
+	/* And the spelling is the spelling: what rcd writes has to be what rod
+	 * reads, so anything it is not certain of is refused here rather than
+	 * discovered on the picture. */
+	ASSERT_SET_REFUSED("{\"section\":\"osd\",\"key\":\"font_size\",\"value\":\"4 %\"}");
+	ASSERT_SET_REFUSED("{\"section\":\"osd\",\"key\":\"font_size\",\"value\":\"4.25%\"}");
+	ASSERT_SET_REFUSED("{\"section\":\"osd\",\"key\":\"font_size\",\"value\":\"%\"}");
+	ASSERT_SET_REFUSED("{\"section\":\"osd\",\"key\":\"font_size\",\"value\":\"4px\"}");
+	ASSERT_SET_REFUSED("{\"section\":\"osd\",\"key\":\"font_size\",\"value\":\"4\"}");
+
+	/* Only this key. Every other integer here is a magnitude in units of
+	 * its own, with no picture to be a share of. */
+	ASSERT_SET_REFUSED("{\"section\":\"osd\",\"key\":\"font_stroke\",\"value\":\"4%\"}");
+	ASSERT_STR_EQ(RCD_E_TYPE, code);
+	ASSERT_SET_REFUSED("{\"section\":\"jpeg\",\"key\":\"quality\",\"value\":\"80%\"}");
+	ASSERT_STR_EQ(RCD_E_TYPE, code);
+	PASS();
+}
+
+/*
  * A client has no other way to learn the word exists: it is not a number in
  * the range, and a form drawn from the range alone can never say "leave this
  * to the tuning". Said only where it is true.
@@ -3210,6 +3270,33 @@ TEST the_schema_says_which_keys_take_auto(void)
 		}
 	}
 	ASSERT_EQ(2, checked);
+
+	/*
+	 * And the same for the second range a font size can be written on: a
+	 * form drawn from the pixel range alone can offer only half of what
+	 * the key takes, and has no other way to learn about the other half.
+	 */
+	const cJSON *fs = NULL, *stroke = NULL;
+	cJSON_ArrayForEach(k, keys)
+	{
+		const cJSON *sec = cJSON_GetObjectItemCaseSensitive(k, "section");
+		const cJSON *key = cJSON_GetObjectItemCaseSensitive(k, "key");
+
+		if (!cJSON_IsString(sec) || strcmp(sec->valuestring, "osd") != 0)
+			continue;
+		if (strcmp(key->valuestring, "font_size") == 0)
+			fs = k;
+		if (strcmp(key->valuestring, "font_stroke") == 0)
+			stroke = k;
+	}
+	ASSERT(fs && stroke);
+	ASSERT_EQ(NULL, cJSON_GetObjectItemCaseSensitive(stroke, "percent"));
+	const cJSON *pct = cJSON_GetObjectItemCaseSensitive(fs, "percent");
+	ASSERT(cJSON_IsObject(pct));
+	ASSERT_EQ(RCD_PCT_MIN / 10.0,
+		  cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(pct, "min")));
+	ASSERT_EQ(RCD_PCT_MAX / 10.0,
+		  cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(pct, "max")));
 	cJSON_Delete(out);
 	PASS();
 }
@@ -3302,6 +3389,50 @@ TEST a_knob_left_on_auto_reads_back_as_auto(void)
 	ASSERT_STR_EQ("auto", cv->valuestring);
 	ASSERTm("a knob with a value read back as a string", cJSON_IsNumber(sv));
 	ASSERT_EQ(90, (int)cJSON_GetNumberValue(sv));
+
+	cJSON_Delete(resp);
+	unlink(path);
+	PASS();
+}
+
+/*
+ * And a font size written as a share of the picture reads back as one.
+ *
+ * Read as a number, "4%" is 4 -- a size on the pixel scale, inside the range,
+ * and off by a factor of the frame height. A client that showed it and wrote
+ * it back would turn a legible overlay into four pixels of nothing.
+ */
+TEST a_font_size_in_percent_reads_back_in_percent(void)
+{
+	rcd_state_t st;
+	char path[320];
+
+	if (!sysconf_dir_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+
+	snprintf(path, sizeof(path), "%s/raptor.conf", RCD_SYSCONF_DIR);
+	FILE *f = fopen(path, "w");
+	ASSERT(f);
+	fputs("[osd]\nfont_size = 4%\nfont_stroke = 2\n", f);
+	fclose(f);
+
+	memset(&st, 0, sizeof(st));
+	st.config_path = path;
+
+	cJSON *req = cJSON_Parse("{\"keys\":[{\"section\":\"osd\",\"key\":\"font_size\"},"
+				 "{\"section\":\"osd\",\"key\":\"font_stroke\"}]}");
+	cJSON *resp = rcd_cmd_get(&st, req);
+	cJSON_Delete(req);
+	ASSERT(resp);
+
+	const cJSON *vals = cJSON_GetObjectItemCaseSensitive(resp, "values");
+	const cJSON *fs = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(vals, 0), "value");
+	const cJSON *sk = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(vals, 1), "value");
+
+	ASSERTm("a size in percent read back as a number", cJSON_IsString(fs));
+	ASSERT_STR_EQ("4%", fs->valuestring);
+	ASSERTm("a size in pixels read back as a string", cJSON_IsNumber(sk));
+	ASSERT_EQ(2, (int)cJSON_GetNumberValue(sk));
 
 	cJSON_Delete(resp);
 	unlink(path);
@@ -4086,11 +4217,14 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(every_label_array_spans_its_range);
 	RUN_TEST(an_isp_knob_takes_the_word_auto);
 	RUN_TEST(only_the_isp_knobs_take_it);
+	RUN_TEST(a_font_size_takes_a_share_of_the_picture);
+	RUN_TEST(a_share_of_the_picture_has_its_own_range);
 	RUN_TEST(the_schema_says_which_keys_reset_live);
 	RUN_TEST(the_schema_says_which_keys_take_auto);
 	RUN_TEST(exposure_compensation_goes_both_ways);
 	RUN_TEST(rotation_is_degrees_and_only_right_angles);
 	RUN_TEST(a_knob_left_on_auto_reads_back_as_auto);
+	RUN_TEST(a_font_size_in_percent_reads_back_in_percent);
 	RUN_TEST(refuses_more_edits_than_a_request_may_carry);
 	RUN_TEST(state_leaves_out_an_isp_knob_rvd_could_not_read);
 	RUN_TEST(get_asks_a_daemon_once_however_many_keys_name_its_section);

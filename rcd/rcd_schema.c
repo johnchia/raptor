@@ -241,21 +241,25 @@ static const char *const choices_threshold[] = {
  * because -Werror=missing-field-initializers means the whole of it has to be
  * spelled out either way.
  */
-#define LIVE(cmd)     cmd, "value", -1, NULL, NULL, RCD_IMPACT_NONE, 0, false, NULL
-#define LIVE_CH(c, n) c, "value", n, NULL, NULL, RCD_IMPACT_NONE, 0, false, NULL
+#define LIVE(cmd)     cmd, "value", -1, NULL, NULL, RCD_IMPACT_NONE, 0, false, NULL, false
+#define LIVE_CH(c, n) c, "value", n, NULL, NULL, RCD_IMPACT_NONE, 0, false, NULL, false
 
 /* A live command whose value is not called `value`. rvd's set-rc-mode names
  * its argument `mode` because the command carries a bitrate as well, and a
  * key is applied by the command the daemon already has rather than by one
  * added to spell the field the way this table would prefer. */
-#define LIVE_CH_ARG(c, a, n) c, a, n, NULL, NULL, RCD_IMPACT_NONE, 0, false, NULL
+#define LIVE_CH_ARG(c, a, n) c, a, n, NULL, NULL, RCD_IMPACT_NONE, 0, false, NULL, false
 
 /* A live command that answers for a family of settings and is told which one
  * by name. See rcd_key_t::live_sel. */
-#define LIVE_SEL(cmd, sel) cmd, "value", -1, sel, NULL, RCD_IMPACT_NONE, 0, false, NULL
+#define LIVE_SEL(cmd, sel) cmd, "value", -1, sel, NULL, RCD_IMPACT_NONE, 0, false, NULL, false
 
-#define SAVED		   NULL, NULL, -1, NULL, NULL, RCD_IMPACT_NONE, 0, false, NULL
-#define PROVIDED(p, imp)   NULL, NULL, -1, NULL, &(p), (imp), 0, false, NULL
+#define SAVED		   NULL, NULL, -1, NULL, NULL, RCD_IMPACT_NONE, 0, false, NULL, false
+#define PROVIDED(p, imp)   NULL, NULL, -1, NULL, &(p), (imp), 0, false, NULL, false
+
+/* Saved, and a share of the picture is a value for it as well as a number.
+ * See rcd_key_t::pct_ok. */
+#define SAVED_PCT NULL, NULL, -1, NULL, NULL, RCD_IMPACT_NONE, 0, false, NULL, true
 
 /* An ISP knob: live like the rest, and it takes the word "auto" as well as a
  * number. See rcd_key_t::auto_ok -- the word says "follow the tuning's own
@@ -265,11 +269,11 @@ static const char *const choices_threshold[] = {
  * its state in the driver, so a restart re-reads a file that no longer names
  * the key and writes nothing over the value left behind. See
  * rcd_key_t::live_reset. */
-#define LIVE_ISP(cmd) cmd, "value", -1, NULL, NULL, RCD_IMPACT_NONE, 0, true, "reset-isp"
+#define LIVE_ISP(cmd) cmd, "value", -1, NULL, NULL, RCD_IMPACT_NONE, 0, true, "reset-isp", false
 
 /* A provider whose value can cost the client its way back in: written like
  * any other, and put back if nobody confirms within `sec`. */
-#define GUARDED(p, imp, sec) NULL, NULL, -1, NULL, &(p), (imp), (sec), false, NULL
+#define GUARDED(p, imp, sec) NULL, NULL, -1, NULL, &(p), (imp), (sec), false, NULL, false
 
 static const rcd_key_t keys[] = {
 	/* -- Sensor -- */
@@ -442,7 +446,7 @@ static const rcd_key_t keys[] = {
 
 	/* -- OSD -- */
 	{"osd", "enabled", V_BOOL, 0, 0, NULL, SAVED},
-	{"osd", "font_size", V_INT, 8, 96, NULL, SAVED},
+	{"osd", "font_size", V_INT, 8, 96, NULL, SAVED_PCT},
 	{"osd", "font_stroke", V_INT, 0, 5, NULL, SAVED},
 
 	/*
@@ -997,6 +1001,21 @@ static void emit_key(cJSON *arr, const rcd_key_t *k)
 		 */
 		if (k->auto_ok)
 			cJSON_AddBoolToObject(o, "auto", true);
+		/*
+		 * And that a share of the picture is a value here too, which
+		 * a client has no other way to learn: it is not a number on
+		 * the pixel scale, and it has its own ends. Said only where it
+		 * is true, so a client that has never heard of it draws the
+		 * pixel range it always drew.
+		 */
+		if (k->pct_ok) {
+			cJSON *pct = cJSON_AddObjectToObject(o, "percent");
+
+			if (pct) {
+				cJSON_AddNumberToObject(pct, "min", RCD_PCT_MIN / 10.0);
+				cJSON_AddNumberToObject(pct, "max", RCD_PCT_MAX / 10.0);
+			}
+		}
 	} else if (k->type == V_CRED || k->type == V_HOST || k->type == V_TEXT ||
 		   k->type == V_PASSWD) {
 		cJSON_AddNumberToObject(o, "max_length", k->max);

@@ -39,26 +39,74 @@ rod_element_t *rod_find_element(rod_state_t *st, const char *name)
 }
 
 /*
- * A configured font size is pixels on the main stream, and the same count of
- * pixels on a quarter-height sub stream is four times the text. Scale by
- * height: it is what legibility tracks, and it keeps a 16:9 and a 4:3 encode
- * of one picture looking alike.
+ * The way back from rss_osd_parse_font_size: a size that arrived over the
+ * wire, in a spelling that parser reads the same way again.
+ */
+void rod_format_font_size(char *out, size_t n, int px, int pct)
+{
+	if (pct <= 0)
+		snprintf(out, n, "%d", px);
+	else if (pct % 10)
+		snprintf(out, n, "%d.%d%%", pct / 10, pct % 10);
+	else
+		snprintf(out, n, "%d%%", pct / 10);
+}
+
+/*
+ * The size that reaches the glyph cache, for one element on one stream.
  *
- * The floor is where the glyph cache stops being legible rather than merely
- * small. Text too small to read is worse than text that overruns its region,
- * because the region is clipped to the frame and the overrun is at least
- * visible.
+ * Legibility is a share of the picture either way; the two spellings differ
+ * only in where that share is worked out from. A percentage is already per
+ * stream and needs no reference. Pixels are pixels on the main stream, and
+ * the same count on a quarter-height sub stream is four times the text, so
+ * they are scaled by that stream's share of the main's height -- which also
+ * keeps a 16:9 and a 4:3 encode of one picture looking alike.
+ *
+ * The bounds are on the sizes rod works out and not on the one somebody
+ * typed, which is honoured as typed. Below the floor the glyph cache stops
+ * being legible rather than merely small, and text too small to read is worse
+ * than text that overruns its region -- the region is clipped to the frame,
+ * so an overrun is at least visible. The ceiling is a share because a caption
+ * is one: a line taking a quarter of the frame has stopped being an overlay.
+ * It cannot be reached from the config surface, whose range sits well inside
+ * it, and catches the hand-edit -- where a misplaced digit in a percentage is
+ * a factor of ten.
  */
 #define ROD_FONT_MIN 12
 
-int rod_font_for_stream(rod_state_t *st, int size, int stream_idx)
+static int derived_size(int size, int stream_h)
 {
-	if (stream_idx <= 0 || st->stream_h[0] <= 0)
-		return size;
+	int max = stream_h / 4;
 
-	int scaled = size * st->stream_h[stream_idx] / st->stream_h[0];
+	if (max > 0 && size > max)
+		size = max;
+	return size < ROD_FONT_MIN ? ROD_FONT_MIN : size;
+}
 
-	return scaled < ROD_FONT_MIN ? ROD_FONT_MIN : scaled;
+int rod_font_for_elem(const rod_state_t *st, const rod_element_t *e, int stream_idx)
+{
+	int px = st->settings.font_size;
+	int pct = st->settings.font_pct;
+	int h;
+
+	/* An element's own size wins, in whichever spelling it gave it; an
+	 * element that gave neither takes the overlay's. */
+	if (e && (e->font_size > 0 || e->font_pct > 0)) {
+		px = e->font_size;
+		pct = e->font_pct;
+	}
+
+	if (stream_idx < 0 || stream_idx >= ROD_MAX_STREAMS)
+		return px;
+	h = st->stream_h[stream_idx];
+	if (h <= 0)
+		return px;
+
+	if (pct > 0)
+		return derived_size(h * pct / 1000, h);
+	if (stream_idx > 0 && st->stream_h[0] > 0)
+		return derived_size(px * h / st->stream_h[0], h);
+	return px;
 }
 
 int rod_alloc_font(rod_state_t *st, int stream_idx, int font_size)

@@ -682,10 +682,30 @@ static int clamp_ring_slots(int slots, const char *key)
 	return pow2;
 }
 
+/*
+ * A font size from the config, in pixels.
+ *
+ * The overlay's size may be written as a share of the picture rather than as
+ * a count of pixels, and the pool has to hold what that share comes to: read
+ * as a number, "4%" is four, and the regions rod then creates do not fit in
+ * what was reserved for them. The height here is the estimate's own
+ * placeholder, so the answer is the right magnitude rather than the encoder's
+ * final one -- which is what everything else in this estimate is.
+ */
+static int osd_font_px(const char *spec, int picture_h, int fallback)
+{
+	int px, pct;
+
+	if (!rss_osd_parse_font_size(spec, &px, &pct))
+		return fallback;
+	return pct > 0 ? picture_h * pct / 1000 : px;
+}
+
 /* OSD pool sizing callback — estimates per-element region bytes */
 struct osd_pool_ctx {
 	rss_config_t *cfg;
 	int font_size;
+	int picture_h;
 	int main_w;
 	int main_h;
 	int sub_w;
@@ -701,7 +721,8 @@ static void osd_pool_cb(const char *section, void *ud)
 	if (!dot)
 		return;
 	const char *type = rss_config_get_str(c->cfg, section, "type", "text");
-	int efs = rss_config_get_int(c->cfg, section, "font_size", 0);
+	int efs =
+		osd_font_px(rss_config_get_str(c->cfg, section, "font_size", ""), c->picture_h, 0);
 	if (efs <= 0)
 		efs = c->font_size;
 	uint32_t adv = (uint32_t)(efs * 10 / 24);
@@ -885,15 +906,16 @@ int rvd_pipeline_init(rvd_state_t *st)
 	 * init from the sensor; the values stored by these reads are
 	 * display-only and never become configuration. */
 	{
-		int font_size = rss_config_get_int(cfg, "osd", "font_size", 24);
-		if (font_size < 10)
-			font_size = 10;
 		/* Placeholder dimensions for the estimate only. They scale the
 		 * sub-stream region as a ratio of the main, so a stand-in that
 		 * differs from the eventual resolution only nudges the estimate,
 		 * which carries headroom. */
 		int main_w = rss_config_get_int(cfg, "stream0", "width", 2560);
 		int main_h = rss_config_get_int(cfg, "stream0", "height", 1440);
+		int font_size =
+			osd_font_px(rss_config_get_str(cfg, "osd", "font_size", ""), main_h, 24);
+		if (font_size < 10)
+			font_size = 10;
 		int sub_w = rss_config_get_int(cfg, "stream1", "width", 640);
 		int sub_h = rss_config_get_int(cfg, "stream1", "height", 360);
 		bool has_sub = rss_config_get_bool(cfg, "stream1", "enabled", true);
@@ -902,6 +924,7 @@ int rvd_pipeline_init(rvd_state_t *st)
 		struct osd_pool_ctx pctx = {
 			.cfg = cfg,
 			.font_size = font_size,
+			.picture_h = main_h,
 			.main_w = main_w,
 			.main_h = main_h,
 			.sub_w = sub_w,

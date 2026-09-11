@@ -139,7 +139,7 @@ const struct help_entry help_entries[] = {
 	{"rod", "receipt [name] <text>               Append receipt line"},
 	{"rod", "receipt-clear [name]                Clear receipt display"},
 	{"rod", "set-position <elem> <pos>           Move element (named or x,y)"},
-	{"rod", "set-font-size <10-72>               Global font size"},
+	{"rod", "set-font-size <10-72|0.1-50%>       Global font size (px or height)"},
 	{"rod", "set-font-color <0xAARRGGBB>         Global text color"},
 	{"rod", "set-stroke-color <0xAARRGGBB>       Global stroke color"},
 	{"rod", "set-stroke-size <0-5>               Global stroke width"},

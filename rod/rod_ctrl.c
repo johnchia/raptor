@@ -92,25 +92,63 @@ static int handle_set_position(rod_state_t *st, const char *cmd_json, char *resp
 	return rss_ctrl_resp_ok(resp, resp_size);
 }
 
+/*
+ * A font size off the wire, in either spelling and bounded as rod will take
+ * it. A number is pixels, as it always was; a string is anything the config
+ * file would accept there, which is how a percentage reaches a running
+ * overlay without going through a restart.
+ *
+ * The percentage's ends are wide because the resolver bounds what it works
+ * out anyway -- a floor for legibility, a ceiling at a quarter of the frame.
+ * What is refused here is the typo: a share of the picture nobody means.
+ *
+ * False when the command carries no size, which is not an error -- most of
+ * the commands that call this are setting something else.
+ */
+static bool cmd_font_size(const char *cmd_json, const char *key, int *px, int *pct)
+{
+	char val[16];
+	int n;
+
+	*px = 0;
+	*pct = 0;
+	if (rss_json_get_str(cmd_json, key, val, sizeof(val)) == 0)
+		rss_osd_parse_font_size(val, px, pct);
+	else if (rss_json_get_int(cmd_json, key, &n) == 0)
+		*px = n;
+
+	if (*pct > 0 ? (*pct >= 1 && *pct <= 500) : (*px >= 10 && *px <= 72))
+		return true;
+
+	/* Nothing usable came in, so nothing is left behind for a caller that
+	 * does not check -- an element takes the overlay's size instead. */
+	*px = 0;
+	*pct = 0;
+	return false;
+}
+
 static int handle_font_size_change(rod_state_t *st, const char *cmd_json, char *resp, int resp_size)
 {
-	int val;
-	if (rss_json_get_int(cmd_json, "value", &val) != 0 || val < 10 || val > 72)
-		return rss_ctrl_resp_error(resp, resp_size, "need value 10-72");
+	char was[16], spelled[16];
+	int px = 0, pct = 0;
 
-	RSS_INFO("set-font-size: %d -> %d", st->settings.font_size, val);
-	st->settings.font_size = val;
-	rss_config_set_int(st->cfg, "osd", "font_size", val);
+	if (!cmd_font_size(cmd_json, "value", &px, &pct))
+		return rss_ctrl_resp_error(resp, resp_size, "need 10-72 pixels or 0.1-50%");
+
+	rod_format_font_size(was, sizeof(was), st->settings.font_size, st->settings.font_pct);
+	rod_format_font_size(spelled, sizeof(spelled), px, pct);
+	RSS_INFO("set-font-size: %s -> %s", was, spelled);
+	st->settings.font_size = px;
+	st->settings.font_pct = pct;
+	rss_config_set_str(st->cfg, "osd", "font_size", spelled);
 
 	for (int i = 0; i < st->elem_count; i++) {
 		rod_element_t *e = &st->elements[i];
 		if (!e->active || e->type != ROD_ELEM_TEXT)
 			continue;
 
-		int new_size = e->font_size > 0 ? e->font_size : val;
-
 		for (int s = 0; s < st->stream_count; s++) {
-			int fs = rod_font_for_stream(st, new_size, s);
+			int fs = rod_font_for_elem(st, e, s);
 
 			release_font(st, s, e->streams[s].font_idx);
 			int fi = rod_alloc_font(st, s, fs);
@@ -155,8 +193,7 @@ static int handle_elements_list(rod_state_t *st, char *resp, int resp_size)
 		cJSON_AddStringToObject(obj, "position", e->position);
 		if (e->type == ROD_ELEM_TEXT)
 			cJSON_AddStringToObject(obj, "template", e->tmpl);
-		int fs = e->font_size > 0 ? e->font_size : st->settings.font_size;
-		cJSON_AddNumberToObject(obj, "font_size", fs);
+		cJSON_AddNumberToObject(obj, "font_size", rod_font_for_elem(st, e, 0));
 		cJSON_AddItemToArray(arr, obj);
 	}
 	return rss_ctrl_resp_json(resp, resp_size, r);
@@ -168,13 +205,13 @@ static int handle_add_element(rod_state_t *st, const char *cmd_json, char *resp,
 	char type_str[16] = "text";
 	char tmpl[ROD_TMPL_LEN] = "";
 	char position[32] = "top_left";
-	int font_size = 0, max_chars = 20, align = 0;
+	int font_size = 0, font_pct = 0, max_chars = 20, align = 0;
 
 	rss_json_get_str(cmd_json, "name", name, sizeof(name));
 	rss_json_get_str(cmd_json, "type", type_str, sizeof(type_str));
 	rss_json_get_str(cmd_json, "template", tmpl, sizeof(tmpl));
 	rss_json_get_str(cmd_json, "position", position, sizeof(position));
-	rss_json_get_int(cmd_json, "font_size", &font_size);
+	cmd_font_size(cmd_json, "font_size", &font_size, &font_pct);
 	rss_json_get_int(cmd_json, "max_chars", &max_chars);
 	rss_json_get_int(cmd_json, "align", &align);
 
@@ -199,6 +236,7 @@ static int handle_add_element(rod_state_t *st, const char *cmd_json, char *resp,
 	rod_element_t *e = rod_find_element(st, name);
 	if (!e)
 		return rss_ctrl_resp_error(resp, resp_size, "internal error");
+	e->font_pct = font_pct;
 
 	if (e->type == ROD_ELEM_TEXT || e->type == ROD_ELEM_RECEIPT) {
 		if (e->type == ROD_ELEM_RECEIPT) {
@@ -218,9 +256,7 @@ static int handle_add_element(rod_state_t *st, const char *cmd_json, char *resp,
 				e->receipt.max_line_len = mll;
 		}
 		for (int s = 0; s < st->stream_count; s++) {
-			int base = e->font_size > 0 ? e->font_size : st->settings.font_size;
-			int fs = rod_font_for_stream(st, base, s);
-			int fi = rod_alloc_font(st, s, fs);
+			int fi = rod_alloc_font(st, s, rod_font_for_elem(st, e, s));
 			if (fi >= 0) {
 				e->streams[s].font_idx = fi;
 				create_elem_shm(st, e, s);
@@ -323,13 +359,14 @@ static int handle_set_element(rod_state_t *st, const char *cmd_json, char *resp,
 		mark_element_dirty(e, st->stream_count);
 	}
 
-	int new_font_size = 0;
-	if (rss_json_get_int(cmd_json, "font_size", &new_font_size) == 0 && new_font_size >= 10 &&
-	    new_font_size <= 72 && new_font_size != e->font_size &&
+	int new_px = 0, new_pct = 0;
+	if (cmd_font_size(cmd_json, "font_size", &new_px, &new_pct) &&
+	    (new_px != e->font_size || new_pct != e->font_pct) &&
 	    (e->type == ROD_ELEM_TEXT || e->type == ROD_ELEM_RECEIPT)) {
-		e->font_size = new_font_size;
+		e->font_size = new_px;
+		e->font_pct = new_pct;
 		for (int s = 0; s < st->stream_count; s++) {
-			int fs = rod_font_for_stream(st, new_font_size, s);
+			int fs = rod_font_for_elem(st, e, s);
 
 			release_font(st, s, e->streams[s].font_idx);
 			int fi = rod_alloc_font(st, s, fs);
@@ -577,7 +614,7 @@ int rod_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_size, vo
 		cJSON_AddStringToObject(r, "status", "ok");
 		cJSON *cfg = cJSON_AddObjectToObject(r, "config");
 		cJSON_AddBoolToObject(cfg, "enabled", !st->paused);
-		cJSON_AddNumberToObject(cfg, "font_size", st->settings.font_size);
+		cJSON_AddNumberToObject(cfg, "font_size", rod_font_for_elem(st, NULL, 0));
 		cJSON_AddStringToObject(cfg, "font_color", fc);
 		cJSON_AddStringToObject(cfg, "stroke_color", sc);
 		cJSON_AddNumberToObject(cfg, "font_stroke", st->settings.font_stroke);

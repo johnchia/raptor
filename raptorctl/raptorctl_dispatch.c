@@ -237,7 +237,9 @@ static const struct cmd_def cmd_table[] = {
 	{"osd-restart", NULL, 0, args_pool_kb},
 	{"set-font-color", NULL, 1, args_val_str},
 	{"set-stroke-color", NULL, 1, args_val_str},
-	{"set-font-size", NULL, 1, args_val},
+	/* Pixels, or a percentage of the picture height: the argument goes
+	 * over as written and rod reads the spelling. */
+	{"set-font-size", NULL, 1, args_val_str},
 	{"set-stroke-size", NULL, 1, args_val},
 	{"set-time-format", NULL, 1, args_val_str},
 	{"set-url", NULL, 1, args_val_str},

@@ -388,6 +388,31 @@ typedef struct {
 } edit_t;
 
 /*
+ * A percentage of the picture, in tenths of a percent, or -1.
+ *
+ * Digits, one optional decimal, a '%'. Narrower than the grammar rod reads
+ * back, on purpose: what a client is allowed to send has to be a spelling rod
+ * is certain to take the same way, and this is not the place to find out
+ * which of two readings won.
+ */
+static int pct_tenths(const char *s)
+{
+	int whole = 0, tenths = 0, digits = 0;
+
+	for (; *s >= '0' && *s <= '9'; s++, digits++)
+		whole = whole * 10 + (*s - '0');
+	if (digits < 1 || digits > 3)
+		return -1;
+	if (*s == '.') {
+		if (s[1] < '0' || s[1] > '9')
+			return -1;
+		tenths = s[1] - '0';
+		s += 2;
+	}
+	return (s[0] == '%' && s[1] == '\0') ? whole * 10 + tenths : -1;
+}
+
+/*
  * Render one JSON value into the string the config file holds.
  *
  * Everything written comes from the table -- the enum's own spelling, or a
@@ -458,6 +483,32 @@ static const char *render(const rcd_key_t *k, const cJSON *v, rcd_edit_t *e, cha
 		if (k->auto_ok && cJSON_IsString(v) && v->valuestring &&
 		    strcmp(v->valuestring, "auto") == 0) {
 			rss_strlcpy(e->rendered, "auto", sizeof(e->rendered));
+			return NULL;
+		}
+		/*
+		 * And a size given as a share of the picture keeps the '%',
+		 * for the same reason: it is not a point on the pixel scale
+		 * and cannot be written as one. The file gets the characters
+		 * that were sent, so what reads it later sees what was meant.
+		 * See rcd_key_t::pct_ok.
+		 */
+		if (k->pct_ok && cJSON_IsString(v) && v->valuestring) {
+			int tenths = pct_tenths(v->valuestring);
+
+			if (tenths < 0) {
+				snprintf(err, errsz,
+					 "'%s' must be a number of pixels or a percentage of the "
+					 "picture, like \"4%%\"",
+					 k->key);
+				return RCD_E_TYPE;
+			}
+			if (tenths < RCD_PCT_MIN || tenths > RCD_PCT_MAX) {
+				snprintf(err, errsz, "'%s' as a percentage is %d.%d%% to %d.%d%%",
+					 k->key, RCD_PCT_MIN / 10, RCD_PCT_MIN % 10,
+					 RCD_PCT_MAX / 10, RCD_PCT_MAX % 10);
+				return RCD_E_RANGE;
+			}
+			rss_strlcpy(e->rendered, v->valuestring, sizeof(e->rendered));
 			return NULL;
 		}
 		/* A labelled integer accepts the label as well as the number:
@@ -887,6 +938,13 @@ static cJSON *typed_value(const rcd_key_t *k, const char *raw)
 		 * would pin it there for real.
 		 */
 		if (k->auto_ok && strcmp(raw, "auto") == 0)
+			return cJSON_CreateString(raw);
+		/*
+		 * And likewise a share of the picture. Read as a number,
+		 * "4.5%" is 4 -- a size on the pixel scale, inside the range,
+		 * and off by a factor of the frame height.
+		 */
+		if (k->pct_ok && strchr(raw, '%'))
 			return cJSON_CreateString(raw);
 		return cJSON_CreateNumber(strtol(raw, NULL, 10));
 	}

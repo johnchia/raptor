@@ -142,7 +142,20 @@ void load_config(rod_state_t *st)
 	rss_strlcpy(c->font_path,
 		    rss_config_get_str(cfg, "osd", "font", "/usr/share/fonts/default.ttf"),
 		    sizeof(c->font_path));
-	c->font_size = rss_config_get_int(cfg, "osd", "font_size", 24);
+	/* Either spelling -- pixels, or a percentage of the stream's own
+	 * height -- and a size that is neither leaves the default in place. */
+	{
+		const char *fs = rss_config_get_str(cfg, "osd", "font_size", "");
+
+		if (!rss_osd_parse_font_size(fs, &c->font_size, &c->font_pct)) {
+			c->font_size = 24;
+			c->font_pct = 0;
+			if (fs[0])
+				RSS_WARN("font_size \"%s\" is neither pixels nor a percentage; "
+					 "using %d",
+					 fs, c->font_size);
+		}
+	}
 	c->font_color = parse_color(rss_config_get_str(cfg, "osd", "font_color", "0xFFFFFFFF"));
 	c->stroke_color = parse_color(rss_config_get_str(cfg, "osd", "stroke_color", "0xFF000000"));
 	c->font_stroke = rss_config_get_int(cfg, "osd", "font_stroke", 1);
@@ -229,7 +242,12 @@ static void load_osd_section(const char *section, void *userdata)
 	const char *position =
 		rss_config_get_str(cfg, section, "position", slot >= 0 ? name : "top_left");
 	const char *align_str = rss_config_get_str(cfg, section, "align", "");
-	int font_size = rss_config_get_int(cfg, section, "font_size", 0);
+	int font_size = 0, font_pct = 0;
+
+	/* Neither spelling given is not a failure: the element takes the
+	 * overlay's size, which is what most of them do. */
+	rss_osd_parse_font_size(rss_config_get_str(cfg, section, "font_size", ""), &font_size,
+				&font_pct);
 	int max_chars = rss_config_get_int(cfg, section, "max_chars", 20);
 	bool visible = rss_config_get_bool(cfg, section, "visible", true);
 	bool sub_only = rss_config_get_bool(cfg, section, "sub_only", false);
@@ -260,6 +278,7 @@ static void load_osd_section(const char *section, void *userdata)
 
 	e->visible = visible;
 	e->sub_streams_only = sub_only;
+	e->font_pct = font_pct;
 
 	if (type == ROD_ELEM_IMAGE) {
 		const char *path = rss_config_get_str(cfg, section, "path", "");

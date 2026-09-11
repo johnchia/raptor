@@ -174,11 +174,11 @@ input[type=range]{flex:1;-webkit-appearance:none;appearance:none;height:2px;back
 /* A knob following the tuning still shows where the picture is, faintly: the
    number is real and worth seeing, but nobody here chose it. */
 .sl.auto input[type=range],.sl.auto .num{opacity:.5}
-.autobtn{background:var(--sink);border:1px solid var(--line);border-radius:var(--r);
+.autobtn,.unitbtn{background:var(--sink);border:1px solid var(--line);border-radius:var(--r);
          padding:4px 9px;font-family:var(--mono);font-size:11px;color:var(--ink-dim);
          cursor:pointer;flex:0 0 auto}
-.autobtn[aria-pressed="true"]{background:var(--accent-dim);border-color:var(--accent);
-                              color:var(--ink)}
+.autobtn[aria-pressed="true"],.unitbtn[aria-pressed="true"]{background:var(--accent-dim);
+                              border-color:var(--accent);color:var(--ink)}
 .modoff{font-family:var(--mono);font-size:11px;color:var(--amber)}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;
   border-radius:50%;background:var(--ink);border:0;cursor:pointer}
@@ -636,6 +636,17 @@ const usable = k => k.available !== false && !MISSING_DAEMON.has(k.owner);
 const ISP = {caps: {}, auto: new Set(), live: {}, sig: ""};
 
 /*
+ * The main stream's encoded height, from the status reading rather than from
+ * [stream0] height -- which a camera is entitled to leave unset and take from
+ * the sensor, and where the two differ the configured one is fiction.
+ *
+ * It converts the overlay's font size between the two scales it can be
+ * written on. With no reading it stands at a 1080-line picture, which only
+ * ever decides where a control starts before the operator moves it.
+ */
+let PICTURE_H = 1080;
+
+/*
  * What this knob accepts here, falling back to the table for a camera that
  * has not said -- rvd down, or a build older than caps. The fallback is the
  * optimistic direction: a control drawn from a range too wide refuses at the
@@ -691,6 +702,36 @@ function shown(id) {
   if (typeof ISP.live[k.key] === "number") return ISP.live[k.key];
   const b = bounds(k);
   return b.neutral !== null ? b.neutral : b.min;
+}
+
+/* ═══ two scales, one size ═══════════════════════════════════════════════
+   A size in pixels is a size on one picture: the same number is a caption on
+   a 1520-line encode and a banner on a 360-line one. So rcd takes the
+   overlay's font size in two spellings -- a count of pixels, or a percentage
+   of the height -- and says which keys those are by publishing a second range
+   beside the first. They are one setting and get one control, which moves
+   between the scales rather than offering both at once. */
+const pctOf = v => (typeof v === "string" && /^[0-9]+(\.[0-9])?%$/.test(v)) ? parseFloat(v) : null;
+const asPct = n => (Math.round(n * 10) / 10) + "%";
+
+/* Put the control on the scale its value is written on. One function for
+   building the row, for pressing the unit button and for a value arriving
+   from the camera, because the three have to agree about what the slider's
+   ends mean. */
+function fontScale(el, k, val) {
+  if (!k.percent) return;
+  const p = k.percent, pv = pctOf(val), on = pv !== null;
+  const lo = on ? p.min : k.min, hi = on ? p.max : k.max;
+  const v = on ? pv : (typeof val === "number" ? val : k.min);
+  [el.querySelector("input[type=range]"), el.querySelector(".num")].forEach(i => {
+    if (!i) return;
+    i.min = lo; i.max = hi; i.step = on ? 0.1 : 1; i.value = v;
+  });
+  const b = el.querySelector(".unitbtn");
+  if (b) { b.textContent = on ? "%" : "px"; b.setAttribute("aria-pressed", String(on)); }
+  const hint = el.querySelector(".unit");
+  if (hint) hint.textContent = on ? p.min + "–" + p.max + "% of the picture height"
+                                  : fmt(k.min) + "–" + fmt(k.max) + " pixels on the main stream";
 }
 
 const OWNER_IMPACT = {};
@@ -1004,6 +1045,9 @@ function syncControl(el, k, val) {
   if (nm && num !== undefined) nm.value = num;
   const tx = el.querySelector(".txt");
   if (tx && document.activeElement !== tx) tx.value = val === undefined || val === null ? "" : val;
+  /* After the two above, which set a slider from a value that may be written
+     on the other scale: "4%" is not a position on the pixel track. */
+  fontScale(el, k, val);
 
   /* A named value rather than a magnitude, drawn as a select or a segmented
      control. Both are put back from the same display form buildControl drew
@@ -1143,19 +1187,24 @@ function buildControl(id, onChange) {
     const nm = document.createElement("input"); nm.className = "num"; nm.type = "number";
     nm.min = b.min; nm.max = b.max; nm.value = shown(id);
     const send = v => {
-      const c = clamp(id, b, v);
+      /* Which scale the slider is on is which spelling the value is in, so
+         the ends to hold it to are that scale's own. */
+      const on = pctOf(V[id]) !== null;
+      const c = clamp(id, on ? k.percent : b, v);
       sl.value = c; nm.value = c;
-      onChange(c);
+      onChange(on ? asPct(c) : c);
     };
     sl.addEventListener("input", () => { nm.value = sl.value; });
     sl.addEventListener("change", () => send(Number(sl.value)));
     nm.addEventListener("change", () => send(Number(nm.value)));
     if (b.auto) row.append(autoButton(id, row, onChange));
     row.append(sl, nm);
-    if (u) { const us = document.createElement("span"); us.className = "unit"; us.textContent = u; row.append(us); }
+    if (k.percent) row.append(unitButton(id, wrap, k, onChange));
+    else if (u) { const us = document.createElement("span"); us.className = "unit"; us.textContent = u; row.append(us); }
     row.classList.toggle("auto", isAuto(id));
     wrap.append(row);
     wrap.append(rangeHint(b));
+    fontScale(wrap, k, V[id]);
     if (!b.enabled) wrap.append(moduleOff());
     return wrap;
   }
@@ -1214,6 +1263,35 @@ function autoButton(id, row, onChange) {
     b.setAttribute("aria-pressed", String(on));
     row.classList.toggle("auto", on);
     onChange(on ? "auto" : Number(shown(id)));
+  });
+  return b;
+}
+
+/*
+ * The unit, and the choice of it.
+ *
+ * Switching keeps the size the text is at now, converted through the picture
+ * the camera says it is encoding -- so the button changes how the size is
+ * written and not how big the overlay is. Where the reading is missing the
+ * conversion is nominal, and what the operator does next is move the slider.
+ */
+function unitButton(id, wrap, k, onChange) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "unitbtn"; b.textContent = "px";
+  b.setAttribute("aria-pressed", "false");
+  b.title = "Pixels, or a percentage of the picture's height — which keeps the text " +
+            "the same size on the picture whatever the camera turns out to be encoding";
+  b.addEventListener("click", () => {
+    const p = k.percent, was = pctOf(V[id]);
+    let v;
+    if (was === null) {
+      const px = Number(shown(id)) || k.min;
+      v = asPct(Math.min(p.max, Math.max(p.min, px * 100 / PICTURE_H)));
+    } else {
+      v = Math.round(Math.min(k.max, Math.max(k.min, was * PICTURE_H / 100)));
+    }
+    onChange(v);
+    fontScale(wrap, k, v);
   });
   return b;
 }
@@ -1953,6 +2031,8 @@ async function loadState() {
   statLine(box, "Daemons", running.length + " up");
   memLine(box, s.mem);
   if (s.uptime !== undefined) statLine(box, "Uptime", hhmm(s.uptime));
+  const res = /^(\d+)x(\d+)$/.exec((s.stream0 || {}).resolution || "");
+  if (res) PICTURE_H = Number(res[2]) || PICTURE_H;
   ["stream0", "stream1"].forEach((k, i) => {
     const st = s[k];
     if (st) statLine(box, i === 0 ? "Main" : "Sub",

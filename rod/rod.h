@@ -81,6 +81,7 @@ typedef struct {
 	char last_expanded[ROD_EXPANDED_LEN];
 
 	int font_size;
+	int font_pct;
 	uint32_t color;
 	uint32_t stroke_color;
 	int stroke_size;
@@ -134,6 +135,7 @@ typedef struct {
 	bool enabled;
 	char font_path[128];
 	int font_size;
+	int font_pct;
 	uint32_t font_color;
 	uint32_t stroke_color;
 	int font_stroke;
@@ -216,7 +218,8 @@ int rod_add_element(rod_state_t *st, const char *name, rod_elem_type_t type, con
 		    rod_update_mode_t update_mode);
 void rod_remove_element(rod_state_t *st, const char *name);
 int rod_alloc_font(rod_state_t *st, int stream_idx, int font_size);
-int rod_font_for_stream(rod_state_t *st, int size, int stream_idx);
+void rod_format_font_size(char *out, size_t n, int px, int pct);
+int rod_font_for_elem(const rod_state_t *st, const rod_element_t *e, int stream_idx);
 void release_font(rod_state_t *st, int stream_idx, int font_idx);
 void sanitize_text(char *s);
 uint32_t parse_color(const char *s);
