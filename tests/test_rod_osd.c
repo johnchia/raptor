@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/mman.h>
 
 #include "greatest.h"
@@ -124,6 +125,32 @@ static bool has_buffer(const char *name, int s)
 		return false;
 	rss_osd_close(c);
 	return true;
+}
+
+/*
+ * A slot is zeroed when an element takes it, and 0 is a descriptor. A text
+ * element that carried it as its receipt input closed it on removal -- and
+ * what held descriptor 0 was the client whose request the removal was, or
+ * the socket the log goes to, whichever had taken the number.
+ */
+TEST removing_a_text_element_closes_nothing_of_anyone_elses(void)
+{
+	int fd;
+
+	setup();
+	/* Descriptor 0 is stdin here. Made sure of, since a runner may have
+	 * closed it, and the question is whether a removal takes it away. */
+	if (fcntl(0, F_GETFD) < 0) {
+		fd = open("/dev/null", O_RDONLY);
+		ASSERT_EQ(0, fd);
+	}
+
+	text_element("words", "top_left", "hello");
+	rod_remove_element(&st, "words");
+
+	ASSERTm("removing a text element closed descriptor 0", fcntl(0, F_GETFD) >= 0);
+	teardown();
+	PASS();
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -377,6 +404,7 @@ TEST elements_arrive_in_the_order_the_file_lists_them(void)
 
 SUITE(rod_osd_suite)
 {
+	RUN_TEST(removing_a_text_element_closes_nothing_of_anyone_elses);
 	RUN_TEST(an_element_that_draws_gets_a_buffer_on_every_stream);
 	RUN_TEST(a_hidden_element_holds_no_buffer);
 	RUN_TEST(hiding_an_element_gives_its_buffer_back);

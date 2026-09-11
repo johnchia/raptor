@@ -167,6 +167,11 @@ int rod_add_element(rod_state_t *st, const char *name, rod_elem_type_t type, con
 	rss_strlcpy(e->name, name, sizeof(e->name));
 	e->type = type;
 	e->active = true;
+	/* Zeroed, the slot says its receipt reads descriptor 0 -- and removing
+	 * the element then closes whatever holds that number: the client whose
+	 * request this is, or the log socket. Every element starts owning no
+	 * descriptor; a receipt is given one when its input is opened. */
+	e->receipt.input_fd = -1;
 	e->visible = true;
 	if (tmpl)
 		rss_strlcpy(e->tmpl, tmpl, sizeof(e->tmpl));
