@@ -186,8 +186,12 @@ static void api_refuse(rhd_client_t *c, const char *status, const char *code, co
  * something a viewing password may reach. /etc/shadow holds the only secret
  * on the camera that is not also handed out to watch video.
  *
- * A realm of its own, so a browser holding the media credential does not
- * offer it here and then cache the rejection against it.
+ * A realm of its own, so that once a browser has been challenged here it
+ * holds the system account for this route and not the media credential. It
+ * still offers the media credential first: RFC 7617 lets a client try what it
+ * holds for the page on everything under the page's URL, and the page is at
+ * the root. So a name that is not the system account's is refused without
+ * being charged as a guess -- see api_authenticate.
  */
 #define RHD_API_REALM "Raptor Config"
 
@@ -267,6 +271,22 @@ static api_auth_t api_authenticate(const char *request, const char *host, int *r
 	if (!colon)
 		return API_AUTH_NONE;
 	*colon = '\0';
+
+	/*
+	 * A name that is not the system account's cannot be a right answer,
+	 * so it costs no hash and no strike. It is not a guess: it is what a
+	 * browser holding the media credential for the page offers here on
+	 * its own, on every request, and charged as a wrong password the
+	 * console's own polling locked its operator out within a minute of
+	 * setting one.
+	 */
+	if (strcmp(decoded, RHD_API_USER) != 0) {
+		char name[64];
+
+		auth_safe_name(decoded, name, sizeof(name));
+		RSS_DEBUG("api: %s offered '%s', which is not the system account", host, name);
+		return API_AUTH_BAD;
+	}
 
 	int64_t now = api_now_ms();
 
