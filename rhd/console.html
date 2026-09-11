@@ -801,7 +801,6 @@ function isIdentifier(k) { return IDENTIFIER.test(k.key); }
 
 function widgetFor(k) {
   if (k.type === "bool") return "switch";
-  if (k.type === "credential") return "cred";
   /* Not the credential widget: this one is typed twice and committed by a
      button. A password that saved as you left the field would be a password
      you had one chance to type correctly and no way to check. */
@@ -858,7 +857,6 @@ const resetsLive = id => !!(byId[id] && byId[id].resets_live);
    CLI is exactly that: absent from the config and still applied, so "not
    configured" stops meaning "at the default" and the button has to stay. */
 const canReset = id => byId[id] && byId[id].resettable !== false &&
-                       byId[id].type !== "credential" &&
                        (resetsLive(id) || !DEFAULTED.has(id) || RESET.has(id));
 
 function toggleReset(id, on) {
@@ -954,7 +952,7 @@ async function commit(id, val, el) {
      changed their mind about the reset, not that they want both. */
   RESET.delete(id);
 
-  if (k.tier === "live" && k.type !== "credential" && k.type !== "password") {
+  if (k.tier === "live" && k.type !== "password") {
     if (inflight.has(id)) { parked[id] = {val: val, el: el}; return; }
     inflight.add(id);
     try {
@@ -977,17 +975,6 @@ async function commit(id, val, el) {
          ask again. Said rather than done: reloading out from under an
          operator mid-edit would lose whatever else they had staged. */
       wlog("sys", "password changed \u2014 reload this page to sign in with it");
-    } catch (e) { V[id] = prev; mark(el, e.message, true); }
-    return;
-  }
-
-  if (k.type === "credential") {
-    try {
-      /* rcd writes [rtsp] and [http] from one value, so the camera has one
-         account; the field it takes is the bare key, not a section. */
-      await api({cmd:"credentials", [k.key]: val});
-      CREDSET[id] = true;
-      mark(el, "set");
     } catch (e) { V[id] = prev; mark(el, e.message, true); }
     return;
   }
@@ -1204,21 +1191,6 @@ function buildControl(id, onChange) {
     box.append(one, two, go, st); wrap.append(box);
     const n = document.createElement("span"); n.className = "unit";
     n.textContent = "the login this page asks for \u00b7 never read back";
-    wrap.append(n); return wrap;
-  }
-
-  if (w === "cred") {
-    const box = document.createElement("div"); box.className = "cred";
-    const inp = document.createElement("input");
-    inp.type = /password/.test(k.key) ? "password" : "text";
-    inp.placeholder = CREDSET[id] ? "unchanged" : "not set";
-    inp.autocomplete = "off";
-    const st = document.createElement("span"); st.className = "state";
-    st.textContent = CREDSET[id] ? "set" : "unset";
-    inp.addEventListener("change", () => { if (inp.value) onChange(inp.value); });
-    box.append(inp, st); wrap.append(box);
-    const n = document.createElement("span"); n.className = "unit";
-    n.textContent = "write-only · never read back";
     wrap.append(n); return wrap;
   }
 
@@ -2477,7 +2449,7 @@ function absorb(values) {
     /* A secret is reported without its value. `configured` is the bit a
        form needs -- whether there is one to change -- and is present only
        where a store can be asked; `set` is what an older rcd said. */
-    if (byId[id].type === "credential" || byId[id].type === "password") {
+    if (byId[id].type === "password") {
       CREDSET[id] = v.configured === true || v.set === true;
       return;
     }

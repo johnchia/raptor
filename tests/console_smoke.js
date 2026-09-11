@@ -300,7 +300,6 @@ function valuesFor(section) {
 
 	SCHEMA.keys.filter(k => k.section === section).forEach((k, i) => {
 		const o = {section: k.section, key: k.key};
-		if (k.type === "credential") { o.set = true; out.push(o); return; }
 		/* A secret backed by a store: never its value, and the one bit
 		 * that says whether a form should offer "set" or "change". */
 		if (k.type === "password") { o.configured = false; out.push(o); return; }
@@ -333,6 +332,8 @@ function valuesFor(section) {
 			: k.type === "enum" ? (k.choices || ["x"])[0]
 			: k.type === "host" ? "camera.local"
 			: k.type === "ipv4" ? "192.168.1.50"
+			: k.type === "text" ? (k.key === "username" ? "viewer"
+					       : k.key === "password" ? "pass-word" : "Front Door")
 			: k.labels ? k.labels[0]
 			: (k.min || 0);
 		o.source = k.section === "device" || k.section === "network" ? "system" : "daemon";
@@ -1053,6 +1054,43 @@ try {
 		if (apply.classList.contains("busy") || apply.disabled)
 			fail("the apply button stayed busy after the camera answered");
 		if (p.dirty.size) fail("the apply left changes pending: " + [...p.dirty]);
+	}
+
+	/*
+	 * The stream and snapshot accounts are four keys and read back in the
+	 * clear: a field per key, showing what the camera has, staged behind
+	 * Apply like anything else the owner reads at start -- and one section's
+	 * password does not reach the other's.
+	 */
+	p.setActive("services");
+	p.render();
+	await settle();
+	{
+		const rowOf = id => sheet.querySelectorAll(".row").find(r => r.dataset.id === id);
+		const user = rowOf("rtsp.username");
+		if (!user) fail("the services tab drew no RTSP username row");
+		const uin = user.querySelectorAll("input")[0];
+		if (!uin || uin.value !== "viewer")
+			fail("the RTSP username field did not show the camera's own value: " +
+			     JSON.stringify(uin && uin.value));
+		const pw = rowOf("rtsp.password");
+		const pin = pw && pw.querySelectorAll("input")[0];
+		if (!pin || pin.value !== "pass-word")
+			fail("the RTSP password is hidden or missing: " + JSON.stringify(pin && pin.value));
+		const before = sent.length;
+		pin.value = "new-pass";
+		pin.handlers.change[0]();
+		await settle();
+		if (sent.length !== before)
+			fail("changing the RTSP password sent " + JSON.stringify(sent.slice(before)) +
+			     " instead of staging it for Apply");
+		if (!p.dirty.has("rtsp.password") || p.V["rtsp.password"] !== "new-pass")
+			fail("the RTSP password was not staged");
+		if (p.V["http.password"] !== "pass-word" || p.dirty.has("http.password"))
+			fail("the RTSP password reached the snapshot account");
+		if (sent.some(b => b.cmd === "credentials"))
+			fail("the page still writes the two accounts from one value");
+		p.dirty.delete("rtsp.password"); p.V["rtsp.password"] = "pass-word";
 	}
 
 	/*
