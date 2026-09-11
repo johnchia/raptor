@@ -215,6 +215,18 @@ static int handle_elements_list(rod_state_t *st, char *resp, int resp_size)
 	return rss_ctrl_resp_json(resp, resp_size, r);
 }
 
+/* The elements, not the slots they sit in: a removed element leaves its slot
+ * for the next one to take, and counting those said the camera had an element
+ * it had just been told to take away. */
+static int rod_live_elements(const rod_state_t *st)
+{
+	int n = 0;
+
+	for (int i = 0; i < st->elem_count; i++)
+		n += st->elements[i].active ? 1 : 0;
+	return n;
+}
+
 /* The section an element's config lives under, which is its name with the
  * overlay's prefix -- the same spelling rod_config.c reads them back from. */
 static void elem_section(char *out, size_t outsz, const char *name)
@@ -677,12 +689,13 @@ int rod_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_size, vo
 		cJSON_AddStringToObject(cfg, "stroke_color", sc);
 		cJSON_AddNumberToObject(cfg, "font_stroke", st->settings.font_stroke);
 		cJSON_AddStringToObject(cfg, "time_format", st->settings.time_format);
-		cJSON_AddNumberToObject(cfg, "elements", st->elem_count);
+		cJSON_AddNumberToObject(cfg, "elements", rod_live_elements(st));
 		return rss_ctrl_resp_json(resp_buf, resp_buf_size, r);
 	}
 
 	/* Default: status */
 	int region_count = 0;
+
 	for (int i = 0; i < st->elem_count; i++) {
 		if (!st->elements[i].active)
 			continue;
@@ -697,7 +710,10 @@ int rod_ctrl_handler(const char *cmd_json, char *resp_buf, int resp_buf_size, vo
 		return rss_ctrl_resp_error(resp_buf, resp_buf_size, "alloc");
 	cJSON_AddStringToObject(r, "status", "ok");
 	cJSON_AddNumberToObject(r, "streams", st->stream_count);
-	cJSON_AddNumberToObject(r, "elements", st->elem_count);
+	/* The elements, not the slots they sit in. A removed element leaves
+	 * its slot for the next one to take, and counting those said the
+	 * camera had an element it had just been told to take away. */
+	cJSON_AddNumberToObject(r, "elements", rod_live_elements(st));
 	cJSON_AddNumberToObject(r, "regions", region_count);
 	return rss_ctrl_resp_json(resp_buf, resp_buf_size, r);
 }
