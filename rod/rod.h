@@ -227,7 +227,8 @@ uint32_t parse_color(const char *s);
 void mark_all_dirty(rod_state_t *st);
 void mark_element_dirty(rod_element_t *e, int stream_count);
 void create_elem_shm(rod_state_t *st, rod_element_t *e, int s);
-void create_all_shms(rod_state_t *st);
+void destroy_elem_shm(rod_element_t *e, int s);
+void rod_sync_shms(rod_state_t *st);
 
 /* rod_template.c -- template variable expansion */
 int rod_expand_template(rod_state_t *st, const char *tmpl, char *out, int out_size);

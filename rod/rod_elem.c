@@ -193,10 +193,7 @@ void rod_remove_element(rod_state_t *st, const char *name)
 
 		rod_element_t *e = &st->elements[i];
 		for (int s = 0; s < st->stream_count; s++) {
-			if (e->streams[s].shm) {
-				rss_osd_destroy(e->streams[s].shm);
-				e->streams[s].shm = NULL;
-			}
+			destroy_elem_shm(e, s);
 			release_font(st, s, e->streams[s].font_idx);
 			e->streams[s].font_idx = -1;
 		}
@@ -315,17 +312,59 @@ void create_elem_shm(rod_state_t *st, rod_element_t *e, int s)
 	RSS_INFO("osd shm %s: %ux%u", name, w, h);
 }
 
-void create_all_shms(rod_state_t *st)
+void destroy_elem_shm(rod_element_t *e, int s)
 {
-	for (int i = 0; i < st->elem_count; i++) {
-		rod_element_t *e = &st->elements[i];
-		if (!e->active)
-			continue;
+	if (!e->streams[s].shm)
+		return;
 
-		for (int s = 0; s < st->stream_count; s++) {
-			if (e->sub_streams_only && s == 0)
-				continue;
-			create_elem_shm(st, e, s);
+	rss_osd_destroy(e->streams[s].shm);
+	e->streams[s].shm = NULL;
+	e->streams[s].width = 0;
+	e->streams[s].height = 0;
+}
+
+/*
+ * Whether this element puts anything on this stream's picture.
+ *
+ * An element drawing nothing is not simply an element nobody can see. rvd
+ * gives every buffer here a region of its own, and a region is a slot, a share
+ * of an overlay pool sized once when the pipeline came up, and -- where the
+ * compositor gives a pixel to one region only, as SigmaStar's does -- the
+ * place it sits, which is then no longer free for the element that would have
+ * drawn there. A hidden element holding all three is how one blanks another.
+ *
+ * So the buffer goes when the drawing goes, and comes back with it: rvd
+ * releases a region whose buffer has gone, and builds one again for a buffer
+ * that reappears.
+ */
+static bool elem_draws(const rod_element_t *e, int s)
+{
+	if (!e->active || !e->visible)
+		return false;
+	if (e->sub_streams_only && s == 0)
+		return false;
+	return true;
+}
+
+/*
+ * Bring the buffers into line with what the elements now draw.
+ *
+ * Called after anything that can change that answer rather than from each
+ * place that changes it, so that adding, removing, hiding, showing and moving
+ * all reach the same decision by the same route.
+ */
+void rod_sync_shms(rod_state_t *st)
+{
+	for (int s = 0; s < st->stream_count; s++) {
+		for (int i = 0; i < st->elem_count; i++) {
+			rod_element_t *e = &st->elements[i];
+
+			if (elem_draws(e, s)) {
+				if (!e->streams[s].shm)
+					create_elem_shm(st, e, s);
+			} else {
+				destroy_elem_shm(e, s);
+			}
 		}
 	}
 }

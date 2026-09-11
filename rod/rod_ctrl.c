@@ -158,13 +158,12 @@ static int handle_font_size_change(rod_state_t *st, const char *cmd_json, char *
 			}
 			e->streams[s].font_idx = fi;
 
-			if (e->streams[s].shm) {
-				rss_osd_destroy(e->streams[s].shm);
-				e->streams[s].shm = NULL;
-			}
-			create_elem_shm(st, e, s);
+			/* The size is in the buffer's dimensions, so the
+			 * buffer is remade rather than redrawn. */
+			destroy_elem_shm(e, s);
 		}
 	}
+	rod_sync_shms(st);
 
 	notify_rvd_osd_restart(st);
 
@@ -257,12 +256,11 @@ static int handle_add_element(rod_state_t *st, const char *cmd_json, char *resp,
 		}
 		for (int s = 0; s < st->stream_count; s++) {
 			int fi = rod_alloc_font(st, s, rod_font_for_elem(st, e, s));
-			if (fi >= 0) {
+			if (fi >= 0)
 				e->streams[s].font_idx = fi;
-				create_elem_shm(st, e, s);
-			}
 		}
 	}
+	rod_sync_shms(st);
 
 	for (int s = 0; s < st->stream_count; s++) {
 		char fwd[128];
@@ -294,6 +292,7 @@ static int handle_remove_element(rod_state_t *st, const char *cmd_json, char *re
 		return rss_ctrl_resp_error(resp, resp_size, "not found");
 
 	rod_remove_element(st, name);
+	rod_sync_shms(st);
 	RSS_INFO("remove-element: %s", name);
 	return rss_ctrl_resp_ok(resp, resp_size);
 }
@@ -376,12 +375,9 @@ static int handle_set_element(rod_state_t *st, const char *cmd_json, char *resp,
 				continue;
 			}
 			e->streams[s].font_idx = fi;
-			if (e->streams[s].shm) {
-				rss_osd_destroy(e->streams[s].shm);
-				e->streams[s].shm = NULL;
-			}
-			create_elem_shm(st, e, s);
+			destroy_elem_shm(e, s);
 		}
+		rod_sync_shms(st);
 		notify_rvd_osd_restart(st);
 	}
 
@@ -475,6 +471,7 @@ static int handle_show_hide(rod_state_t *st, const char *cmd_json, char *resp, i
 		return rss_ctrl_resp_error(resp, resp_size, "not found");
 
 	e->visible = show;
+	rod_sync_shms(st);
 
 	for (int s = 0; s < st->stream_count; s++) {
 		char fwd[128];

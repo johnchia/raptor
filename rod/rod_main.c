@@ -284,7 +284,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	create_all_shms(&st);
+	rod_sync_shms(&st);
 
 	/* Push all element positions to RVD */
 	for (int i = 0; i < st.elem_count; i++) {
