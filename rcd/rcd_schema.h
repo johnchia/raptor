@@ -101,6 +101,12 @@ rcd_impact_t rcd_daemon_impact(rcd_daemon_t d);
  * anything but a credential: for a path or a template the grammar is no
  * protection at all, and the reason those keys are absent is that they are
  * absent.
+ *
+ * It is read back like any other value. The stream and snapshot account is
+ * what an operator hands to a viewer, so they have to be able to read it, and
+ * it guards nothing the config file -- readable by anyone with the flash --
+ * does not already hold. The four keys are four keys: each is set on its own
+ * and reaches its own section, and nothing writes one from another.
  */
 typedef enum {
 	V_INT = 0,
@@ -132,8 +138,8 @@ bool rcd_type_secret(rcd_val_type_t t);
  * written to a line of its own in a file this daemon does not otherwise parse
  * -- it cannot become a path or a second directive there.
  *
- * It is not a relaxed V_CRED and must not be used for one: it is reported back
- * like any other value.
+ * It is not a relaxed V_CRED and must not be used for one: its grammar is a
+ * hostname's, not the userinfo of a URL.
  *
  * V_TEXT is the one grammar that admits a space, and it exists for a wifi
  * SSID -- a name chosen by whoever owns the network, not by this camera, and
@@ -160,7 +166,7 @@ bool rcd_type_secret(rcd_val_type_t t);
  * pre-derived PSK. That second form is what lets a client hash the passphrase
  * before sending it, so the plaintext never crosses an open setup network.
  *
- * Like V_CRED it is never reported back, and it is emptiable: an open network
+ * It is never reported back, and it is emptiable: an open network
  * has no passphrase, and that is a configuration rather than an omission.
  *
  * V_PASSWD is the root password, and it is a fourth grammar rather than one of

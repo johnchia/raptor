@@ -114,16 +114,6 @@ cJSON *rcd_action_validate(const cJSON *root, char *req, size_t reqsz, const cha
 cJSON *rcd_cmd_get(struct rcd_state *st, const cJSON *root);
 cJSON *rcd_cmd_set(struct rcd_state *st, const cJSON *root);
 
-/*
- * The camera's account, which raptor.conf holds as two.
- *
- * [rtsp] and [http] each carry their own username and password and nothing
- * makes them agree -- but a camera with two passwords is a camera whose second
- * password is the one nobody remembers, so this writes both from one value.
- * A command of its own rather than an edits array because either field may be
- * given alone, which a caller building a fixed array cannot express.
- */
-cJSON *rcd_cmd_credentials(struct rcd_state *st, const cJSON *root);
 cJSON *rcd_cmd_action(struct rcd_state *st, const cJSON *root);
 
 /* Report what has been written and not yet read, and what enacting it costs.

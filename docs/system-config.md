@@ -166,6 +166,15 @@ end up inside RTSP URLs and Digest headers. `$` is not in that set, so `V_CRED`
 cannot carry a `$6$` crypt string or a WPA passphrase containing punctuation.
 Widening it would weaken the four keys it exists to protect.
 
+**`V_CRED` is read back, and the four keys are four keys.** The stream and
+snapshot account is what an operator hands to a viewer, so the console shows it
+in the clear; it guards nothing the config file does not already hold. `[rtsp]`
+and `[http]` are usually given the same account and are still two: each key is
+set on its own, reaches its own section, and is staged behind Apply like every
+other key its owner reads at start -- which is what restarts `rsd` or `rhd` so
+the new account is the one asked for. There is no command that writes both
+sections from one value.
+
 ### One more impact level
 
 The impact enum stops at `pipeline`. Timezone genuinely only takes effect on

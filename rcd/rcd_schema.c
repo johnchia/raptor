@@ -85,14 +85,12 @@ rcd_impact_t rcd_daemon_impact(rcd_daemon_t d)
 /* have no daemon able to answer for it, and then its values come from  */
 /* the file alone.                                                      */
 /*                                                                     */
-/* [rtsp] and [http] hold a password and are read anyway. What protects */
-/* it is not the section being absent from this list -- it is that a    */
-/* value is emitted key by key from the table and a V_CRED returns      */
-/* before any value is looked at, so the password is never on the wire  */
-/* whatever the daemon put in its reply. Keeping the sections out of    */
-/* here bought nothing and cost the truth: with every key commented out */
-/* of raptor.conf, which is the shipped state, a client asking whether  */
-/* RTSP is on was told "unset" while the server was serving.            */
+/* [rtsp] and [http] hold the stream account and are read like any     */
+/* other section: that account is read back on purpose (see V_CRED).    */
+/* Keeping the sections out of here once bought nothing and cost the    */
+/* truth: with every key commented out of raptor.conf, which is the     */
+/* shipped state, a client asking whether RTSP is on was told "unset"   */
+/* while the server was serving.                                        */
 /* ------------------------------------------------------------------ */
 
 static const struct {
@@ -446,9 +444,10 @@ static const rcd_key_t keys[] = {
 	{"audio", "aec_enabled", V_BOOL, 0, 0, NULL, LIVE("set-aec")},
 	{"audio", "hpf_enabled", V_BOOL, 0, 0, NULL, LIVE("set-hpf")},
 
-	/* -- RTSP and HTTP. Both sections hold a username and password, and
-	 *    `credentials-set` writes the pair in one command so the camera
-	 *    has one account rather than two that drift. -- */
+	/* -- RTSP and HTTP. Each section holds its own username and password,
+	 *    set one key at a time like everything else: the two accounts are
+	 *    usually the same and are still two, and a client that wants them
+	 *    to agree writes both. -- */
 	{"rtsp", "enabled", V_BOOL, 0, 0, NULL, SAVED},
 	{"rtsp", "port", V_INT, 1, 65535, NULL, SAVED},
 	{"rtsp", "max_clients", V_INT, 1, 32, NULL, SAVED},
@@ -457,7 +456,8 @@ static const rcd_key_t keys[] = {
 	/* rsd enables Digest auth, and rhd Basic auth, only when both the
 	 * username and the password are set -- so clearing either one turns
 	 * authentication off, which is the only way to turn it off and is why
-	 * an empty value is accepted here. */
+	 * an empty value is accepted here. Both daemons read the pair when
+	 * they start, which is what the restart tier is for. */
 	{"rtsp", "username", V_CRED, 0, 63, NULL, SAVED},
 	{"rtsp", "password", V_CRED, 0, 63, NULL, SAVED},
 	{"http", "enabled", V_BOOL, 0, 0, NULL, SAVED},
@@ -991,7 +991,9 @@ static const char *type_name(rcd_val_type_t t)
 	case V_ENUM:
 		return "enum";
 	case V_CRED:
-		return "credential";
+		/* A text field to a client: the grammar is rcd's to hold, and
+		 * a refusal names it. */
+		return "text";
 	case V_HOST:
 		return "host";
 	case V_IPV4:
@@ -1008,7 +1010,7 @@ static const char *type_name(rcd_val_type_t t)
 
 bool rcd_type_secret(rcd_val_type_t t)
 {
-	return t == V_CRED || t == V_SECRET || t == V_PASSWD;
+	return t == V_SECRET || t == V_PASSWD;
 }
 
 static void emit_choices(cJSON *o, const char *const *choices)
@@ -1138,7 +1140,7 @@ static void emit_key(cJSON *arr, const rcd_key_t *k)
 	 */
 	cJSON_AddBoolToObject(o, "resets_live", k->live_reset != NULL);
 
-	/* A credential is settable and never readable, and a client that does
+	/* A secret is settable and never readable, and a client that does
 	 * not know that draws an input which always looks empty and calls it a
 	 * bug. Said plainly instead. A provider-backed key has no daemon to ask
 	 * and is read anyway -- from the store it is written to. */

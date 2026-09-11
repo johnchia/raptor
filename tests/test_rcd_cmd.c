@@ -164,35 +164,6 @@ TEST keeps_credential_sections_unreadable(void)
 }
 
 /*
- * What actually keeps a password off the wire: every credential in the table
- * is marked unreadable in the schema, whatever section it sits in and whether
- * or not a daemon would happily hand it over. Walked over the whole table so
- * a credential added to a readable section cannot quietly become reportable.
- */
-TEST no_credential_is_ever_readable(void)
-{
-	cJSON *out = cJSON_CreateObject();
-	rcd_schema_emit(out, NULL);
-	const cJSON *keys = cJSON_GetObjectItemCaseSensitive(out, "keys");
-	ASSERT(cJSON_IsArray(keys));
-
-	int creds = 0;
-	const cJSON *k = NULL;
-	cJSON_ArrayForEach(k, keys)
-	{
-		const cJSON *type = cJSON_GetObjectItemCaseSensitive(k, "type");
-		if (!cJSON_IsString(type) || strcmp(type->valuestring, "credential") != 0)
-			continue;
-		const cJSON *r = cJSON_GetObjectItemCaseSensitive(k, "readable");
-		ASSERT(cJSON_IsFalse(r));
-		creds++;
-	}
-	ASSERT_EQ(4, creds); /* a username and a password for [rtsp] and [http] */
-	cJSON_Delete(out);
-	PASS();
-}
-
-/*
  * A repeat row is served apart from the keys, and every key served is a
  * section a client may address.
  *
@@ -1250,6 +1221,121 @@ TEST a_config_with_no_elements_lists_none(void)
 	ASSERT_STR_EQ("", listed(cfg, buf, sizeof(buf)));
 
 	rss_config_free(cfg);
+	PASS();
+}
+
+/*
+ * The stream and snapshot account is read back. It is what an operator hands
+ * to a viewer, so a page has to be able to show it, and it guards nothing the
+ * file does not already hold in the clear. The schema spells the four keys as
+ * text fields with the length the table holds, and says nothing about
+ * readability -- which is how a client knows to draw a field that fills in.
+ */
+TEST the_stream_account_is_read_back(void)
+{
+	cJSON *out = cJSON_CreateObject();
+	rcd_schema_emit(out, NULL);
+	const cJSON *keys = cJSON_GetObjectItemCaseSensitive(out, "keys");
+	ASSERT(cJSON_IsArray(keys));
+
+	int seen = 0;
+	const cJSON *k = NULL;
+	cJSON_ArrayForEach(k, keys)
+	{
+		const char *sect =
+			cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(k, "section"));
+		const char *key = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(k, "key"));
+
+		if (!sect || !key || (strcmp(sect, "rtsp") != 0 && strcmp(sect, "http") != 0))
+			continue;
+		if (strcmp(key, "username") != 0 && strcmp(key, "password") != 0)
+			continue;
+		ASSERT_STR_EQ("text",
+			      cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(k, "type")));
+		ASSERT_EQ(63, cJSON_GetObjectItemCaseSensitive(k, "max_length")->valueint);
+		ASSERTm("a stream credential was still advertised as write-only",
+			cJSON_GetObjectItemCaseSensitive(k, "readable") == NULL);
+		seen++;
+	}
+	ASSERT_EQ(4, seen);
+	cJSON_Delete(out);
+
+	/* And a get answers with the value, from the file. */
+	rcd_state_t st;
+	char path[256];
+	FILE *f;
+
+	if (!sysconf_dir_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+	snprintf(path, sizeof(path), "%s/raptor.conf", RCD_SYSCONF_DIR);
+	f = fopen(path, "w");
+	ASSERT(f);
+	fputs("[rtsp]\nusername = viewer\npassword = pass-word\n", f);
+	fclose(f);
+	memset(&st, 0, sizeof(st));
+	st.config_path = path;
+
+	cJSON *req = cJSON_Parse("{\"section\":\"rtsp\"}");
+	ASSERT(req);
+	cJSON *r = rcd_cmd_get(&st, req);
+	cJSON_Delete(req);
+	ASSERT(r);
+	const cJSON *v = NULL, *pw = NULL;
+	cJSON_ArrayForEach(v, cJSON_GetObjectItemCaseSensitive(r, "values"))
+	{
+		const char *key = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(v, "key"));
+
+		if (key && strcmp(key, "password") == 0)
+			pw = cJSON_GetObjectItemCaseSensitive(v, "value");
+	}
+	ASSERTm("the password was not read back", cJSON_IsString(pw));
+	ASSERT_STR_EQ("pass-word", pw->valuestring);
+	cJSON_Delete(r);
+	PASS();
+}
+
+/*
+ * Four keys are four keys. [rtsp] and [http] each hold their own account, and
+ * writing one of them reaches its own section and no other; the command that
+ * wrote both from one value is gone, and asking for it is asking for nothing.
+ */
+TEST a_stream_credential_is_one_key(void)
+{
+	rcd_state_t st;
+	char path[256], resp[512];
+	FILE *f;
+
+	if (!sysconf_dir_ready())
+		SKIPm("no writable " RCD_SYSCONF_DIR " -- run the suite under unshare -rm");
+	snprintf(path, sizeof(path), "%s/raptor.conf", RCD_SYSCONF_DIR);
+	f = fopen(path, "w");
+	ASSERT(f);
+	fputs("[rtsp]\nusername = viewer\npassword = old\n\n[http]\nusername = viewer\npassword = "
+	      "old\n",
+	      f);
+	fclose(f);
+	memset(&st, 0, sizeof(st));
+	st.config_path = path;
+
+	cJSON *req = cJSON_Parse("{\"edits\":[{\"section\":\"rtsp\",\"key\":\"password\","
+				 "\"value\":\"new-pass\"}]}");
+	ASSERT(req);
+	cJSON *r = rcd_cmd_set(&st, req);
+	cJSON_Delete(req);
+	ASSERT(r);
+	cJSON_Delete(r);
+
+	rss_config_t *cfg = rss_config_load(path);
+	ASSERT(cfg);
+	ASSERT_STR_EQ("new-pass", rss_config_get_str(cfg, "rtsp", "password", ""));
+	ASSERT_STR_EQm("the RTSP password reached the snapshot account", "old",
+		       rss_config_get_str(cfg, "http", "password", ""));
+	rss_config_free(cfg);
+
+	ASSERT(rcd_handle("{\"cmd\":\"credentials\",\"password\":\"x\"}", resp, sizeof(resp), &st) >
+	       0);
+	ASSERTm("the command that wrote both accounts from one value still answers",
+		strstr(resp, "no such command") != NULL);
 	PASS();
 }
 
@@ -3417,8 +3503,8 @@ TEST the_schema_says_where_a_system_key_takes_effect(void)
 		ASSERT(cJSON_IsString(key));
 
 		/* A provider-backed key is read from its store, so it must not
-		 * be advertised as write-only the way a credential is -- with
-		 * one exception, which is the key that is both. */
+		 * be advertised as write-only the way a secret is -- with one
+		 * exception, which is the key that is both. */
 		if (strcmp(key->valuestring, "root_password") != 0)
 			ASSERT_EQ(NULL, ro);
 		/* And it is owned by the camera, not by a daemon a client
@@ -3465,8 +3551,8 @@ TEST the_schema_says_where_a_system_key_takes_effect(void)
 			checked++;
 		}
 		if (strcmp(key->valuestring, "root_password") == 0) {
-			/* Settable and never readable, like every other
-			 * credential -- and, unlike the others, backed by a
+			/* Settable and never readable, like the wifi
+			 * passphrase -- and, unlike it, backed by a
 			 * store, so the schema can also say whether one has
 			 * been set without saying what it is. That bit is what
 			 * lets a form offer "set a password" or "change it"
@@ -4614,7 +4700,8 @@ SUITE(rcd_cmd_suite)
 {
 	RUN_TEST(refuses_the_named_hazards);
 	RUN_TEST(keeps_credential_sections_unreadable);
-	RUN_TEST(no_credential_is_ever_readable);
+	RUN_TEST(the_stream_account_is_read_back);
+	RUN_TEST(a_stream_credential_is_one_key);
 	RUN_TEST(a_repeat_row_is_served_apart_from_the_keys);
 	RUN_TEST(an_element_name_is_a_name);
 	RUN_TEST(an_element_can_be_made_with_its_text);

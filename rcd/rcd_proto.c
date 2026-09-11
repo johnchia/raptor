@@ -219,8 +219,6 @@ static cJSON *dispatch(rcd_state_t *st, const char *name, const cJSON *root)
 		return rcd_cmd_get(st, root);
 	if (strcmp(name, "set") == 0)
 		return rcd_cmd_set(st, root);
-	if (strcmp(name, "credentials") == 0)
-		return rcd_cmd_credentials(st, root);
 	if (strcmp(name, "claim") == 0)
 		return rcd_cmd_claim(st, root);
 	if (strcmp(name, "action") == 0)

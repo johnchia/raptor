@@ -571,8 +571,8 @@ static const char *render(const rcd_key_t *k, const char *section, const cJSON *
 			if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
 				continue;
 			/* Naming the permitted set rather than the offending
-			 * byte: the value is a credential and must not be
-			 * quoted back over the wire, not even one character. */
+			 * byte, which is what the sender needs in order to
+			 * fix it. */
 			snprintf(err, errsz,
 				 "'%s' may contain only letters, digits, '-', '_', '.' and '~'",
 				 k->key);
@@ -971,9 +971,9 @@ static cJSON *typed_value(const rcd_key_t *k, const char *raw)
 static void emit_value(cJSON *arr, const rcd_key_t *k, const char *sect, rss_config_t *file,
 		       const cJSON *from_daemon)
 {
-	/* A credential is settable and never readable. Reporting the key with
-	 * no value is the honest rendering: the client draws the input and
-	 * knows not to expect it to fill in. */
+	/* A secret is settable and never readable. Reporting the key with no
+	 * value is the honest rendering: the client draws the input and knows
+	 * not to expect it to fill in. */
 	if (rcd_type_secret(k->type)) {
 		cJSON *o = cJSON_CreateObject();
 		if (!o)
@@ -1723,53 +1723,6 @@ cJSON *rcd_cmd_set(rcd_state_t *st, const cJSON *root)
 	/* And the clock, if one is already running -- a set made inside an
 	 * open window does not start a second one. */
 	rcd_guard_report(st, resp);
-	return resp;
-}
-
-cJSON *rcd_cmd_credentials(rcd_state_t *st, const cJSON *root)
-{
-	static const char *const fields[] = {"username", "password", NULL};
-	static const char *const sections[] = {"rtsp", "http", NULL};
-
-	cJSON *edits = cJSON_CreateArray();
-	if (!edits)
-		return NULL;
-
-	for (int f = 0; fields[f]; f++) {
-		const cJSON *v = cJSON_GetObjectItemCaseSensitive(root, fields[f]);
-		if (!v || cJSON_IsNull(v))
-			continue;
-		for (int s = 0; sections[s]; s++) {
-			cJSON *e = cJSON_CreateObject();
-			if (!e)
-				continue;
-			cJSON_AddStringToObject(e, "section", sections[s]);
-			cJSON_AddStringToObject(e, "key", fields[f]);
-			cJSON_AddItemToObject(e, "value", cJSON_Duplicate(v, true));
-			cJSON_AddItemToArray(edits, e);
-		}
-	}
-
-	if (cJSON_GetArraySize(edits) == 0) {
-		cJSON_Delete(edits);
-		return rcd_err(RCD_E_MALFORMED, "credentials needs a 'username' or a 'password'");
-	}
-
-	/*
-	 * Both daemons authenticate only when both fields are set, so clearing
-	 * one turns authentication off on both endpoints together -- which is
-	 * the point of setting them together, and why an empty value is
-	 * accepted by the table.
-	 */
-	cJSON *req = cJSON_CreateObject();
-	if (!req) {
-		cJSON_Delete(edits);
-		return NULL;
-	}
-	cJSON_AddItemToObject(req, "edits", edits);
-
-	cJSON *resp = rcd_cmd_set(st, req);
-	cJSON_Delete(req);
 	return resp;
 }
 

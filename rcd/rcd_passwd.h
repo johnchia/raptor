@@ -56,8 +56,8 @@ extern const rcd_provider_t rcd_provider_root_password;
  * Claim this camera: set the root password, once, on a camera that has none.
  *
  * Composed as a `set` on device.root_password rather than writing the store
- * directly, so the claim cannot accept a value the console would be refused --
- * the same reason `credentials` is composed rather than special-cased.
+ * directly, so the claim cannot accept a value the console would be refused:
+ * every write goes through the one table.
  *
  * Refuses a camera that is already claimed. That refusal is the reason this
  * is a command and not just a key: a key can be set by anyone rcd lets
