@@ -758,7 +758,11 @@ function fontScale(el, k, val) {
   const v = on ? pv : (typeof val === "number" ? val : k.min);
   [el.querySelector("input[type=range]"), el.querySelector(".num")].forEach(i => {
     if (!i) return;
-    i.min = lo; i.max = hi; i.step = on ? 0.1 : 1; i.value = v;
+    /* Half a percent is the step a size on the picture is worth moving
+       by; a tenth is a pixel or so and a slider that fine drifts. The
+       spelling stays in tenths, which is what the camera takes and what a
+       size converted from pixels comes out in. */
+    i.min = lo; i.max = hi; i.step = on ? 0.5 : 1; i.value = v;
   });
   const b = el.querySelector(".unitbtn");
   if (b) { b.textContent = on ? "%" : "px"; b.setAttribute("aria-pressed", String(on)); }
@@ -1231,7 +1235,8 @@ function buildControl(id, onChange) {
       /* Which scale the slider is on is which spelling the value is in, so
          the ends to hold it to are that scale's own. */
       const on = pctOf(V[id]) !== null;
-      const c = clamp(id, on ? k.percent : b, v);
+      let c = clamp(id, on ? k.percent : b, v);
+      if (on) c = Math.round(c * 2) / 2;   /* the step the scale moves in */
       sl.value = c; nm.value = c;
       onChange(on ? asPct(c) : c);
     };

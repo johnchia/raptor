@@ -799,6 +799,22 @@ try {
 	if (Number(fsl.max) !== 10 || Number(fsl.value) !== 3.6)
 		fail("the percentage scale drew " + fsl.value + " of " + fsl.max +
 		     ", not the camera's own value on its own range");
+	/* And moves in half-percent steps: a tenth is a pixel or so, and a
+	   slider that fine drifts. What is sent lands on a step. */
+	if (Number(fsl.step) !== 0.5)
+		fail("the percentage scale steps by " + fsl.step + ", not 0.5");
+	fsl.value = "4.3";
+	fsl.handlers.change[0]();
+	await settle();
+	if (p.V["osd.font_size"] !== "4.5%")
+		fail("moving the percentage slider staged " + JSON.stringify(p.V["osd.font_size"]) +
+		     ", not the nearest half percent");
+	fsl.value = "3.6";
+	fsl.handlers.change[0]();
+	await settle();
+	/* Back to the camera's own reading for the unit switch below. */
+	p.V["osd.font_size"] = "3.6%";
+	p.dirty.delete("osd.font_size");
 
 	/*
 	 * And switching units keeps the text the size it is now, converted
