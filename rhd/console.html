@@ -75,6 +75,21 @@ body.big{overflow:hidden}
 .screen.big .tag{font-size:12px;padding:4px 8px}
 .screen.big .tag.tl{top:12px;left:12px}
 .screen.big .deck{right:12px;bottom:12px;gap:6px}
+/* Focusing. The meter is the fine detail in the marked part of the picture,
+   sample by sample with the newest at the right, against the most it has
+   held: the figure means nothing on its own and everything against the
+   turn of the ring before it. */
+.screen .meter{position:absolute;top:6px;right:6px;display:none;align-items:center;gap:6px;
+               padding:3px 5px;background:rgba(8,11,12,.72);font-family:var(--mono);
+               font-size:9.5px;letter-spacing:.06em;color:#c3ced3;cursor:pointer}
+.screen.focusing .meter{display:flex}
+.screen .meter canvas{display:block;width:120px;height:28px}
+.screen .meter b{color:var(--accent);font-weight:600;min-width:4ch;text-align:right;
+                 font-variant-numeric:tabular-nums}
+.screen .patch{position:absolute;border:1px dashed rgba(195,206,211,.6);pointer-events:none;display:none}
+.screen.focusing:not(.zoomed) .patch{display:block}
+.screen.big .meter{top:12px;right:12px;font-size:12px;padding:4px 8px}
+.screen.big .meter canvas{width:180px;height:42px}
 .screen .curtain{position:absolute;inset:0;background:rgba(6,8,9,.92);display:none;
                  place-items:center;font-size:12px;letter-spacing:.16em;text-transform:uppercase;
                  color:var(--amber);text-align:center;padding:12px}
@@ -318,9 +333,14 @@ select{background:var(--sink);border:1px solid var(--line);border-radius:var(--r
         <img id="cam" alt="Live preview">
         <div class="fallback">No preview.<br>The JPEG encoder is off, or no stream is running.</div>
         <span class="tag tl" id="tagL">preview</span>
+        <div class="patch" id="focusPatch"></div>
+        <div class="meter" id="focusMeter" title="Detail in the marked area against the most seen. Click to start over.">
+          <canvas id="focusPlot" width="360" height="84"></canvas><b id="focusPct">–</b>
+        </div>
         <div class="deck">
           <button class="tag" id="camFit" hidden title="Back to the whole picture">fit</button>
           <button class="tag" id="camPick" hidden title="Show the other stream">sub</button>
+          <button class="tag" id="camFocus" title="Meter the picture's detail while the lens is turned">focus</button>
           <button class="tag" id="camBig" title="Expand the picture over the page">expand</button>
         </div>
         <div class="curtain" id="curtain">restarting</div>
@@ -2200,6 +2220,7 @@ function startPreview(retrying) {
   pick.hidden = previewStreams().length < 2;
   pick.textContent = n === 0 ? "sub" : "main";
   pick.title = "Show the " + (n === 0 ? "sub" : "main") + " stream";
+  focusFollow();
 }
 /* The sub-stream when there is one: the preview should not cost the main
  * stream's bitrate on every open page. Looking closer -- zoomed in, or
@@ -2234,9 +2255,10 @@ const VIEW = {s: 1, x: 0, y: 0};
 const VIEW_MAX = 8;
 let viewWasActive = false;
 
-/* Zoomed in or expanded: the view is being looked at, not glanced at. */
+/* Zoomed in, expanded or being focused: the view is being looked at, not
+ * glanced at. */
 function viewActive() {
-  return VIEW.s > 1 || document.getElementById("screen").classList.contains("big");
+  return FOCUS.on || VIEW.s > 1 || document.getElementById("screen").classList.contains("big");
 }
 
 function viewApply() {
@@ -2303,7 +2325,7 @@ function initViewer() {
   }, {passive: false});
 
   screen.addEventListener("pointerdown", e => {
-    if (VIEW.s <= 1 || e.button !== 0 || e.target.closest(".deck")) return;
+    if (VIEW.s <= 1 || e.button !== 0 || e.target.closest(".deck") || e.target.closest(".meter")) return;
     drag.on = true; drag.id = e.pointerId; drag.x = e.clientX; drag.y = e.clientY;
     screen.classList.add("dragging");
     if (screen.setPointerCapture) screen.setPointerCapture(e.pointerId);
@@ -2322,7 +2344,7 @@ function initViewer() {
   screen.addEventListener("pointerup", drop);
   screen.addEventListener("pointercancel", drop);
   screen.addEventListener("dblclick", e => {
-    if (e.target.closest(".deck")) return;
+    if (e.target.closest(".deck") || e.target.closest(".meter")) return;
     if (VIEW.s > 1) viewReset();
     else { const [px, py] = viewPoint(e); viewZoom(2, px, py); }
   });
@@ -2335,6 +2357,9 @@ function initViewer() {
     previewPick = previewStream() === 1 ? 0 : 1;
     startPreview();
   });
+
+  document.getElementById("camFocus").addEventListener("click", () => setFocus(!FOCUS.on));
+  document.getElementById("focusMeter").addEventListener("click", focusReset);
 
   const big = document.getElementById("camBig");
   const setBig = on => {
@@ -2351,6 +2376,189 @@ function initViewer() {
   document.addEventListener("keydown", e => {
     if (e.key === "Escape" && screen.classList.contains("big")) setBig(false);
   });
+}
+
+/* ═══ focus ══════════════════════════════════════════════════════════════
+   A lens is focused by turning it until the picture has the most fine
+   detail it will hold, and the eye is a poor judge of "most" through a
+   compressed stream a second or so behind the hand. So measure it: the
+   frames the camera is already sending are sampled where the view is
+   looking -- the middle of the fitted picture, or all of a zoomed one --
+   and the energy in a Laplacian of the luma is what a sharp edge has and
+   a soft one has not. Its scale depends on the scene, the exposure and
+   the encoder, so nothing is read from it but its shape over time: each
+   sample against the highest since the view last moved, which fades
+   slowly so a passing headlight is not the mark forever.
+
+   The meter fetches its frames itself, one snapshot at a time, rather
+   than reading the picture element or the stream. A canvas handed the
+   element gets, of a multipart image, only the first frame some
+   browsers ever painted; a fetch of the stream gets, in Safari, only its
+   first part. A snapshot is a whole response in every browser, and rhd
+   holds the request until the next frame is encoded, so asking again
+   the moment one arrives reads each frame once at whatever rate the
+   ring runs -- never faster than a few a second. */
+const FOCUS = {on: false, feed: null, stream: null, key: "", peak: 0, peakAt: 0, hist: [], cv: null};
+const FOCUS_WIDTH = 480;        /* sample width in pixels; the region is scaled to it */
+const FOCUS_HIST = 60;          /* samples kept on the plot */
+const FOCUS_HALF_LIFE_MS = 30000;
+const FOCUS_RETRY_MS = 2000;
+const FOCUS_TICK_MS = 200;      /* no closer together than this, however fast the ring */
+
+function setFocus(on) {
+  const btn = document.getElementById("camFocus");
+  FOCUS.on = on;
+  document.getElementById("screen").classList.toggle("focusing", on);
+  btn.textContent = on ? "done" : "focus";
+  btn.title = on ? "Put the meter away" : "Meter the picture's detail while the lens is turned";
+  focusReset();
+  viewSync();
+  if (on) focusFollow(); else focusClose();
+}
+
+function focusReset() {
+  FOCUS.hist = []; FOCUS.peak = 0; FOCUS.peakAt = 0;
+  focusDraw();
+}
+
+/* Read the stream the picture is showing; called again whenever the
+ * picture is re-attached, and a no-op unless the stream changed. */
+function focusFollow() {
+  if (!FOCUS.on) return;
+  const n = previewStream();
+  if (FOCUS.feed && FOCUS.stream === n) return;
+  focusClose();
+  FOCUS.stream = n;
+  const ac = FOCUS.feed = new AbortController();
+  (async () => {
+    while (ac === FOCUS.feed) {
+      const began = Date.now();
+      try {
+        const r = await fetch("/snap?stream=" + n + "&t=" + began, {signal: ac.signal, cache: "no-store"});
+        if (!r.ok) throw new Error("snap " + r.status);
+        const img = await focusDecode(await r.blob());
+        if (ac === FOCUS.feed) focusSample(img);
+      } catch (e) {
+        /* The camera did not answer -- a pipeline restart, most
+         * likely -- or the request was let go here. Only the former
+         * is worth waiting out. */
+        if (ac !== FOCUS.feed) return;
+        await focusWait(FOCUS_RETRY_MS);
+        continue;
+      }
+      const spare = FOCUS_TICK_MS - (Date.now() - began);
+      if (spare > 0) await focusWait(spare);
+    }
+  })();
+}
+
+function focusClose() {
+  if (FOCUS.feed) FOCUS.feed.abort();
+  FOCUS.feed = null; FOCUS.stream = null;
+}
+
+function focusWait(ms) { return new Promise(ok => setTimeout(ok, ms)); }
+
+/* A JPEG as something drawImage takes. An Image over an object URL is
+ * what every browser has had longest. */
+function focusDecode(blob) {
+  return new Promise((ok, no) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); ok(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); no(new Error("not a picture")); };
+    img.src = url;
+  });
+}
+
+/* The part of the picture the meter reads, in the picture's own pixels,
+ * and where that is on the box for the outline. The picture sits
+ * letterboxed in its element (object-fit: contain) and the element is
+ * transformed, so the box's window onto it is undone in two steps. */
+function focusRegion(nw, nh) {
+  const screen = document.getElementById("screen");
+  const w = screen.clientWidth, h = screen.clientHeight;
+  if (!w || !h || !nw || !nh) return null;
+  const k = Math.min(w / nw, h / nh);
+  const dw = nw * k, dh = nh * k, ox = (w - dw) / 2, oy = (h - dh) / 2;
+  let l, t, r, b;
+  if (VIEW.s > 1) {
+    l = -VIEW.x / VIEW.s; t = -VIEW.y / VIEW.s;
+    r = (w - VIEW.x) / VIEW.s; b = (h - VIEW.y) / VIEW.s;
+  } else {
+    l = ox + dw / 4; r = ox + dw * 3 / 4; t = oy + dh / 4; b = oy + dh * 3 / 4;
+  }
+  l = Math.max(l, ox); t = Math.max(t, oy); r = Math.min(r, ox + dw); b = Math.min(b, oy + dh);
+  if (r - l < 8 * k || b - t < 8 * k) return null;
+  return {sx: (l - ox) / k, sy: (t - oy) / k, sw: (r - l) / k, sh: (b - t) / k,
+          box: {left: l, top: t, width: r - l, height: b - t}};
+}
+
+/* One frame, as anything drawImage takes. */
+function focusSample(img) {
+  if (!FOCUS.on) return;
+  const nw = img.naturalWidth || img.width, nh = img.naturalHeight || img.height;
+  const reg = focusRegion(nw, nh);
+  if (!reg) return;
+  const patch = document.getElementById("focusPatch").style;
+  patch.left = reg.box.left + "px"; patch.top = reg.box.top + "px";
+  patch.width = reg.box.width + "px"; patch.height = reg.box.height + "px";
+
+  /* Another view is another measurement: the mark is only against itself. */
+  const key = [nw, nh, reg.sx | 0, reg.sy | 0, reg.sw | 0, reg.sh | 0].join();
+  if (key !== FOCUS.key) { FOCUS.key = key; focusReset(); }
+
+  const cv = FOCUS.cv || (FOCUS.cv = document.createElement("canvas"));
+  const w = Math.min(FOCUS_WIDTH, Math.round(reg.sw));
+  const h = Math.max(3, Math.round(reg.sh * w / reg.sw));
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  const g = cv.getContext("2d", {willReadFrequently: true});
+  g.drawImage(img, reg.sx, reg.sy, reg.sw, reg.sh, 0, 0, w, h);
+  const px = g.getImageData(0, 0, w, h).data;
+  const Y = new Uint8Array(w * h);
+  for (let i = 0, j = 0; i < Y.length; i++, j += 4)
+    Y[i] = (px[j] * 77 + px[j + 1] * 150 + px[j + 2] * 29) >> 8;
+
+  const v = focusMeasure(Y, w, h);
+  const now = Date.now();
+  if (FOCUS.peakAt) FOCUS.peak *= Math.pow(0.5, (now - FOCUS.peakAt) / FOCUS_HALF_LIFE_MS);
+  if (v >= FOCUS.peak) FOCUS.peak = v;
+  FOCUS.peakAt = now;
+  FOCUS.hist.push(v);
+  if (FOCUS.hist.length > FOCUS_HIST) FOCUS.hist.shift();
+  focusDraw();
+}
+
+/* Variance of the four-neighbour Laplacian over the interior. Zero on a
+ * flat field, and more the more edges there are and the harder they are. */
+function focusMeasure(Y, w, h) {
+  let sum = 0, sq = 0, n = 0;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const L = 4 * Y[i] - Y[i - 1] - Y[i + 1] - Y[i - w] - Y[i + w];
+      sum += L; sq += L * L; n++;
+    }
+  }
+  if (!n) return 0;
+  const mean = sum / n;
+  return sq / n - mean * mean;
+}
+
+function focusDraw() {
+  const cv = document.getElementById("focusPlot");
+  const g = cv.getContext("2d");
+  const W = cv.width, H = cv.height, n = FOCUS.hist.length;
+  const v = n ? FOCUS.hist[n - 1] : 0;
+  g.clearRect(0, 0, W, H);
+  const bw = W / FOCUS_HIST;
+  for (let i = 0; i < n; i++) {
+    const hh = FOCUS.peak > 0 ? Math.max(2, H * FOCUS.hist[i] / FOCUS.peak) : 2;
+    g.fillStyle = i === n - 1 ? "#35b7c2" : "rgba(195,206,211,.35)";
+    g.fillRect(W - (n - i) * bw, H - hh, bw - 1, hh);
+  }
+  document.getElementById("focusPct").textContent =
+    n && FOCUS.peak > 0 ? Math.round(100 * v / FOCUS.peak) + "%" : "–";
 }
 
 /* ═══ status ═════════════════════════════════════════════════════════════ */

@@ -79,6 +79,20 @@ class El {
 	set clientHeight(v) { this._h = v; }
 	getBoundingClientRect() { return {left: 0, top: 0, width: this.clientWidth, height: this.clientHeight}; }
 	closest(sel) { return this.classes.has(sel.replace(/^\./, "")) ? this : null; }
+	/* A canvas: remembers what was drawn into it, and reads back whatever
+	 * picture a test installed as _pixels(w, h) -- a flat black one
+	 * otherwise. Drawing the plot is not checked, only not crashing. */
+	getContext() {
+		const self = this;
+		this._draws = this._draws || [];
+		return this._ctx || (this._ctx = {
+			fillStyle: "", strokeStyle: "",
+			drawImage: (...a) => self._draws.push(a),
+			getImageData: (x, y, w, h) => ({width: w, height: h,
+				data: self._pixels ? self._pixels(w, h) : new Uint8ClampedArray(w * h * 4)}),
+			clearRect() {}, fillRect() {},
+		});
+	}
 	append(...nodes) {
 		nodes.forEach(n => this.children.push(typeof n === "string" ? new Text(n) : n));
 	}
@@ -353,6 +367,8 @@ function valuesFor(section) {
 	return out;
 }
 
+const SNAPS = [];                 /* every snapshot the meter asked for, in order */
+const BITMAP = {w: 0, h: 0};      /* what createImageBitmap answers */
 const sandbox = {
 	document, console,
 	window: {addEventListener: () => {}, location: {}},
@@ -363,8 +379,25 @@ const sandbox = {
 	setInterval: () => 0,
 	clearInterval: () => {},
 	requestAnimationFrame: () => 0,
-	AbortController: function () { this.signal = {}; this.abort = () => {}; },
+	AbortController: function () { const sig = {aborted: false}; this.signal = sig; this.abort = () => { sig.aborted = true; }; },
+	Blob, Uint8Array,
+	/* A picture decodes to its size, on the next microtask. */
+	Image: function () {
+		const self = this;
+		Object.defineProperty(this, "src", {set(v) { self._src = v; Promise.resolve().then(() => {
+			self.width = self.naturalWidth = BITMAP.w; self.height = self.naturalHeight = BITMAP.h;
+			const done = () => (BITMAP.bad ? self.onerror && self.onerror() : self.onload && self.onload());
+			if (BITMAP.hold) BITMAP.hold.then(done); else done();
+		}); }, get() { return self._src; }});
+	},
 	fetch: async (url, opt) => {
+		/* The meter's snapshots: each request waits for a test to answer it. */
+		if (String(url).indexOf("/snap") === 0) {
+			const req = {url: String(url), signal: opt && opt.signal};
+			req.answer = new Promise(r => { req.give = blob => r({ok: true, status: 200, blob: async () => blob}); });
+			SNAPS.push(req);
+			return req.answer;
+		}
 		/* The claim route is not rcd's envelope and is answered here
 		 * rather than by reply(): the page asks it before anything
 		 * else, without a credential, and what it answers decides
@@ -381,7 +414,6 @@ const sandbox = {
 		if (HOLD && HOLD.cmd === body.cmd) await HOLD.until;
 		return {ok: true, status: 200, json: async () => reply(body), text: async () => ""};
 	},
-	Image: function () {},
 	EventSource: function () { this.addEventListener = () => {}; this.close = () => {}; },
 	URL: URL, URLSearchParams: URLSearchParams, JSON, Math, Date, Set, Map, Promise,
 	parseInt, parseFloat, isNaN, encodeURIComponent, decodeURIComponent, btoa: s => s,
@@ -406,6 +438,7 @@ const probe_epilogue = `
   V: V,
   claimGate: claimGate, drawClaim: drawClaim,
   VIEW: VIEW, startPreview: startPreview,
+  FOCUS: FOCUS, focusSample: focusSample, focusMeasure: focusMeasure,
 };
 `;
 
@@ -1248,6 +1281,162 @@ try {
 	}
 
 	/*
+	 * The focus meter. It asks the camera for one snapshot at a time and
+	 * samples each as it comes; it reads the middle of the fitted picture
+	 * and all of a zoomed one, in the picture's own pixels; a sharp field
+	 * scores above a soft one, a flat one and a ramp score nothing; the
+	 * mark is against the most seen since the view moved; the requests
+	 * follow the stream shown and stop with the meter; and while it is
+	 * out, the main is shown.
+	 */
+	{
+		const screen = nodes.screen, cam = nodes.cam, F = p.FOCUS;
+		const btn = nodes.camFocus, pct = nodes.focusPct, patch = nodes.focusPatch;
+		screen.clientWidth = 320; screen.clientHeight = 180;
+		BITMAP.w = 640; BITMAP.h = 480;
+		/* The meter paces itself with timers; let them run, at once. */
+		sandbox.setTimeout = fn => setTimeout(fn, 0);
+		if (!btn.handlers.click) fail("the focus button does nothing");
+		if (!/stream=1/.test(cam.src)) fail("the sub was not showing before the meter: " + cam.src);
+
+		/* Pictures: a checkerboard of 4 px squares, the same softened
+		 * into a ramp, a flat grey, and a linear ramp. */
+		const paint = f => (w, h) => {
+			const d = new Uint8ClampedArray(w * h * 4);
+			for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+				const v = f(x, y), i = (y * w + x) * 4;
+				d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
+			}
+			return d;
+		};
+		const sharp = paint((x, y) => ((x >> 2) + (y >> 2)) & 1 ? 230 : 20);
+		const soft = paint((x, y) => 20 + 210 * (0.5 + 0.5 * Math.sin((x + y) * Math.PI / 4)));
+		const flat = paint(() => 128);
+		const ramp = paint((x, y) => y);
+		let frame = sharp;
+		const cvs = []; /* every canvas the page makes, so the offscreen one can be found */
+		const mk = document.createElement;
+		document.createElement = t => { const e = mk(t); if (t === "canvas") { cvs.push(e); e._pixels = (w, h) => frame(w, h); } return e; };
+		const jpeg = new Blob([Uint8Array.from([0xff, 0xd8, 0xff, 0xd9])], {type: "image/jpeg"});
+		const last = () => SNAPS[SNAPS.length - 1];
+		const shot = {width: 640, height: 480};
+
+		/* The meter comes out: main stream, and a snapshot asked of it. */
+		const asked = SNAPS.length;
+		btn.handlers.click[0]();
+		await settle();
+		if (!F.on || !screen.classList.contains("focusing") || btn.textContent !== "done")
+			fail("the meter did not come out: " + screen.className + " " + btn.textContent);
+		if (!/stream=0/.test(cam.src)) fail("the meter did not go to the main stream: " + cam.src);
+		if (SNAPS.length !== asked + 1) fail("the meter asked for " + (SNAPS.length - asked) + " snapshots, not one");
+		if (!/^\/snap\?stream=0/.test(last().url)) fail("the meter asked a stream other than the one shown: " + last().url);
+		if (F.hist.length) fail("the meter sampled before any frame arrived");
+
+		/* Each answer is a sample, and the next request follows it. */
+		last().give(jpeg); await settle();
+		if (F.hist.length !== 1) fail("a snapshot gave " + F.hist.length + " samples");
+		if (SNAPS.length !== asked + 2) fail("the meter did not ask again after a frame: " + SNAPS.length);
+		/* An answer that is not a picture is no sample, and no reason to
+		 * stop asking. */
+		BITMAP.bad = true; last().give(jpeg); await settle(); BITMAP.bad = false;
+		if (F.hist.length !== 1) fail("a snapshot that would not decode was sampled");
+		if (SNAPS.length !== asked + 3) fail("the meter did not ask again after a bad snapshot: " + SNAPS.length);
+		last().give(jpeg); await settle();
+		if (F.hist.length !== 2) fail("a second snapshot was not sampled: " + F.hist.length);
+		const off = cvs[0];
+		if (!off || !off._draws.length) fail("the meter sampled nothing");
+		/* The 640x480 picture sits in a 320x180 box at 0.375, 240 wide from
+		 * x=40: the middle half of it is (160,120) 320x240 in its own pixels. */
+		let d = off._draws[off._draws.length - 1];
+		const near = (a, b) => Math.abs(a - b) < 0.5;
+		if (!(near(d[1], 160) && near(d[2], 120) && near(d[3], 320) && near(d[4], 240)))
+			fail("the fitted meter read the wrong part of the picture: " + d.slice(1, 5).join());
+		if (!/^100px$/.test(patch.style.left) || !/^120px$/.test(patch.style.width) || !/^45px$/.test(patch.style.top))
+			fail("the outline is not over the part read: " + JSON.stringify(patch.style));
+		if (pct.textContent !== "100%") fail("a steady picture is not at its mark: " + pct.textContent);
+		const vSharp = F.hist[0];
+		if (!(vSharp > 0)) fail("a checkerboard measured " + vSharp);
+
+		frame = soft; p.focusSample(shot);
+		if (F.hist.length !== 3 || !(F.hist[2] < vSharp / 4))
+			fail("a soft picture did not score well under a sharp one: " + F.hist.join());
+		if (!/^(\d|[1-9]\d)%$/.test(pct.textContent) || pct.textContent === "100%")
+			fail("the figure is not against the mark: " + pct.textContent);
+		frame = flat; p.focusSample(shot);
+		if (F.hist[3] !== 0) fail("a flat field measured " + F.hist[3]);
+		/* A ramp has no second derivative: only a kernel that sums to
+		 * zero says so, and a flat field cannot tell (its variance is
+		 * nought under any kernel). */
+		frame = ramp; p.focusSample(shot);
+		if (F.hist[4] !== 0) fail("a ramp measured " + F.hist[4] + ": the kernel does not sum to zero");
+
+		/* Zooming moves the region and starts the mark over: 2x about the
+		 * middle shows element x 80..240 -> picture x 106.7 wide 426.7. */
+		frame = sharp;
+		screen.handlers.wheel[0]({clientX: 160, clientY: 90, deltaY: -Math.log(2) / 0.002,
+					  target: {closest: () => null}, preventDefault() {}});
+		if (!(p.VIEW.s > 1.99 && p.VIEW.s < 2.01)) fail("zoom for the meter test came out " + p.VIEW.s);
+		p.focusSample(shot);
+		d = off._draws[off._draws.length - 1];
+		if (!(near(d[1], 106.67) && near(d[2], 120) && near(d[3], 426.67) && near(d[4], 240)))
+			fail("the zoomed meter read the wrong part of the picture: " + d.slice(1, 5).join());
+		if (F.hist.length !== 1) fail("moving the view kept the old mark: " + F.hist.length);
+		if (!/stream=0/.test(cam.src)) fail("the zoomed meter lost the main: " + cam.src);
+		/* Fitting again is not leaving the meter, so the main stays and
+		 * the pending request is the same one. */
+		const pending = last();
+		nodes.camFit.handlers.click[0]();
+		await settle();
+		if (!/stream=0/.test(cam.src)) fail("fitting under the meter let go of the main: " + cam.src);
+		if (last() !== pending || pending.signal.aborted) fail("fitting re-asked the meter's snapshot");
+		p.focusSample(shot); /* the fit is a new view, so a new mark */
+		if (F.hist.length !== 1) fail("the fit did not start the mark over: " + F.hist.length);
+
+		/* Asking for the sub moves the requests to it and lets the pending
+		 * one go; an answer to it is not a sample. */
+		nodes.camPick.handlers.click[0]();
+		await settle();
+		if (!/stream=1/.test(cam.src)) fail("the pick did not show the sub: " + cam.src);
+		if (!pending.signal.aborted) fail("the meter kept its request on the main after moving to the sub");
+		if (last() === pending || !/stream=1/.test(last().url))
+			fail("the meter did not follow the picture to the sub: " + SNAPS.map(r => r.url).join(" "));
+		pending.give(jpeg); await settle();
+		if (F.hist.length !== 1) fail("an answer to the let-go request was sampled");
+		last().give(jpeg); await settle();
+		if (F.hist.length !== 2) fail("a frame on the new stream was not sampled: " + F.hist.length);
+
+		/* A frame still decoding when its request is let go is not a
+		 * sample either: hold the decode, move back to the main, then
+		 * let it finish. */
+		let release; BITMAP.hold = new Promise(r => { release = r; });
+		last().give(jpeg); await settle();
+		if (F.hist.length !== 2) fail("a frame was sampled before it had decoded");
+		nodes.camPick.handlers.click[0](); await settle();
+		if (!/stream=0/.test(cam.src)) fail("the pick back to the main did not show it");
+		release(); BITMAP.hold = null; await settle();
+		if (F.hist.length !== 2) fail("a frame that decoded after its request was let go was sampled");
+		if (!/stream=0/.test(last().url)) fail("the meter did not follow back to the main: " + last().url);
+
+		/* Clicking the meter starts over; putting it away lets the request
+		 * go, stops sampling and brings the sub back. */
+		nodes.focusMeter.handlers.click[0]();
+		if (F.hist.length !== 0 || pct.textContent !== "–") fail("a click on the meter did not start over");
+		const drawsBefore = off._draws.length, askedBefore = SNAPS.length, open = last();
+		btn.handlers.click[0]();
+		await settle();
+		if (F.on || F.feed !== null || screen.classList.contains("focusing") || btn.textContent !== "focus")
+			fail("the meter was not put away: " + screen.className + " " + btn.textContent);
+		if (!open.signal.aborted) fail("putting the meter away left its request open");
+		open.give(jpeg); await settle();
+		p.focusSample(shot);
+		if (off._draws.length !== drawsBefore) fail("the meter kept sampling after it was put away");
+		if (!/stream=1/.test(cam.src)) fail("putting the meter away did not come back to the sub: " + cam.src);
+		if (SNAPS.length !== askedBefore) fail("putting the meter away asked for a snapshot");
+		document.createElement = mk;
+		sandbox.setTimeout = fn => { void fn; return 0; };
+	}
+
+	/*
 	 * And the gate in front of all of it. A camera nobody has claimed has
 	 * no credential to authenticate the console with, so the page must ask
 	 * before it asks for anything else and draw a way in rather than a
@@ -1286,5 +1475,6 @@ try {
 		    "day/night override wired, image knobs on the camera's own " +
 		    "ranges, " + live_reset + " reset live and " + staged_reset +
 		    " staged, " + served + " requests served, viewer zooms, pans, " +
-		    "switches and expands and the stream follows, claim card drawn");
+		    "switches and expands and the stream follows, focus meter reads " +
+		    "each snapshot as it comes and ranks sharp over soft, claim card drawn");
 })();
