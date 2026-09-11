@@ -850,29 +850,27 @@ void rvd_osd_check(rvd_state_t *st)
 	st->osd_retry_counter++;
 
 	/*
-	 * Every second, each region against the buffer behind it: one whose
+	 * Every second, each region against the buffer behind it -- one whose
 	 * producer restarted or resized is reopened, one whose producer has
-	 * gone is released. That is one path rather than two, which is what
-	 * the region asks for -- when two of them could notice, whichever
-	 * noticed first decided what happened, and the one that got there
-	 * every fifth second did nothing.
+	 * gone is released -- and then the buffers that have no region yet,
+	 * which costs a directory scan per stream.
+	 *
+	 * The two at one rate because they are halves of one question. An
+	 * element hidden and shown again is a buffer destroyed and made again,
+	 * so a scan that came round every fifth second would leave the picture
+	 * without an element for that long, having taken it away within one.
+	 * The scan is the dearer half and it is still only a readdir of a
+	 * directory with an entry per element, against a tick that already
+	 * walks every region.
 	 */
-	if ((st->osd_retry_counter % 10) == 0) {
+	if (st->osd_retry_counter >= RVD_OSD_RETRY_INTERVAL) {
+		st->osd_retry_counter = 0;
 		for (int s = 0; s < st->stream_count; s++) {
 			if (st->streams[s].is_jpeg)
 				continue;
 			for (int r = 0; r < st->osd_region_count[s]; r++)
 				try_open_shm(st, s, &st->osd_regions[s][r]);
-		}
-	}
-
-	/* Less often, the dearer question: elements with no region at all yet,
-	 * which costs a directory scan per stream. */
-	if (st->osd_retry_counter >= RVD_OSD_RETRY_INTERVAL) {
-		st->osd_retry_counter = 0;
-		for (int s = 0; s < st->stream_count; s++) {
-			if (!st->streams[s].is_jpeg)
-				scan_new_shm(st, s);
+			scan_new_shm(st, s);
 		}
 	}
 

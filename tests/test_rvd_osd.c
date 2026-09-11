@@ -177,6 +177,29 @@ TEST a_producer_that_comes_straight_back_keeps_its_region(void)
 }
 
 /*
+ * An element hidden and shown again is, since rod stopped keeping buffers for
+ * elements that draw nothing, a buffer destroyed and made again -- so how
+ * quickly rvd notices one appear is how long the picture goes without it.
+ * A second, the same tick that notices one go.
+ */
+TEST an_element_that_appears_gets_its_region_within_a_second(void)
+{
+	setup();
+	rvd_osd_init_stream(&st, 0);
+
+	rss_osd_shm_t *shm = producer("late");
+	ASSERT(shm != NULL);
+	tick(10); /* one second of the 10 Hz OSD tick */
+
+	ASSERTm("an element waited more than a second to be drawn",
+		rvd_osd_find_region(&st, 0, "late") != NULL);
+
+	rss_osd_destroy(shm);
+	teardown();
+	PASS();
+}
+
+/*
  * time and uptime share one region on T20, because two regions spanning
  * opposite edges of the same scanline stall the IPU. The one merged in has no
  * hardware of its own, so it cannot outlive its host -- and when the host
@@ -216,5 +239,6 @@ SUITE(rvd_osd_suite)
 	RUN_TEST(an_element_that_goes_takes_its_region_with_it);
 	RUN_TEST(elements_that_come_and_go_do_not_use_the_backend_up);
 	RUN_TEST(a_producer_that_comes_straight_back_keeps_its_region);
+	RUN_TEST(an_element_that_appears_gets_its_region_within_a_second);
 	RUN_TEST(losing_the_host_of_a_merge_gives_the_other_a_region_of_its_own);
 }
