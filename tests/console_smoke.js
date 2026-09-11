@@ -921,6 +921,8 @@ try {
 	 */
 	const addBox = sheet.querySelectorAll("input").find(i => i.dataset.id === "osd.new");
 	if (!addBox) fail("the overlay tab offered no way to add an element");
+	if (addBox.className !== "txt")
+		fail("the add field is not drawn as the other text fields are: " + addBox.className);
 	const addBtn = sheet.querySelectorAll("button").find(b => b.textContent === "Add element");
 
 	addBox.value = "4";

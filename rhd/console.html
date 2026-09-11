@@ -236,6 +236,7 @@ select{background:var(--sink);border:1px solid var(--line);border-radius:var(--r
 .acts{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:14px 18px}
 /* An action that says when it takes effect says it on a line of its own, under
    the buttons rather than beside them. */
+.acts .txt{width:auto;flex:1 1 10rem}
 .acts .help{flex:1 0 100%;margin:0;font-size:12px;color:var(--ink-dim);max-width:52ch;line-height:1.45}
 .btn{background:var(--raise);border:1px solid var(--line);border-radius:var(--r);padding:7px 14px;
      font-size:12.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-dim);
@@ -1589,7 +1590,7 @@ function buildAddElement() {
   const b = document.createElement("button");
   const say = document.createElement("p"); say.className = "help";
 
-  f.type = "text"; f.className = "in"; f.placeholder = "name"; f.dataset.id = "osd.new";
+  f.type = "text"; f.className = "txt"; f.placeholder = "name"; f.dataset.id = "osd.new";
   b.type = "button"; b.className = "btn"; b.textContent = "Add element";
 
   const add = async () => {
