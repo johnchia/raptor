@@ -50,11 +50,31 @@ main{display:flex;flex-direction:column;min-width:0;min-height:100vh}
 
 .preview{padding:14px 14px 12px;border-bottom:1px solid var(--line)}
 .screen{position:relative;background:#000;border:1px solid var(--line);aspect-ratio:16/9;
-        overflow:hidden;display:grid;place-items:center}
-.screen img{width:100%;height:100%;object-fit:contain;display:block}
+        overflow:hidden;display:grid;place-items:center;
+        touch-action:pan-y pinch-zoom;user-select:none;-webkit-user-select:none}
+.screen img{width:100%;height:100%;object-fit:contain;display:block;
+            transform-origin:0 0;will-change:transform;pointer-events:none}
 .screen .tag{position:absolute;font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;
              padding:2px 5px;background:rgba(8,11,12,.72);color:#c3ced3}
 .screen .tag.tl{top:6px;left:6px}
+/* Looking closer. The picture is dragged and wheeled about inside its box
+   and never shows the box behind it; the controls sit on the picture the
+   way the tag does, and read like it. The expanded box is the same box
+   over the whole window, so everything on it comes along. */
+.screen.zoomed{touch-action:none;cursor:grab}
+.screen.zoomed.dragging{cursor:grabbing}
+.screen .deck{position:absolute;right:6px;bottom:6px;display:flex;gap:4px}
+.screen .deck .tag{position:static;border:0;cursor:pointer;color:#c3ced3}
+.screen .deck .tag:hover,.screen .deck .tag:focus-visible{color:var(--accent)}
+.screen .deck .tag[hidden]{display:none}
+/* The rail is sticky and so a stacking context of its own, drawn under the
+   page's bars; the box comes out over them only if the rail does. */
+.screen.big{position:fixed;inset:0;z-index:40;aspect-ratio:auto;border:0}
+.rail.big{z-index:40}
+body.big{overflow:hidden}
+.screen.big .tag{font-size:12px;padding:4px 8px}
+.screen.big .tag.tl{top:12px;left:12px}
+.screen.big .deck{right:12px;bottom:12px;gap:6px}
 .screen .curtain{position:absolute;inset:0;background:rgba(6,8,9,.92);display:none;
                  place-items:center;font-size:12px;letter-spacing:.16em;text-transform:uppercase;
                  color:var(--amber);text-align:center;padding:12px}
@@ -290,7 +310,7 @@ select{background:var(--sink);border:1px solid var(--line);border-radius:var(--r
 </style>
 
 <div class="app">
-  <aside class="rail">
+  <aside class="rail" id="rail">
     <div class="brand"><h1>Raptor</h1><span class="host" id="host">…</span></div>
 
     <div class="preview">
@@ -298,6 +318,11 @@ select{background:var(--sink);border:1px solid var(--line);border-radius:var(--r
         <img id="cam" alt="Live preview">
         <div class="fallback">No preview.<br>The JPEG encoder is off, or no stream is running.</div>
         <span class="tag tl" id="tagL">preview</span>
+        <div class="deck">
+          <button class="tag" id="camFit" hidden title="Back to the whole picture">fit</button>
+          <button class="tag" id="camPick" hidden title="Show the other stream">sub</button>
+          <button class="tag" id="camBig" title="Expand the picture over the page">expand</button>
+        </div>
         <div class="curtain" id="curtain">restarting</div>
       </div>
     </div>
@@ -2165,17 +2190,146 @@ function startPreview(retrying) {
     previewTimer = setTimeout(() => startPreview(true), PREVIEW_RETRY_MS);
   };
   /* Cache-buster: a restarted pipeline serves a new stream on the same URL. */
-  cam.src = "/mjpeg?stream=" + previewStream() + "&t=" + Date.now();
+  const n = previewStream();
+  cam.src = "/mjpeg?stream=" + n + "&t=" + Date.now();
 
   document.getElementById("tagL").textContent =
-    "mjpeg · stream " + previewStream() + " · " +
-    (V["stream" + previewStream() + ".width"] || "?") + "×" +
-    (V["stream" + previewStream() + ".height"] || "?");
+    "mjpeg · " + (n === 0 ? "main" : "sub") + " · " +
+    (V["stream" + n + ".width"] || "?") + "×" + (V["stream" + n + ".height"] || "?");
+  const pick = document.getElementById("camPick");
+  pick.hidden = previewStreams().length < 2;
+  pick.textContent = n === 0 ? "sub" : "main";
+  pick.title = "Show the " + (n === 0 ? "sub" : "main") + " stream";
 }
 /* The sub-stream when there is one: the preview should not cost the main
- * stream's bitrate on every open page. */
+ * stream's bitrate on every open page. Whoever asked for the other one
+ * has it until they ask again. */
+let previewPick = null;
 function previewStream() {
-  return (V["stream1.enabled"] && V["stream1.jpeg"] !== false) ? 1 : 0;
+  const streams = previewStreams();
+  if (previewPick !== null && streams.includes(previewPick)) return previewPick;
+  return streams.includes(1) ? 1 : 0;
+}
+/* The streams a JPEG can be had from. Without one there is nothing to show
+ * from that stream, and nothing to offer. */
+function previewStreams() {
+  const out = [];
+  if (V["stream0.jpeg"] !== false) out.push(0);
+  if (V["stream1.enabled"] && V["stream1.jpeg"] !== false) out.push(1);
+  return out;
+}
+
+/* ═══ viewer ═════════════════════════════════════════════════════════════
+   The picture inside its box: the wheel zooms about the pointer, a drag
+   moves it, and it is never let drift off an edge -- the box always shows
+   picture, so the fit is what the box shows at scale 1 and the transform
+   is the whole state. One state for both streams: they are the same
+   scene, and looking at a corner of the sub is looking at that corner. */
+const VIEW = {s: 1, x: 0, y: 0};
+const VIEW_MAX = 8;
+
+function viewApply() {
+  const screen = document.getElementById("screen");
+  const cam = document.getElementById("cam");
+  const zoomed = VIEW.s > 1.001;
+  if (!zoomed) { VIEW.s = 1; VIEW.x = 0; VIEW.y = 0; }
+  cam.style.transform = zoomed
+    ? "translate(" + VIEW.x.toFixed(1) + "px," + VIEW.y.toFixed(1) + "px) scale(" + VIEW.s.toFixed(3) + ")"
+    : "";
+  screen.classList.toggle("zoomed", zoomed);
+  const fit = document.getElementById("camFit");
+  fit.hidden = !zoomed;
+  fit.textContent = zoomed ? VIEW.s.toFixed(1).replace(/\.0$/, "") + "× · fit" : "fit";
+}
+
+/* Keep every edge of the picture at or past the box's: a box showing its
+ * own background is a box showing nothing. */
+function viewClamp() {
+  const screen = document.getElementById("screen");
+  const w = screen.clientWidth, h = screen.clientHeight;
+  VIEW.x = Math.min(0, Math.max(w - w * VIEW.s, VIEW.x));
+  VIEW.y = Math.min(0, Math.max(h - h * VIEW.s, VIEW.y));
+}
+
+/* Scale about a point of the box, so what is under the pointer stays
+ * under it. */
+function viewZoom(scale, px, py) {
+  const s = Math.min(VIEW_MAX, Math.max(1, scale));
+  const k = s / VIEW.s;
+  VIEW.x = px - (px - VIEW.x) * k;
+  VIEW.y = py - (py - VIEW.y) * k;
+  VIEW.s = s;
+  viewClamp();
+  viewApply();
+}
+
+function viewReset() { VIEW.s = 1; viewClamp(); viewApply(); }
+
+function viewPoint(e) {
+  const r = document.getElementById("screen").getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+
+function initViewer() {
+  const screen = document.getElementById("screen");
+  const drag = {on: false, id: null, x: 0, y: 0};
+
+  screen.addEventListener("wheel", e => {
+    e.preventDefault();
+    const [px, py] = viewPoint(e);
+    /* A notch is a step, a trackpad's run of small deltas a smooth one. */
+    viewZoom(VIEW.s * Math.exp(-e.deltaY * 0.002), px, py);
+  }, {passive: false});
+
+  screen.addEventListener("pointerdown", e => {
+    if (VIEW.s <= 1 || e.button !== 0 || e.target.closest(".deck")) return;
+    drag.on = true; drag.id = e.pointerId; drag.x = e.clientX; drag.y = e.clientY;
+    screen.classList.add("dragging");
+    if (screen.setPointerCapture) screen.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  screen.addEventListener("pointermove", e => {
+    if (!drag.on || e.pointerId !== drag.id) return;
+    VIEW.x += e.clientX - drag.x; VIEW.y += e.clientY - drag.y;
+    drag.x = e.clientX; drag.y = e.clientY;
+    viewClamp(); viewApply();
+  });
+  const drop = e => {
+    if (!drag.on || e.pointerId !== drag.id) return;
+    drag.on = false; screen.classList.remove("dragging");
+  };
+  screen.addEventListener("pointerup", drop);
+  screen.addEventListener("pointercancel", drop);
+  screen.addEventListener("dblclick", e => {
+    if (e.target.closest(".deck")) return;
+    if (VIEW.s > 1) viewReset();
+    else { const [px, py] = viewPoint(e); viewZoom(2, px, py); }
+  });
+
+  document.getElementById("camFit").addEventListener("click", viewReset);
+
+  /* Both streams offered only when both can be had; the button names the
+   * one it goes to, the tag over the picture names the one showing. */
+  document.getElementById("camPick").addEventListener("click", () => {
+    previewPick = previewStream() === 1 ? 0 : 1;
+    startPreview();
+  });
+
+  const big = document.getElementById("camBig");
+  const setBig = on => {
+    screen.classList.toggle("big", on);
+    document.getElementById("rail").classList.toggle("big", on);
+    document.body.classList.toggle("big", on);
+    big.textContent = on ? "shrink" : "expand";
+    big.title = on ? "Back to the page" : "Expand the picture over the page";
+    /* The box changed size under the transform; the same scale about the
+     * same corner is still a picture, but pull it back inside the edges. */
+    viewClamp(); viewApply();
+  };
+  big.addEventListener("click", () => setBig(!screen.classList.contains("big")));
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && screen.classList.contains("big")) setBig(false);
+  });
 }
 
 /* ═══ status ═════════════════════════════════════════════════════════════ */
@@ -2679,6 +2833,7 @@ async function boot() {
   await loadState();
   render();
   refreshBar();
+  initViewer();
   startPreview();
   setInterval(loadState, 5000);
 }

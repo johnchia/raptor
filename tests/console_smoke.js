@@ -71,6 +71,14 @@ class El {
 	set textContent(v) { this._text = String(v); this.children = []; }
 	get firstChild() { return this.children[0] || null; }
 	get offsetWidth() { return 0; }
+	/* A box has a size only when a test gives it one; the viewer's maths
+	 * is run against that, not against a layout this shim never does. */
+	get clientWidth() { return this._w || 0; }
+	set clientWidth(v) { this._w = v; }
+	get clientHeight() { return this._h || 0; }
+	set clientHeight(v) { this._h = v; }
+	getBoundingClientRect() { return {left: 0, top: 0, width: this.clientWidth, height: this.clientHeight}; }
+	closest(sel) { return this.classes.has(sel.replace(/^\./, "")) ? this : null; }
 	append(...nodes) {
 		nodes.forEach(n => this.children.push(typeof n === "string" ? new Text(n) : n));
 	}
@@ -135,9 +143,11 @@ const document = {
 	getElementById: id => (nodes[id] = nodes[id] || new El("div")),
 	querySelector: sel => root.querySelector(sel),
 	querySelectorAll: sel => root.querySelectorAll(sel),
-	addEventListener: () => {},
+	handlers: {},
+	addEventListener(ev, fn) { (this.handlers[ev] = this.handlers[ev] || []).push(fn); },
 };
 const root = new El("body");
+document.body = root;
 /* Everything the page looks up by id lives under one root so the ".tab"
  * sweep in paintTabs finds the buttons the page appended to #tabs. */
 const ids = [...html.matchAll(/getElementById\("([a-zA-Z0-9_]+)"\)/g)].map(m => m[1]);
@@ -395,6 +405,7 @@ const probe_epilogue = `
   ACT_STATE: ACT_STATE,
   V: V,
   claimGate: claimGate, drawClaim: drawClaim,
+  VIEW: VIEW, startPreview: startPreview,
 };
 `;
 
@@ -1118,6 +1129,100 @@ try {
 	if (pwGo.disabled) fail("the password row refused two fields that do match");
 
 	/*
+	 * The viewer. The wheel zooms about the pointer and a drag moves the
+	 * picture, and neither ever shows the box behind it; the other stream
+	 * is a button away and named for where it goes; the expanded box is
+	 * the same box, and Escape leaves it.
+	 */
+	{
+		const screen = nodes.screen, cam = nodes.cam;
+		const fit = nodes.camFit, pick = nodes.camPick, big = nodes.camBig;
+		screen.clientWidth = 320; screen.clientHeight = 180;
+		const V = p.VIEW;
+		const ev = (x, y, more) => Object.assign(
+			{clientX: x, clientY: y, button: 0, pointerId: 7,
+			 target: {closest: () => null}, preventDefault() { this.stopped = true; }}, more);
+		if (!screen.handlers.wheel || !screen.handlers.pointerdown)
+			fail("the picture takes no wheel or pointer");
+
+		const w = ev(160, 90, {deltaY: -500});
+		screen.handlers.wheel[0](w);
+		if (!w.stopped) fail("a wheel over the picture was left to scroll the page");
+		if (!(V.s > 2.6 && V.s < 2.8))
+			fail("a wheel of -500 scaled to " + V.s + ", not e");
+		/* The point under the pointer stays under it: (160,90) maps to
+		 * itself, so x = 160 - 160*s. */
+		if (Math.abs(V.x - (160 - 160 * V.s)) > 0.01 || Math.abs(V.y - (90 - 90 * V.s)) > 0.01)
+			fail("the zoom did not keep the pointer's point still: " + JSON.stringify(V));
+		if (!/scale\(2\.7/.test(cam.style.transform))
+			fail("the picture was not transformed: " + JSON.stringify(cam.style.transform));
+		if (!screen.classList.contains("zoomed") || fit.hidden || !/2\.7× · fit/.test(fit.textContent))
+			fail("a zoomed picture did not say so: " + JSON.stringify(fit.textContent) +
+			     " hidden=" + fit.hidden + " class=" + screen.className);
+
+		const x0 = V.x, y0 = V.y;
+		screen.handlers.pointerdown[0](ev(100, 100));
+		if (!screen.classList.contains("dragging")) fail("a press on the zoomed picture did not take hold");
+		screen.handlers.pointermove[0](ev(150, 120));
+		if (Math.abs(V.x - (x0 + 50)) > 0.01 || Math.abs(V.y - (y0 + 20)) > 0.01)
+			fail("a drag of (50,20) moved the picture by (" + (V.x - x0) + "," + (V.y - y0) + ")");
+		/* Past the edge is at the edge. */
+		screen.handlers.pointermove[0](ev(1150, 1120));
+		if (V.x !== 0 || V.y !== 0)
+			fail("a drag past the top-left corner showed the box: " + JSON.stringify(V));
+		screen.handlers.pointermove[0](ev(-5000, -5000));
+		if (Math.abs(V.x - (320 - 320 * V.s)) > 0.01 || Math.abs(V.y - (180 - 180 * V.s)) > 0.01)
+			fail("a drag past the bottom-right corner showed the box: " + JSON.stringify(V));
+		screen.handlers.pointerup[0](ev(-5000, -5000));
+		if (screen.classList.contains("dragging")) fail("the drag did not let go");
+
+		/* A wheel the other way, all the way: the picture fits and the
+		 * transform is gone with it, and a press then takes nothing. */
+		screen.handlers.wheel[0](ev(10, 10, {deltaY: 5000}));
+		if (V.s !== 1 || V.x !== 0 || V.y !== 0 || cam.style.transform !== "")
+			fail("wheeling out did not come back to the fit: " + JSON.stringify(V));
+		if (screen.classList.contains("zoomed") || !fit.hidden) fail("a fitted picture still says zoomed");
+		screen.handlers.pointerdown[0](ev(100, 100));
+		if (screen.classList.contains("dragging")) fail("a press on the fitted picture took hold");
+
+		screen.handlers.dblclick[0](ev(0, 0));
+		if (V.s !== 2 || V.x !== 0 || V.y !== 0) fail("a double click did not zoom 2x on the corner: " + JSON.stringify(V));
+		fit.handlers.click[0]();
+		if (V.s !== 1 || cam.style.transform !== "") fail("fit did not fit");
+
+		/* Both streams are on in the fixture, so the sub shows first and
+		 * the button offers the main. */
+		if (pick.hidden) fail("with two streams the other one is not offered");
+		if (!/stream=1/.test(cam.src) || pick.textContent !== "main" || !/· sub ·/.test(nodes.tagL.textContent))
+			fail("the preview did not start on the sub: src=" + cam.src + " pick=" +
+			     pick.textContent + " tag=" + nodes.tagL.textContent);
+		pick.handlers.click[0]();
+		if (!/stream=0/.test(cam.src) || pick.textContent !== "sub" || !/· main ·/.test(nodes.tagL.textContent))
+			fail("switching did not go to the main: src=" + cam.src + " pick=" +
+			     pick.textContent + " tag=" + nodes.tagL.textContent);
+		pick.handlers.click[0]();
+		if (!/stream=1/.test(cam.src)) fail("switching back did not go to the sub: " + cam.src);
+		/* One stream is no choice: the button goes, and the main shows
+		 * even though the sub was the one asked for. */
+		p.V["stream1.enabled"] = false;
+		p.startPreview();
+		if (!pick.hidden || !/stream=0/.test(cam.src))
+			fail("with one stream the picker stayed or the sub was kept: hidden=" +
+			     pick.hidden + " src=" + cam.src);
+		p.V["stream1.enabled"] = true;
+		p.startPreview();
+
+		big.handlers.click[0]();
+		if (!screen.classList.contains("big") || big.textContent !== "shrink")
+			fail("expand did not expand: " + screen.className + " " + big.textContent);
+		if (!root.classList.contains("big")) fail("the page kept scrolling under the expanded picture");
+		document.handlers.keydown[0]({key: "Escape"});
+		if (root.classList.contains("big")) fail("the page did not get its scroll back");
+		if (screen.classList.contains("big") || big.textContent !== "expand")
+			fail("Escape did not leave the expanded picture: " + screen.className + " " + big.textContent);
+	}
+
+	/*
 	 * And the gate in front of all of it. A camera nobody has claimed has
 	 * no credential to authenticate the console with, so the page must ask
 	 * before it asks for anything else and draw a way in rather than a
@@ -1155,5 +1260,6 @@ try {
 		    " reset controls, " + staged + " redrawn with a reset staged, " +
 		    "day/night override wired, image knobs on the camera's own " +
 		    "ranges, " + live_reset + " reset live and " + staged_reset +
-		    " staged, " + served + " requests served, claim card drawn");
+		    " staged, " + served + " requests served, viewer zooms, pans, " +
+		    "switches and expands, claim card drawn");
 })();
