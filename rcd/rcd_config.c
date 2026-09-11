@@ -1791,6 +1791,30 @@ static const char *add_arg(cJSON *req, const cJSON *in, const rcd_arg_t *a, char
 		return NULL;
 	}
 
+	/*
+	 * A name is the caller's own bytes, which nothing else in this table
+	 * passes on -- so the grammar is what stands between a JSON string and
+	 * a section header in the camera's config file. Asked of the section
+	 * the name will become rather than of the name, because that is what
+	 * has to be legal.
+	 */
+	if (a->type == A_OSD_NAME || a->type == A_OSD_NEW_NAME) {
+		bool (*ok)(const char *, char *, size_t) =
+			a->type == A_OSD_NEW_NAME ? rcd_osd_new_name_ok : rcd_osd_name_ok;
+		char section[RCD_SECT_MAX];
+		char why[96] = "";
+		int len =
+			snprintf(section, sizeof(section), "%s%s", RCD_OSD_PREFIX, v->valuestring);
+
+		if (len < (int)sizeof(section) && ok(section, why, sizeof(why))) {
+			cJSON_AddStringToObject(req, a->key, v->valuestring);
+			return NULL;
+		}
+		snprintf(err, errsz, "'%s': %s", a->key,
+			 why[0] ? why : "a name is too long for a section");
+		return RCD_E_RANGE;
+	}
+
 	for (int i = 0; a->choices[i]; i++) {
 		if (strcmp(v->valuestring, a->choices[i]) == 0) {
 			/* The table's copy, not the caller's. The two compare
@@ -1939,8 +1963,11 @@ cJSON *rcd_cmd_action(rcd_state_t *st, const cJSON *root)
 	if (!rcd_ask_req_ok(daemon, wire, derr, sizeof(derr)))
 		return rcd_err(RCD_E_DAEMON, derr);
 
-	if (a && a->persists)
+	if (a && a->persists) {
 		owe_save(st, rcd_daemon_by_name(daemon));
+		if (a->saves_now)
+			rcd_save_flush(st);
+	}
 
 	RSS_INFO("action: %s -> %s", a ? a->name : "?", daemon);
 

@@ -158,13 +158,16 @@ main{display:flex;flex-direction:column;min-width:0;min-height:100vh}
 /* Reset. Quiet until wanted -- it sits beside every configured key, and a row
    of buttons competing with the controls would read as the point of the page.
    The section-level one is the same control at the group's scale. */
-.undo{background:none;border:0;padding:0;font-family:var(--mono);font-size:10.5px;
+.undo,.drop{background:none;border:0;padding:0;font-family:var(--mono);font-size:10.5px;
       color:var(--ink-faint);cursor:pointer;text-decoration:underline dotted;opacity:.55}
-.undo:hover,.undo:focus-visible{opacity:1;color:var(--accent)}
+.undo:hover,.undo:focus-visible,.drop:hover,.drop:focus-visible{opacity:1;color:var(--accent)}
+/* Taking an element away is not putting a value back, so it is not one of
+   those even though it sits beside them and is drawn the same. */
+.drop.danger{opacity:1;color:var(--red)}
 .row.resetting{background:rgba(53,183,194,.05);box-shadow:inset 3px 0 0 var(--accent-dim)}
 .row.resetting .ctl{opacity:.4;pointer-events:none}
 .row.resetting .undo{opacity:1;color:var(--accent)}
-.group>h3 .undo{letter-spacing:0;text-transform:none;margin-left:14px}
+.group>h3 .undo,.group>h3 .drop{letter-spacing:0;text-transform:none;margin-left:14px}
 .readback b{color:var(--accent);font-weight:500}
 .readback.warn{color:var(--amber)}
 
@@ -540,7 +543,15 @@ const TABS = [
   get groups() {
     return [{title:"Overlay", section:"osd",
              note:"One typeface and one size for every element. Any element's text may hold %time%, %uptime%, %hostname%, %ip%, %ae_luma%, %total_gain% or %soc_temp%, each replaced as it is drawn; long text is cut off at the width the element reserves."}]
-      .concat(ELEMENTS.map(sec => ({title: sec.slice(4), section: sec})))
+      .concat(ELEMENTS.map(sec => ({title: sec.slice(4), section: sec,
+                                    element: can("osd-remove") ? sec : null})))
+      /* Offered only where the camera offers it, like any other action: an
+         older rcd has the elements its config was written with and no way to
+         be asked for another. */
+      .concat(can("osd-add")
+              ? [{title:"Add an element", add: true,
+                  note:"A new element is added with nothing in it, which draws nothing and takes no place on the picture until you give it text."}]
+              : [])
       .concat([{title:"Actions", actions:["osd-enable","osd-disable"],
                 note:"Stops and resumes drawing. Persists nothing — a reboot restores what is configured here."}]);
   }}
@@ -1536,6 +1547,85 @@ function segShow(action, value) {
     b => b.setAttribute("aria-pressed", String(b.dataset.choice === value)));
 }
 
+/*
+ * A button that acts on the second click, because the first one is how you
+ * find out what the button does. The armed state disarms itself: one left
+ * saying "click again" is a trap for whoever walks up to the page next.
+ */
+function armedButton(cls, label, confirm, act) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = cls; b.textContent = label;
+  /* Armed is its own flag rather than the timer's id: a timer id is only
+     required to be unique, not to be truthy. */
+  let armed = false, timer = null;
+  const disarm = () => {
+    armed = false;
+    if (timer !== null) { clearTimeout(timer); timer = null; }
+    b.classList.remove("danger"); b.textContent = label;
+  };
+  b.addEventListener("click", () => {
+    if (armed) { disarm(); act(); return; }
+    armed = true;
+    b.classList.add("danger"); b.textContent = confirm;
+    timer = setTimeout(disarm, CONFIRM_MS);
+  });
+  return b;
+}
+
+/*
+ * What a name may be, which is what rcd will accept -- refused here so that
+ * a typo is answered by the field it was typed in rather than by the camera.
+ * The camera checks it again regardless: this is a convenience and not the
+ * rule. See rcd_osd.h for why a name is not a number.
+ */
+const OSD_NAME_OK = /^[A-Za-z0-9_-]{1,31}$/;
+
+/* Whether this camera offers an action at all. */
+const can = name => !!ACTIONS.find(a => a.name === name);
+
+function buildAddElement() {
+  const box = document.createElement("div"); box.className = "acts";
+  const f = document.createElement("input");
+  const b = document.createElement("button");
+  const say = document.createElement("p"); say.className = "help";
+
+  f.type = "text"; f.className = "in"; f.placeholder = "name"; f.dataset.id = "osd.new";
+  b.type = "button"; b.className = "btn"; b.textContent = "Add element";
+
+  const add = async () => {
+    const name = (f.value || "").trim();
+
+    if (!OSD_NAME_OK.test(name) || /^[0-9]+$/.test(name)) {
+      say.textContent = "A name holds letters, digits, '-' and '_', and is not a number.";
+      return;
+    }
+    if (ELEMENTS.includes("osd." + name)) {
+      say.textContent = "This camera already has an element called " + name + ".";
+      return;
+    }
+    say.textContent = "";
+    if (!await fire("osd-add", {name: name})) return;
+    f.value = "";
+    await reloadElements();
+  };
+
+  b.addEventListener("click", add);
+  f.addEventListener("keydown", e => { if (e.key === "Enter") add(); });
+  box.append(f, b, say);
+  return box;
+}
+
+/* Two clicks, because an element is not put back by clicking again -- what it
+   drew has to be typed in afresh. */
+function elementRemoveButton(sec) {
+  const b = armedButton("drop", "remove", "click again to remove", async () => {
+    if (await fire("osd-remove", {name: sec.slice(4)})) await reloadElements();
+  });
+
+  b.dataset.element = sec;
+  return b;
+}
+
 function buildActions(names) {
   const box = document.createElement("div"); box.className = "acts";
   names.forEach(n => {
@@ -1573,27 +1663,7 @@ function buildActions(names) {
       });
       box.append(b); note();
     } else if (ui.confirm) {
-      /*
-       * Two clicks, because the first one is how you find out what the button
-       * does. The armed state disarms itself: a button left saying "click
-       * again" is a trap for whoever walks up to the page next.
-       */
-      const b = document.createElement("button"); b.className = "btn"; b.textContent = ui.label;
-      /* Armed is its own flag rather than the timer's id: a timer id is only
-         required to be unique, not to be truthy. */
-      let armed = false, timer = null;
-      const disarm = () => {
-        armed = false;
-        if (timer !== null) { clearTimeout(timer); timer = null; }
-        b.classList.remove("danger"); b.textContent = ui.label;
-      };
-      b.addEventListener("click", () => {
-        if (armed) { disarm(); fire(n, null); return; }
-        armed = true;
-        b.classList.add("danger"); b.textContent = ui.confirm;
-        timer = setTimeout(disarm, CONFIRM_MS);
-      });
-      box.append(b); note();
+      box.append(armedButton("btn", ui.label, ui.confirm, () => fire(n, null))); note();
     } else {
       const b = document.createElement("button"); b.className = "btn"; b.textContent = ui.label;
       b.addEventListener("click", () => fire(n, null));
@@ -1706,12 +1776,14 @@ function render() {
                          .map(id_of)
                          .filter(id => canReset(id) && (resetsLive(id) || !DEFAULTED.has(id)));
     if (resettable.length) h.append(groupUndoButton(resettable));
+    if (g.element) h.append(elementRemoveButton(g.element));
     const own = document.createElement("span"); own.className = "owner";
     own.textContent = g.matrix ? (byId[g.matrix[0] + ".width"] || {}).owner || ""
                    : (rows[0] ? rows[0].owner : "");
     h.append(own); sec.append(h);
 
     if (g.matrix) sec.append(buildMatrix(g.matrix));
+    else if (g.add) sec.append(buildAddElement());
     else if (g.actions) sec.append(buildActions(g.actions));
     else rows.forEach(k => sec.append(buildRow(id_of(k))));
     sheet.append(sec);
@@ -2279,18 +2351,49 @@ function banner(title, detail) {
  * below, because the rows it adds to KEYS are what those are keyed on.
  */
 async function loadElements() {
-  ELEMENTS = [];
+  const had = ELEMENTS;
   let r;
+
   try { r = await api({cmd:"get", section: OSD_PATTERN}, true); } catch (e) { return; }
+  ELEMENTS = [];
   (r.values || []).forEach(v => {
     if (v.section && !ELEMENTS.includes(v.section)) ELEMENTS.push(v.section);
   });
+
+  /* An element that has gone takes everything the page knew about it, or a
+     later element given the same name would inherit it. */
+  had.filter(sec => !ELEMENTS.includes(sec)).forEach(forgetElement);
+
+  /* Rebuilt rather than added to, so this can be asked again after an
+     element is made or taken away. */
+  KEYS = KEYS.filter(k => !isElement(k.section));
   ELEMENTS.forEach(sec => REPEAT.filter(usable).forEach(k => {
     const row = Object.assign({}, k, {section: sec});
     KEYS.push(row);
     byId[id_of(row)] = row;
   }));
   absorb(r.values || []);
+}
+
+/* Everything the page held about one element, which is every set it keeps
+   keyed by id. */
+function forgetElement(sec) {
+  REPEAT.forEach(k => {
+    const id = sec + "." + k.key;
+    delete byId[id]; delete V[id]; delete SAVED[id];
+    dirty.delete(id); RESET.delete(id); UNSET.delete(id); DEFAULTED.delete(id);
+  });
+}
+
+/*
+ * Asked again after an element is made or taken away. The camera is the one
+ * that knows: adding is rod's to do, and what came of it -- the name it went
+ * under, the values it starts with -- is read back rather than guessed at.
+ */
+async function reloadElements() {
+  await loadElements();
+  render();
+  refreshBar();
 }
 
 async function loadValues() {
@@ -2330,8 +2433,10 @@ function absorb(values) {
     }
     UNSET.delete(id);
     if (v.configured === false) DEFAULTED.add(id); else DEFAULTED.delete(id);
-    V[id] = v.value;
+    /* What is staged is what the operator typed, and a re-read is not a
+       reason to take it back -- only to learn what it would be replacing. */
     SAVED[id] = v.value;
+    if (!dirty.has(id)) V[id] = v.value;
   });
 }
 

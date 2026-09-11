@@ -69,7 +69,6 @@ bool rcd_osd_name_ok(const char *section, char *err, size_t errsz)
 {
 	size_t plen = strlen(RCD_OSD_PREFIX);
 	const char *name;
-	bool all_digits = true;
 
 	if (!section || strncmp(section, RCD_OSD_PREFIX, plen) != 0) {
 		snprintf(err, errsz, "an element is named %s<something>", RCD_OSD_PREFIX);
@@ -83,13 +82,24 @@ bool rcd_osd_name_ok(const char *section, char *err, size_t errsz)
 	}
 
 	for (const char *c = name; *c; c++) {
-		if (!isdigit((unsigned char)*c))
-			all_digits = false;
 		if (isalnum((unsigned char)*c) || *c == '_' || *c == '-')
 			continue;
 		snprintf(err, errsz, "a name holds letters, digits, '-' and '_'");
 		return false;
 	}
+	return true;
+}
+
+bool rcd_osd_new_name_ok(const char *section, char *err, size_t errsz)
+{
+	const char *name = section ? section + strlen(RCD_OSD_PREFIX) : NULL;
+	bool all_digits = true;
+
+	if (!rcd_osd_name_ok(section, err, errsz))
+		return false;
+
+	for (const char *c = name; *c; c++)
+		all_digits = all_digits && isdigit((unsigned char)*c);
 
 	if (all_digits) {
 		snprintf(err, errsz, "a name is not a number");

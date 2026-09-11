@@ -857,6 +857,18 @@ static const rcd_arg_t args_on_off[] = {
 	{.type = A_END},
 };
 
+/* The element to take away, which is whatever the camera called it. */
+static const rcd_arg_t args_osd_name[] = {
+	{.key = "name", .type = A_OSD_NAME, .required = true},
+	{.type = A_END},
+};
+
+/* And the one to make, which this camera is naming for the first time. */
+static const rcd_arg_t args_osd_new_name[] = {
+	{.key = "name", .type = A_OSD_NEW_NAME, .required = true},
+	{.type = A_END},
+};
+
 static const rcd_arg_t args_threshold[] = {
 	{.key = "key", .type = A_ENUM, .required = true, .choices = choices_threshold},
 	{.key = "value", .type = A_INT, .required = true, .min = 0, .max = 1000000},
@@ -889,6 +901,35 @@ static const rcd_action_t actions[] = {
 	 *    configured state, which is what rod already does. -- */
 	{.name = "osd-enable", .daemon = "rod", .ctrl_cmd = "enable", .args = args_none},
 	{.name = "osd-disable", .daemon = "rod", .ctrl_cmd = "disable", .args = args_none},
+
+	/* -- And which elements there are, which is the one thing about the
+	 *    overlay that a key cannot say. A section is created by being
+	 *    written to, so before these an untouched form field was enough to
+	 *    make an element; now making one is asked for, and rcd refuses a
+	 *    key addressed to an element the camera does not have.
+	 *
+	 *    Both persist, unlike the pair above: what is drawn is a setting
+	 *    and not an override, and an element that vanished at the next
+	 *    reboot would be a worse surprise than one that stayed. rod adds
+	 *    it to the picture and to its own config, and the save rcd then
+	 *    owes puts it in the file.
+	 *
+	 *    A new element draws nothing until somebody gives it text, which
+	 *    costs it nothing: rod hands out no buffer, and holds no place,
+	 *    for an element with nothing in it. -- */
+	{.name = "osd-add",
+	 .daemon = "rod",
+	 .ctrl_cmd = "add-element",
+	 .args = args_osd_new_name,
+	 .persists = true,
+	 .saves_now = true,
+	 .note = "the element is added with nothing in it; give it text to see it"},
+	{.name = "osd-remove",
+	 .daemon = "rod",
+	 .ctrl_cmd = "remove-element",
+	 .args = args_osd_name,
+	 .persists = true,
+	 .saves_now = true},
 
 	/* -- Provisioning. The only action rcd performs itself, because the
 	 *    boot environment is not a daemon's to be asked for. Reboot-tier
@@ -1153,6 +1194,15 @@ static void emit_action(cJSON *arr, const rcd_action_t *a)
 			break;
 		case A_SECTION:
 			cJSON_AddStringToObject(ao, "type", "section");
+			break;
+		case A_OSD_NAME:
+			/* Its own type rather than a text field with a length,
+			 * because what it refuses is a grammar and a client
+			 * that guessed at one would refuse the wrong names. */
+			cJSON_AddStringToObject(ao, "type", "osd_name");
+			break;
+		case A_OSD_NEW_NAME:
+			cJSON_AddStringToObject(ao, "type", "osd_new_name");
 			break;
 		case A_END:
 			break;

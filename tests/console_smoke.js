@@ -173,6 +173,19 @@ function reply(body) {
 	if (cmd === "schema") return SCHEMA;
 	if (cmd === "get") return {api: 1, status: "ok", values: valuesFor(body.section)};
 	if (cmd === "pending") return {api: 1, status: "ok", stale: []};
+	/*
+	 * Which elements there are is the camera's answer, so adding and
+	 * removing one happens here and the page reads back what came of it
+	 * rather than keeping its own list.
+	 */
+	if (cmd === "action" && body.action === "osd-add") {
+		OSD_ELEMENTS["osd." + body.name] = {};
+		return {api: 1, status: "ok", action: body.action, owner: "rod"};
+	}
+	if (cmd === "action" && body.action === "osd-remove") {
+		delete OSD_ELEMENTS["osd." + body.name];
+		return {api: 1, status: "ok", action: body.action, owner: "rod"};
+	}
 	/* The camera's answer echoed back, which is what the page writes into
 	 * the control -- an ISP quantises, and the value that comes back is
 	 * the one in force. */
@@ -894,6 +907,73 @@ try {
 	   "osd.*" and write whatever was typed into a section nothing draws. */
 	if (p.getKeys().some(k => k.section === "osd.*"))
 		fail("the pattern was taken for a section and given keys of its own");
+
+	/*
+	 * Adding and removing an element.
+	 *
+	 * How many elements there are is the one thing about the overlay that
+	 * no key can say, and before there was a way to ask, a client made one
+	 * by writing a key into a section that did not exist -- which is how a
+	 * form nobody filled in came to blank the clock. So it is asked for,
+	 * and the list is read back from the camera afterwards rather than
+	 * kept here: what the element is called and what it starts with are
+	 * rod's answers.
+	 */
+	const addBox = sheet.querySelectorAll("input").find(i => i.dataset.id === "osd.new");
+	if (!addBox) fail("the overlay tab offered no way to add an element");
+	const addBtn = sheet.querySelectorAll("button").find(b => b.textContent === "Add element");
+
+	addBox.value = "4";
+	addBtn.handlers.click[0]();
+	await settle();
+	if (sent.some(b => b.action === "osd-add"))
+		fail("a name that is a number was sent to the camera");
+
+	addBox.value = "timestamp";
+	addBtn.handlers.click[0]();
+	await settle();
+	if (sent.some(b => b.action === "osd-add"))
+		fail("a name the camera already has was sent to it");
+
+	addBox.value = "logo";
+	addBtn.handlers.click[0]();
+	await settle();
+	const asked = sent.filter(b => b.action === "osd-add");
+	if (asked.length !== 1 || asked[0].name !== "logo")
+		fail("adding an element asked for " + JSON.stringify(asked));
+	p.render();
+	await settle();
+	if (!sheet.querySelectorAll(".row").find(r => r.dataset.id === "osd.logo.template"))
+		fail("the element that was added did not turn up on the page");
+
+	/*
+	 * And away again, on the second click -- an element is not put back by
+	 * clicking again, because what it drew has to be typed in afresh.
+	 */
+	/* With something staged against it, which is the state that must not
+	   outlive it: an edit for an element that is gone would be applied to
+	   the next element given that name. */
+	p.V["osd.logo.template"] = "Front door";
+	p.dirty.add("osd.logo.template");
+
+	const drop = sheet.querySelectorAll("button").find(b => b.dataset.element === "osd.logo");
+	if (!drop) fail("the element drew no way to remove it");
+	drop.handlers.click[0]();
+	await settle();
+	if (sent.some(b => b.action === "osd-remove"))
+		fail("one click on remove took the element away");
+	drop.handlers.click[0]();
+	await settle();
+	if (!sent.some(b => b.action === "osd-remove" && b.name === "logo"))
+		fail("the second click did not ask for the element to be removed");
+	p.render();
+	await settle();
+	if (sheet.querySelectorAll(".row").find(r => r.dataset.id === "osd.logo.template"))
+		fail("the element that was removed stayed on the page");
+	if (p.getKeys().some(k => k.section === "osd.logo"))
+		fail("the element that was removed left its keys behind");
+	if (p.dirty.has("osd.logo.template") || p.V["osd.logo.template"] !== undefined)
+		fail("an edit staged against an element outlived the element");
 
 	/*
 	 * The password key is a settings row like any other and must be drawn

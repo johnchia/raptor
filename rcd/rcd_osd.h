@@ -48,20 +48,28 @@
 int rcd_osd_elements(rss_config_t *file, char out[][RCD_SECT_MAX], int max);
 
 /*
- * Whether `section` may name a new element, with the refusal in `err`.
+ * Whether `section` is a name an element may be reached by, with the refusal
+ * in `err`.
  *
  * rod holds an element's name in 32 bytes and ignores a section whose name
  * will not fit, so a longer one is a section that is never drawn and never
- * explained. The rest of the grammar keeps a name to what both a config file
- * and a URL carry without quoting -- and refuses a number, which is what the
- * ordinals spelled their sections and would read as one of them for as long
- * as anybody remembers them.
- *
- * Asked when an element is created and not when one is edited: a camera set
- * up by hand may hold any name at all, including the ones this refuses, and
- * those elements are drawn. Being unable to edit or remove one because of how
- * it is spelled would be the worse rule.
+ * explained. The rest keeps a name to what both a config file and a URL carry
+ * without quoting, which is what makes it safe to pass on: it is the one
+ * argument in rcd's table whose bytes are the caller's own.
  */
 bool rcd_osd_name_ok(const char *section, char *err, size_t errsz);
+
+/*
+ * And whether it may name a *new* one, which is stricter by one rule: a name
+ * is not a number. That is what the ordinals spelled their sections, and a
+ * config with [osd.4] in it beside a client that means the fourth element by
+ * `osd.4` reads as neither.
+ *
+ * Two rules rather than one because a camera set up by hand may hold any name
+ * at all, including the ones this refuses -- and those elements are drawn.
+ * Being unable to remove one because of how it is spelled would be the worse
+ * rule, and a camera has one of those in its config right now.
+ */
+bool rcd_osd_new_name_ok(const char *section, char *err, size_t errsz);
 
 #endif /* RCD_OSD_H */

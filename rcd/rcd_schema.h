@@ -419,6 +419,19 @@ typedef enum {
 	A_INT,	   /* whole JSON number within [min,max] */
 	A_ENUM,	   /* JSON string, one of `choices` */
 	A_SECTION, /* JSON string, one of the readable sections */
+	/*
+	 * JSON string, a name an overlay element may be given.
+	 *
+	 * The one argument whose bytes are the caller's own rather than a
+	 * number or one of the table's own strings, because a name is the one
+	 * thing a table fixed at compile time cannot hold a list of. It is
+	 * checked against a grammar tight enough to be a config file's section
+	 * name, a JSON string and a shell word at once -- see rcd_osd.h.
+	 */
+	A_OSD_NAME,
+	/* The same, for an element that does not exist yet: one rule
+	 * stricter, and the rule is that a name is not a number. */
+	A_OSD_NEW_NAME,
 } rcd_arg_type_t;
 
 typedef struct {
@@ -456,6 +469,17 @@ typedef struct {
 	const char *ctrl_cmd; /* NULL: same as name */
 	const rcd_arg_t *args;
 	bool persists; /* the daemon records this in its config */
+
+	/*
+	 * And the file has to show it before the next request is answered.
+	 *
+	 * A save is debounced, which is right for an action a slider sends
+	 * tens of -- and wrong for one whose whole effect is that something
+	 * now exists: adding an overlay element is not an element to anything
+	 * that reads the config file until the file says so, and the next
+	 * request is the form filling it in.
+	 */
+	bool saves_now;
 
 	/*
 	 * Performed here. Returns 0, or -1 with `err` filled in -- the

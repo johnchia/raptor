@@ -215,18 +215,26 @@ static int handle_elements_list(rod_state_t *st, char *resp, int resp_size)
 	return rss_ctrl_resp_json(resp, resp_size, r);
 }
 
+/* The section an element's config lives under, which is its name with the
+ * overlay's prefix -- the same spelling rod_config.c reads them back from. */
+static void elem_section(char *out, size_t outsz, const char *name)
+{
+	snprintf(out, outsz, "osd.%s", name);
+}
+
 static int handle_add_element(rod_state_t *st, const char *cmd_json, char *resp, int resp_size)
 {
 	char name[ROD_ELEM_NAME_LEN] = "";
 	char type_str[16] = "text";
 	char tmpl[ROD_TMPL_LEN] = "";
 	char position[32] = "top_left";
+	char section[ROD_ELEM_NAME_LEN + 8];
 	int font_size = 0, font_pct = 0, max_chars = 20, align = 0;
 
 	rss_json_get_str(cmd_json, "name", name, sizeof(name));
 	rss_json_get_str(cmd_json, "type", type_str, sizeof(type_str));
 	rss_json_get_str(cmd_json, "template", tmpl, sizeof(tmpl));
-	rss_json_get_str(cmd_json, "position", position, sizeof(position));
+	bool placed = rss_json_get_str(cmd_json, "position", position, sizeof(position)) == 0;
 	cmd_font_size(cmd_json, "font_size", &font_size, &font_pct);
 	rss_json_get_int(cmd_json, "max_chars", &max_chars);
 	rss_json_get_int(cmd_json, "align", &align);
@@ -294,6 +302,29 @@ static int handle_add_element(rod_state_t *st, const char *cmd_json, char *resp,
 		rss_ctrl_send_command(RSS_RUN_DIR "/rvd.sock", fwd, rvd_resp, sizeof(rvd_resp),
 				      1000);
 	}
+	/*
+	 * And into the config, because an element is a section: without one
+	 * the element is drawn until rod next starts and then is not, which
+	 * is the sort of thing that gets blamed on the camera. `type` is the
+	 * least that makes a section an element, and is written even for a
+	 * text element with nothing in it -- that is a real element, drawing
+	 * nothing until somebody gives it something to draw.
+	 *
+	 * Dirty rather than saved: the file is written when somebody asks for
+	 * it, which for a change made through rcd is rcd, once, after the
+	 * edits that came with it.
+	 */
+	elem_section(section, sizeof(section), name);
+	rss_config_set_str(st->cfg, section, "type", type_str);
+	if (tmpl[0])
+		rss_config_set_str(st->cfg, section, "template", tmpl);
+	/* Only a place somebody asked for. The default below is rod's own and
+	 * writing it down would make it a choice, which is a different thing
+	 * to whoever reads the file next -- and to a page that offers to put
+	 * a key back. */
+	if (placed)
+		rss_config_set_str(st->cfg, section, "position", position);
+
 	RSS_INFO("add-element: %s type=%s template=\"%s\" pos=%s", name, type_str, tmpl, position);
 	return rss_ctrl_resp_ok(resp, resp_size);
 }
@@ -301,6 +332,8 @@ static int handle_add_element(rod_state_t *st, const char *cmd_json, char *resp,
 static int handle_remove_element(rod_state_t *st, const char *cmd_json, char *resp, int resp_size)
 {
 	char name[ROD_ELEM_NAME_LEN] = "";
+	char section[ROD_ELEM_NAME_LEN + 8];
+
 	rss_json_get_str(cmd_json, "name", name, sizeof(name));
 	if (!name[0])
 		return rss_ctrl_resp_error(resp, resp_size, "need name");
@@ -310,6 +343,13 @@ static int handle_remove_element(rod_state_t *st, const char *cmd_json, char *re
 
 	rod_remove_element(st, name);
 	rod_sync_shms(st);
+
+	/* And out of the config, header and all: a section stripped of the
+	 * keys somebody thought to remove is still a section, and rod reads
+	 * one as an element with every value defaulted. */
+	elem_section(section, sizeof(section), name);
+	rss_config_remove_section(st->cfg, section);
+
 	RSS_INFO("remove-element: %s", name);
 	return rss_ctrl_resp_ok(resp, resp_size);
 }

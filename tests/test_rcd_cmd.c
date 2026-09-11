@@ -242,6 +242,88 @@ TEST a_repeat_row_is_served_apart_from_the_keys(void)
 	PASS();
 }
 
+/*
+ * What an element may be called.
+ *
+ * The name is the one argument in the table whose bytes are the caller's own
+ * -- everything else is a number or one of the table's own strings -- because
+ * a name is the one thing a table fixed at compile time cannot hold a list
+ * of. So the grammar is what stands between a JSON string and a section
+ * header in the camera's config file, and it is tight enough to be a config
+ * file's section name, a JSON string and a shell word at once.
+ */
+TEST an_element_name_is_a_name(void)
+{
+	char wire[RCD_REQ_MAX];
+	const char *owner = NULL;
+
+	/* A name rod can hold, in the spellings a person would write. */
+	ASSERT_EQm(reason, 0,
+		   validate_action("{\"action\":\"osd-add\",\"name\":\"timestamp\"}", wire,
+				   sizeof(wire), &owner));
+	ASSERT_STR_EQ("rod", owner);
+	ASSERTm("the name did not reach the daemon's request", strstr(wire, "timestamp") != NULL);
+	ASSERTm("the action did not become rod's own verb", strstr(wire, "add-element") != NULL);
+
+	ASSERT_EQ(0, validate_action("{\"action\":\"osd-add\",\"name\":\"cam-2_front\"}", wire,
+				     sizeof(wire), &owner));
+	ASSERT_EQ(0, validate_action("{\"action\":\"osd-remove\",\"name\":\"uptime\"}", wire,
+				     sizeof(wire), &owner));
+
+	/* Not a name: nothing, a section header, a path, a shell word, a
+	 * value with a comment in it, a name rod would not hold. */
+	ASSERT_ACTION_REFUSED("{\"action\":\"osd-add\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"osd-add\",\"name\":\"\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"osd-add\",\"name\":\"one two\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"osd-add\",\"name\":\"a]\\n[osd.b\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"osd-add\",\"name\":\"../etc/passwd\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"osd-add\",\"name\":\"a;reboot\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"osd-add\",\"name\":\"a = b # c\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"osd-add\",\"name\":\"osd.nested\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"osd-add\",\"name\":"
+			      "\"thisnameislongerthanrodwillholdinanelement\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"osd-add\",\"name\":42}");
+
+	/*
+	 * And a new one is not a number, which is what the ordinals spelled
+	 * their sections and would go on reading as one of them -- [osd.4] is
+	 * in a camera's config right now, made by a page that had no other
+	 * name to give it.
+	 */
+	ASSERT_ACTION_REFUSED("{\"action\":\"osd-add\",\"name\":\"4\"}");
+	ASSERT_ACTION_REFUSED("{\"action\":\"osd-add\",\"name\":\"007\"}");
+
+	/*
+	 * Which is exactly the name that has to be removable. A camera set up
+	 * by hand, or by a page that had no better name to give it, holds
+	 * names this would not hand out -- and those elements are drawn.
+	 * Being unable to take one away because of how it is spelled would be
+	 * the worse rule, and the camera this was written on has an [osd.4].
+	 */
+	ASSERT_EQm(reason, 0,
+		   validate_action("{\"action\":\"osd-remove\",\"name\":\"4\"}", wire, sizeof(wire),
+				   &owner));
+	ASSERTm("the name did not reach the daemon's request", strstr(wire, "\"4\"") != NULL);
+
+	PASS();
+}
+
+/* Both persist. What is drawn is a setting and not an override, and an
+ * element that vanished at the next reboot would be a worse surprise than
+ * one that stayed. */
+TEST making_an_element_is_remembered(void)
+{
+	const rcd_action_t *add = rcd_action_find("osd-add");
+	const rcd_action_t *rm = rcd_action_find("osd-remove");
+
+	ASSERT(add && rm);
+	ASSERT(add->persists);
+	ASSERT(rm->persists);
+	ASSERT_STR_EQ("rod", add->daemon);
+	ASSERT_STR_EQ("rod", rm->daemon);
+	PASS();
+}
+
 TEST refuses_unlisted_actions(void)
 {
 	ASSERT_ACTION_REFUSED("{\"action\":\"set-brightness\",\"value\":10}");
@@ -2137,6 +2219,44 @@ TEST get_asks_a_daemon_once_however_many_keys_name_its_section(void)
 
 	fake_daemon_stop(&d, "rvd");
 	ASSERT_EQm("rvd was asked once per key", 1, conns);
+	PASS();
+}
+
+/*
+ * Adding an element reaches the file before the next request is answered.
+ *
+ * A save is debounced, which is right for an action a slider sends tens of
+ * and wrong for one whose whole effect is that something now exists: the very
+ * next request is the form filling the new element in, and rcd refuses a key
+ * addressed to an element the file does not have. Found on a camera, where
+ * adding an element and typing into it in the same breath wrote neither.
+ */
+TEST an_element_reaches_the_file_before_the_next_request(void)
+{
+	fake_daemon_t d;
+	rcd_state_t st;
+
+	memset(&st, 0, sizeof(st));
+	if (!fake_daemon_start(&d, "rod"))
+		SKIPm("cannot listen on " RSS_RUN_DIR " -- run the suite under unshare -rm");
+
+	cJSON *req = cJSON_Parse("{\"action\":\"osd-add\",\"name\":\"logo\"}");
+	cJSON *r = rcd_cmd_action(&st, req);
+
+	cJSON_Delete(req);
+	ASSERT(r != NULL);
+	ASSERT_STR_EQ("ok", cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(r, "status")));
+	cJSON_Delete(r);
+
+	int conns = d.conns;
+	char last[512];
+
+	rss_strlcpy(last, d.last_req, sizeof(last));
+	fake_daemon_stop(&d, "rod");
+
+	ASSERT_EQm("adding an element was one round trip, so nothing wrote the file", 2, conns);
+	ASSERTm("rod was not asked to write the file", strstr(last, "config-save") != NULL);
+	ASSERT_EQm("a save was still owed when the call returned", 0, (int)st.save_due_ms);
 	PASS();
 }
 
@@ -4396,6 +4516,8 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(keeps_credential_sections_unreadable);
 	RUN_TEST(no_credential_is_ever_readable);
 	RUN_TEST(a_repeat_row_is_served_apart_from_the_keys);
+	RUN_TEST(an_element_name_is_a_name);
+	RUN_TEST(making_an_element_is_remembered);
 	RUN_TEST(refuses_unlisted_actions);
 	RUN_TEST(refuses_near_misses);
 	RUN_TEST(restarting_is_rcds_own_and_says_what_it_costs);
@@ -4501,6 +4623,7 @@ SUITE(rcd_cmd_suite)
 	RUN_TEST(refuses_more_edits_than_a_request_may_carry);
 	RUN_TEST(state_leaves_out_an_isp_knob_rvd_could_not_read);
 	RUN_TEST(get_asks_a_daemon_once_however_many_keys_name_its_section);
+	RUN_TEST(an_element_reaches_the_file_before_the_next_request);
 	RUN_TEST(get_asks_once_per_distinct_section);
 	RUN_TEST(get_refuses_more_keys_than_a_request_may_carry);
 	RUN_TEST(the_live_cache_holds_every_section_the_table_has);
