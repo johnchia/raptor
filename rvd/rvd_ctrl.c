@@ -162,6 +162,40 @@ static const char *rvd_persist_key(const rvd_stream_t *s, const char *key)
 	return NULL;
 }
 
+/*
+ * A rate-control mode change rebuilds the encoder's rate-control attributes
+ * from nothing -- it has to, because the vendor's arms are a union whose
+ * members do not line up, so nothing survives being read through one arm and
+ * written through another. The QP bounds an operator configured are therefore
+ * not in the encoder to be preserved across the switch. They are here, in the
+ * stream's own config, which makes this the only place that can put them back.
+ *
+ * A bound left unset stays unset: -1 reaches the HAL as "keep what the new
+ * mode chose", so a config naming only min_qp does not drag a max along with
+ * it. Nothing to do when the config names neither.
+ *
+ * A backend without the op has no bounds to lose either -- its channels run at
+ * the driver's, mode change or not -- so that answer is not worth a line in
+ * the log on every switch.
+ */
+static void rvd_reapply_qp_bounds(rvd_state_t *st, int chn)
+{
+	const rss_video_config_t *cfg = &st->streams[chn].enc_cfg;
+	int ret;
+
+	if (st->streams[chn].is_jpeg)
+		return;
+	if (cfg->min_qp < 0 && cfg->max_qp < 0)
+		return;
+
+	ret = RSS_HAL_CALL(st->ops, enc_set_qp_bounds, st->hal_ctx, st->streams[chn].chn,
+			   cfg->min_qp, cfg->max_qp);
+	if (ret != 0 && ret != RSS_ERR_NOTSUP)
+		RSS_WARN("stream %d: configured qp bounds %d..%d not re-applied after "
+			 "the rc mode change",
+			 chn, cfg->min_qp, cfg->max_qp);
+}
+
 /* ── Encoder commands ── */
 
 static int handle_encoder_cmd(const char *cmd, const char *cmd_json, rvd_state_t *st, char *resp,
@@ -229,6 +263,7 @@ static int handle_encoder_cmd(const char *cmd, const char *cmd_json, rvd_state_t
 				if (key)
 					rss_config_set_str(st->cfg, st->streams[chn].cfg_sect, key,
 							   mode_str);
+				rvd_reapply_qp_bounds(st, chn);
 			}
 			cJSON *r = cJSON_CreateObject();
 			cJSON_AddStringToObject(r, "status", ret == 0 ? "ok" : "error");

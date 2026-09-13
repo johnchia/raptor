@@ -857,6 +857,57 @@ TEST set_rc_mode_passes_hw_channel_and_bitrate(void)
 	PASS();
 }
 
+/*
+ * A mode change rebuilds the encoder's rate-control attributes from the HAL's
+ * defaults, because the vendor's arms are a union whose members do not line
+ * up: nothing can be carried across the switch. So a configured QP bound is
+ * not preserved by the encoder -- it is preserved here or not at all. It was
+ * not, and the cost was a stream silently leaving its configured floor behind
+ * whenever anything touched its rate control.
+ */
+TEST set_rc_mode_reapplies_configured_qp_bounds(void)
+{
+	setup();
+	rec.return_val = 0;
+	/* Stream 0 is configured 15..45. */
+	call("{\"cmd\":\"set-rc-mode\",\"channel\":0,\"mode\":\"cbr\"}");
+	ASSERT_EQ(2, rec.call_count); /* the mode, then the bounds */
+	ASSERT_EQ(15, rec.set_min_qp);
+	ASSERT_EQ(45, rec.set_max_qp);
+	teardown();
+	PASS();
+}
+
+/* An unset bound stays unset: -1 reaches the HAL as "keep what the new mode
+ * chose", so naming min_qp alone does not invent a max to go with it. */
+TEST set_rc_mode_leaves_an_unset_qp_bound_unset(void)
+{
+	setup();
+	rec.return_val = 0;
+	st.streams[0].enc_cfg.max_qp = -1;
+	call("{\"cmd\":\"set-rc-mode\",\"channel\":0,\"mode\":\"vbr\"}");
+	ASSERT_EQ(2, rec.call_count);
+	ASSERT_EQ(15, rec.set_min_qp);
+	ASSERT_EQ(-1, rec.set_max_qp);
+	teardown();
+	PASS();
+}
+
+/* And a stream that configures neither has nothing to put back: the mode's own
+ * defaults are what it asked for, and re-asserting them is not a no-op on a
+ * vendor that range-checks. */
+TEST set_rc_mode_sets_no_qp_bounds_when_none_configured(void)
+{
+	setup();
+	rec.return_val = 0;
+	st.streams[0].enc_cfg.min_qp = -1;
+	st.streams[0].enc_cfg.max_qp = -1;
+	call("{\"cmd\":\"set-rc-mode\",\"channel\":0,\"mode\":\"cbr\"}");
+	ASSERT_EQ(1, rec.call_count); /* the mode change, and nothing after it */
+	teardown();
+	PASS();
+}
+
 TEST set_rc_mode_uses_current_bitrate_when_not_specified(void)
 {
 	setup();
@@ -1537,6 +1588,9 @@ SUITE(ctrl_suite)
 	RUN_TEST(set_bitrate_passes_hw_channel);
 	RUN_TEST(set_gop_passes_hw_channel);
 	RUN_TEST(set_rc_mode_passes_hw_channel_and_bitrate);
+	RUN_TEST(set_rc_mode_reapplies_configured_qp_bounds);
+	RUN_TEST(set_rc_mode_leaves_an_unset_qp_bound_unset);
+	RUN_TEST(set_rc_mode_sets_no_qp_bounds_when_none_configured);
 	RUN_TEST(set_rc_mode_uses_current_bitrate_when_not_specified);
 
 	/* Multi-stream isolation */
