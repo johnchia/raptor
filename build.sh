@@ -182,9 +182,10 @@ case "$PLATFORM" in
         CROSS_GLOB="arm"
         ;;
     *)
-        SYSROOT_TUPLES="mipsel-buildroot-linux-uclibc mipsel-thingino-linux-uclibc \
+        SYSROOT_TUPLES="mipsel-openipc-linux-uclibc mipsel-buildroot-linux-uclibc \
+                        mipsel-thingino-linux-uclibc mipsel-openipc-linux-musl \
                         mipsel-buildroot-linux-musl mipsel-thingino-linux-musl"
-        CROSS_CANDIDATES="mipsel-linux-"
+        CROSS_CANDIDATES="mipsel-linux- mipsel-openipc-linux-uclibc-"
         CROSS_GLOB="mipsel"
         ;;
 esac
