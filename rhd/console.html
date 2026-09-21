@@ -2810,8 +2810,24 @@ async function reloadElements() {
   refreshBar();
 }
 
+/*
+ * Everything the camera holds, asked again.
+ *
+ * The elements are half of that and not a step before it: an apply restarts
+ * rod, which reads the file back, and a revert is a question about the file
+ * -- and both are asked about the [osd] sections as much as about any
+ * other. A page that re-read every section but those kept its own memory of
+ * an element's text past the point the camera's had changed, and never
+ * noticed an element made or taken away by anything but itself.
+ */
 async function loadValues() {
-  /* The elements answered for themselves, in one request, above. */
+  await loadElements();
+  await loadSections();
+}
+
+/* The sections that are one each, which is every section but an element's --
+   those answered for themselves, in one request, in loadElements. */
+async function loadSections() {
   const sections = [...new Set(KEYS.map(k => k.section))].filter(s => !ELEMENTS.includes(s));
   /* One request per section, not one carrying every key: rcd asks the owning
    * daemon once per section, and a single hundred-key request would make it
@@ -3054,7 +3070,8 @@ async function boot() {
 
   if (shown.length && !shown.includes(active)) active = shown[0];
 
-  await loadValues();
+  /* The elements were asked for above, before the tabs were counted. */
+  await loadSections();
   await loadPending();
   /* Before the first render, not after it: [image] is drawn from the ranges
      the ISP publishes here, and a page built from the table's own bounds

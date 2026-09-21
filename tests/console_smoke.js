@@ -1101,6 +1101,63 @@ try {
 	}
 
 	/*
+	 * A re-read reaches the elements.
+	 *
+	 * Revert asks the camera what is on disk, and an apply reads back what
+	 * the restarted daemon holds. Both once asked about every section but
+	 * the elements', which had answered for themselves at boot -- so an
+	 * element's text stayed as this page last knew it, and an element made
+	 * or removed by anything but this page never showed up at all.
+	 */
+	{
+		OSD_ELEMENTS["osd.uptime"].template = "%ip%";
+		OSD_ELEMENTS["osd.tag"] = {template: "Yard", position: "bottom_right",
+					   align: "right", visible: true};
+		delete OSD_ELEMENTS["osd.camera"];
+		p.V["osd.timestamp.template"] = "%uptime%";
+		p.dirty.add("osd.timestamp.template");
+		const revert = nodes.btnRevert;
+		await revert.handlers.click[0]({currentTarget: revert});
+		await settle();
+		if (p.V["osd.uptime.template"] !== "%ip%")
+			fail("a revert left an element's text as the page remembered it: " +
+			     JSON.stringify(p.V["osd.uptime.template"]));
+		if (p.V["osd.timestamp.template"] !== "%time%")
+			fail("a revert did not put an element's saved text back: " +
+			     JSON.stringify(p.V["osd.timestamp.template"]));
+		if (!p.getKeys().some(k => k.section === "osd.tag"))
+			fail("an element made behind the page was not there after a revert");
+		if (!sheet.querySelectorAll(".row").find(r => r.dataset.id === "osd.tag.template"))
+			fail("an element made behind the page did not turn up on the page");
+		if (p.getKeys().some(k => k.section === "osd.camera") ||
+		    sheet.querySelectorAll(".row").find(r => r.dataset.id === "osd.camera.template"))
+			fail("an element removed behind the page stayed after a revert");
+		/* Back as the fixture has it, for whatever asks about the overlay next. */
+		OSD_ELEMENTS["osd.uptime"].template = "%uptime%";
+		delete OSD_ELEMENTS["osd.tag"];
+		OSD_ELEMENTS["osd.camera"] = {template: "Camera", position: "bottom_left",
+					      align: "left", visible: false};
+		await revert.handlers.click[0]({currentTarget: revert});
+		await settle();
+
+		/* And the apply, which reads back what the restarted daemon
+		   holds -- the same question, asked after the answer may have
+		   changed. */
+		OSD_ELEMENTS["osd.uptime"].template = "%soc_temp%";
+		p.V["osd.font_size"] = "5%";
+		p.dirty.add("osd.font_size");
+		p.refreshBar();
+		await nodes.btnApply.handlers.click[0]();
+		await settle();
+		if (p.V["osd.uptime.template"] !== "%soc_temp%")
+			fail("an apply left an element's text as the page remembered it: " +
+			     JSON.stringify(p.V["osd.uptime.template"]));
+		OSD_ELEMENTS["osd.uptime"].template = "%uptime%";
+		await revert.handlers.click[0]({currentTarget: revert});
+		await settle();
+	}
+
+	/*
 	 * The stream and snapshot accounts are four keys and read back in the
 	 * clear: a field per key, showing what the camera has, staged behind
 	 * Apply like anything else the owner reads at start -- and one section's
