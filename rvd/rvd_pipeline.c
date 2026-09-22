@@ -1235,6 +1235,7 @@ int rvd_pipeline_init(rvd_state_t *st)
 		int si = st->stream_count;
 		load_stream_config(cfg, main_sect, &st->streams[si], def_w, def_h, sensor_fps,
 				   3000000);
+		int main_si = si;
 		st->streams[si].enc_cfg.ivdc = rss_config_get_bool(cfg, main_sect, "ivdc", false);
 		st->streams[si].fs_chn = fs_base;
 		st->streams[si].chn = enc_grp_counter++;
@@ -1250,9 +1251,18 @@ int rvd_pipeline_init(rvd_state_t *st)
 		bool sub_enabled = (s == 0) ? rss_config_get_bool(cfg, "stream1", "enabled", true)
 					    : rss_config_get_bool(cfg, sub_sect, "enabled", true);
 		if (sub_enabled) {
+			/*
+			 * The main picture's rate, not the sensor's. The sub
+			 * shadows the main, and a rate of its own buys nothing:
+			 * a ring slot is sized from bitrate over fps, so a sub
+			 * paced below the main costs more ring for the same
+			 * bits, and one paced above it encodes frames the main
+			 * never shows.
+			 */
+			int main_fps = (int)st->streams[main_si].enc_cfg.fps_num;
 			si = st->stream_count;
 			load_stream_config(cfg, sub_sect, &st->streams[si], sub_w, sub_h,
-					   sensor_fps, 1000000);
+					   main_fps > 0 ? main_fps : sensor_fps, 1000000);
 			st->streams[si].fs_chn = fs_base + 1;
 			st->streams[si].chn = enc_grp_counter++;
 			st->streams[si].sensor_idx = s;

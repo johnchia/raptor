@@ -142,6 +142,45 @@ already-bound source port** despite the Note above, and the shared bind
 honours its own destination rate — stream 1's MJPEG measures ~0.8 fps
 against a 1 fps target, stream 0's ~1.0.
 
+**A video stream's own bind is a hardware ring, not a frame queue.** The
+VPE → VENC link for a video channel is `E_MI_SYS_BIND_TYPE_HW_RING` with
+`MI_VENC_SetInputSourceConfig` in `RING_HALF_FRM` and half the frame height
+as the bind parameter: VPE writes lines into a buffer half a frame deep and
+the encoder follows behind it. The alternative, `FRAME_BASE`, keeps a queue
+of whole frames on the port — MI asks for three of them, a sensor-sized
+NV12 frame each — and that queue is the largest thing on the MMA heap. On
+the SSC333's 32 MB heap the third never fits: MI reports `Get Buffer Faild`
+on the port once per frame it drops, and a port starved that way is where
+`MI_RGN_SetBitMap` was found stranded in the kernel for good — seven days
+of a frozen overlay clock on one board, and only a reboot clears it. Measured on that board, 2304x1296 H.265 at
+15 fps with a 640x360 substream:
+
+| VPE → VENC link | port 0's buffers on the heap | heap free at rest |
+|---|---|---|
+| frame queue | 4.5 MB held, a second 4.5 MB coming and going, a third refused | 7.8 MB, largest hole 3.8 MB |
+| ring, whole frame | 4.5 MB (`RingHeapAlloc`) | 10.6 MB |
+| ring, half frame | 2.2 MB (`RingHeapAlloc`) | 12.7 MB |
+
+Both ring depths delivered 899 frames in 60 s with no MMA failures and no
+decoder complaints; the half ring is what ships. The vendor's RTSP
+reference binds its main stream the same way (`bHaftRing` chooses the
+depth). Two things a ring port does not do:
+
+- **Only one channel per VENC device gets a ring.** The second channel on
+  device 0 (the substream) answers `NOT_SUPPORT` to the mode and binds
+  frame based, which costs it three 640x360 frames and nothing worth
+  arguing over.
+- **A ring-bound port takes no second bind.** `MI_SYS_BindChnPort2` answers
+  `BUSY`, so the sharing fallback above is closed for that port. A
+  snapshot stream still gets a port of its own where one can clone the
+  input size; where none can — the SSC333, whose port 2 is capped at 1920
+  and sourced from port 1 — the full-resolution snapshot stream has no
+  feed and the log says `no snapshots on this stream`. The way back for
+  that part is DIVP off port 3, the vendor's "Realtime bind / DIVP" port,
+  which this backend has not ported. Until then such a stream still
+  creates its JPEG channel, and that channel holds a 2.9 MB output buffer
+  it will never fill.
+
 The bind is what paces the channel, dedicated port or shared.
 `MI_SYS_BindChnPort2` takes separate source and destination frame rates,
 so the snapshot bind asks for the JPEG stream's fps against a source
