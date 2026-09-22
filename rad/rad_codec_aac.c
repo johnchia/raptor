@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <faac.h>
+#include <rss_aac.h>
 #include <rss_ipc.h>
 
 typedef struct {
@@ -40,8 +41,6 @@ static int aac_init(rad_codec_ctx_t *ctx, rss_config_t *cfg, int sample_rate)
 		return -1;
 
 	int bitrate = rss_config_get_int(cfg, "audio", "bitrate", 128000);
-	if (bitrate > 256000)
-		bitrate = 256000;
 
 	/* HE-AAC needs Fs >= 32kHz (the Fs/2 SBR core collapses below);
 	 * clamp an explicit request rather than failing encoder open. */
@@ -58,6 +57,27 @@ static int aac_init(rad_codec_ctx_t *ctx, rss_config_t *cfg, int sample_rate)
 		object = FAAC_OBJ_AUTO;
 	} else if (strcmp(profile, "lc") != 0) {
 		RSS_WARN("unknown aac_profile \"%s\" (lc|he|auto), using lc", profile);
+	}
+
+	/* AAC-LC holds at most 6144 bits per channel per 1024-sample frame
+	 * (ISO/IEC 14496-3, the bit reservoir bound), so a mono stream tops
+	 * out at 6 * Fs bit/s: 96 kbit/s at 16 kHz, 48 at 8 kHz. faac does
+	 * not clamp; asked for more it fills bigger frames, which lenient
+	 * decoders (ffmpeg, faad) play and a decoder that enforces the bound
+	 * (Apple's AudioToolbox, so Safari and Firefox on a Mac) rejects
+	 * outright. Its reservoir also lets a single frame run about a tenth
+	 * over the average, so the average is held to 7/8 of the bound to
+	 * keep every frame under it. The HE-AAC core runs at Fs/2. */
+	int core_rate = (object == FAAC_OBJ_HE_AAC_V1) ? sample_rate / 2 : sample_rate;
+	int ceiling = rss_aac_lc_max_bitrate(core_rate) / 8 * 7;
+	if (bitrate > ceiling) {
+		if (rss_config_get_str(cfg, "audio", "bitrate", NULL))
+			RSS_WARN("aac: bitrate %d exceeds AAC-LC's %d at %d Hz, held there",
+				 bitrate, ceiling, core_rate);
+		else
+			RSS_INFO("aac: %d Hz caps AAC-LC at %d bit/s, using that", core_rate,
+				 ceiling);
+		bitrate = ceiling;
 	}
 
 	faac_params params;

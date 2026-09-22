@@ -9,6 +9,7 @@
 #include "greatest.h"
 
 #include <stdint.h>
+#include <rss_aac.h>
 
 /* ── G.711 µ-law decode (same algorithm as rwd_media.c:90) ── */
 
@@ -296,6 +297,32 @@ TEST aac_accum_typical_rad(void)
 	PASS();
 }
 
+/* ── AAC-LC bitrate ceiling ── */
+
+/*
+ * A raw_data_block carries at most 6144 bits per channel, so one channel
+ * at Fs is bounded by 6 * Fs bit/s. rad holds the configured bitrate to
+ * this; above it faac fills frames Apple's decoder refuses.
+ */
+TEST aac_lc_max_bitrate_common_rates(void)
+{
+	ASSERT_EQ(48000, rss_aac_lc_max_bitrate(8000));
+	ASSERT_EQ(96000, rss_aac_lc_max_bitrate(16000));
+	ASSERT_EQ(264600, rss_aac_lc_max_bitrate(44100));
+	ASSERT_EQ(288000, rss_aac_lc_max_bitrate(48000));
+	PASS();
+}
+
+TEST aac_lc_max_bitrate_frame_bound(void)
+{
+	/* One frame at the ceiling is exactly 6144 bits = 768 bytes. */
+	int rate = 16000;
+	int bits_per_frame = (int)((int64_t)rss_aac_lc_max_bitrate(rate) * 1024 / rate);
+	ASSERT_EQ(6144, bits_per_frame);
+	ASSERT_EQ(0, rss_aac_lc_max_bitrate(0));
+	PASS();
+}
+
 /* ── Opus frame sizing ── */
 
 /*
@@ -477,6 +504,8 @@ SUITE(codec_suite)
 	RUN_TEST(aac_accum_double_frame);
 	RUN_TEST(aac_accum_partial_fill);
 	RUN_TEST(aac_accum_typical_rad);
+	RUN_TEST(aac_lc_max_bitrate_common_rates);
+	RUN_TEST(aac_lc_max_bitrate_frame_bound);
 	RUN_TEST(opus_frame_samples_48k);
 	RUN_TEST(opus_frame_samples_16k);
 	RUN_TEST(opus_granule_increment);
