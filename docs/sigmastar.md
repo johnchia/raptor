@@ -177,9 +177,9 @@ depth). Two things a ring port does not do:
   and sourced from port 1 — the full-resolution snapshot stream has no
   feed and the log says `no snapshots on this stream`. The way back for
   that part is DIVP off port 3, the vendor's "Realtime bind / DIVP" port,
-  which this backend has not ported. Until then such a stream still
-  creates its JPEG channel, and that channel holds a 2.9 MB output buffer
-  it will never fill.
+  which this backend has not ported; `PLAN-6b0-divp-snapshot-port.md` in
+  the workspace root lays the job out. Until then rvd drops the stream at
+  init, so no JPEG channel and no output buffer sit idle for it.
 
 The bind is what paces the channel, dedicated port or shared.
 `MI_SYS_BindChnPort2` takes separate source and destination frame rates,
@@ -218,8 +218,9 @@ Three consequences worth knowing:
   The log says which path each channel took: `snapshot channel attached on
   VPE port N`, `not cloning port N -- WxH is not the VPE input size`, or
   `snapshot channel sharing chn M's VPE port N`. If every path fails the
-  stream loses snapshots rather than failing, since a board that cannot
-  feed its JPEG channel should lose snapshots, not video.
+  register reports it and rvd drops that snapshot stream -- no channel, no
+  ring, `stream N: dropping the snapshot stream` in the log -- since a board
+  that cannot feed its JPEG channel should lose snapshots, not video.
 - **Nothing on a working path may depend on an MI struct layout this port
   has not verified.** `i6_vpe_port` and friends are reconstructed from
   references, not vendor headers. Passing data *in* is fine when the effect

@@ -766,6 +766,8 @@ static void osd_pool_cb(const char *section, void *ud)
 	}
 }
 
+static void drop_jpeg_stream(rvd_state_t *st, int idx);
+
 int rvd_pipeline_init(rvd_state_t *st)
 {
 	rss_config_t *cfg = st->cfg;
@@ -1627,10 +1629,24 @@ int rvd_pipeline_init(rvd_state_t *st)
 		if (!st->streams[i].is_jpeg)
 			continue;
 		ret = rvd_stream_init(st, i);
-		if (ret != RSS_OK) {
+		if (ret == RSS_OK)
+			continue;
+		if (st->streams[i].ring) {
 			RSS_FATAL("stream%d (JPEG) init failed: %d", i, ret);
 			return ret;
 		}
+		/*
+		 * The backend could not feed it -- no port to clone, no port to
+		 * share -- and said so before making anything. A camera that
+		 * cannot take a snapshot on one stream is a camera without
+		 * that snapshot, not a camera without video: take the stream
+		 * out of the table and go on. The slot behind it moves down,
+		 * so this index is looked at again.
+		 */
+		RSS_WARN("stream%d: dropping the snapshot stream (%d); its video stream stays", i,
+			 ret);
+		drop_jpeg_stream(st, i);
+		i--;
 	}
 
 	/* IVS: create algo interface + channel + register BEFORE FS enable.
@@ -1663,6 +1679,31 @@ int rvd_pipeline_init(rvd_state_t *st)
  * ================================================================ */
 
 /* Find the encoder group of the video stream that owns a given FS channel */
+/*
+ * Take a JPEG stream out of the table before it has a ring.
+ *
+ * JPEG streams sit after every video stream, so the ones behind idx are
+ * JPEG too, and nothing per-index that a JPEG stream leaves alone (OSD
+ * regions, privacy, the bind chain) needs to move with them. What does
+ * refer to a stream by index is jpeg_streams[], whose slot number is the
+ * ring name (jpeg0 is stream 0's snapshot whatever else exists), so the
+ * dropped stream's slot goes to -1 -- the value "disabled" already has --
+ * and the slots behind it keep their number and lose one from the index.
+ */
+static void drop_jpeg_stream(rvd_state_t *st, int idx)
+{
+	for (int j = 0; j < st->jpeg_count; j++) {
+		if (st->jpeg_streams[j] == idx)
+			st->jpeg_streams[j] = -1;
+		else if (st->jpeg_streams[j] > idx)
+			st->jpeg_streams[j]--;
+	}
+	memmove(&st->streams[idx], &st->streams[idx + 1],
+		(size_t)(st->stream_count - idx - 1) * sizeof(st->streams[0]));
+	st->stream_count--;
+	memset(&st->streams[st->stream_count], 0, sizeof(st->streams[0]));
+}
+
 static int find_video_group(rvd_state_t *st, int fs_chn)
 {
 	for (int v = 0; v < st->stream_count; v++) {
@@ -1717,8 +1758,7 @@ int rvd_stream_init(rvd_state_t *st, int idx)
 
 		ret = RSS_HAL_CALL(st->ops, enc_register_channel, st->hal_ctx, video_grp, s->chn);
 		if (ret != RSS_OK) {
-			RSS_ERROR("enc_register_channel(%d, %d) failed: %d", video_grp, s->chn,
-				  ret);
+			RSS_WARN("enc_register_channel(%d, %d) failed: %d", video_grp, s->chn, ret);
 			RSS_HAL_CALL(st->ops, enc_destroy_channel, st->hal_ctx, s->chn);
 			return ret;
 		}
