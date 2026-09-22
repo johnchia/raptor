@@ -61,15 +61,20 @@ static int aac_init(rad_codec_ctx_t *ctx, rss_config_t *cfg, int sample_rate)
 
 	/* AAC-LC holds at most 6144 bits per channel per 1024-sample frame
 	 * (ISO/IEC 14496-3, the bit reservoir bound), so a mono stream tops
-	 * out at 6 * Fs bit/s: 96 kbit/s at 16 kHz, 48 at 8 kHz. faac does
-	 * not clamp; asked for more it fills bigger frames, which lenient
-	 * decoders (ffmpeg, faad) play and a decoder that enforces the bound
-	 * (Apple's AudioToolbox, so Safari and Firefox on a Mac) rejects
-	 * outright. Its reservoir also lets a single frame run about a tenth
-	 * over the average, so the average is held to 7/8 of the bound to
-	 * keep every frame under it. The HE-AAC core runs at Fs/2. */
+	 * out at 6 * Fs bit/s: 96 kbit/s at 16 kHz, 48 at 8 kHz. Asked for
+	 * more, faac fills bigger frames (SONAME 1) or refuses to open
+	 * (SONAME 2), and a decoder that enforces the bound (Apple's
+	 * AudioToolbox, so Safari and Firefox on a Mac) rejects every
+	 * oversized frame outright while ffmpeg and faad play them. The
+	 * HE-AAC core runs at Fs/2. */
 	int core_rate = (object == FAAC_OBJ_HE_AAC_V1) ? sample_rate / 2 : sample_rate;
-	int ceiling = rss_aac_lc_max_bitrate(core_rate) / 8 * 7;
+	int ceiling = rss_aac_lc_max_bitrate(core_rate);
+#if !(defined(FAAC_VERSION_MAJOR) && FAAC_VERSION_MAJOR >= 2)
+	/* Without a per-frame limiter the reservoir lets a single frame run
+	 * about a tenth over the average, so hold the average to 7/8 of the
+	 * bound to keep every frame under it. */
+	ceiling = ceiling / 8 * 7;
+#endif
 	if (bitrate > ceiling) {
 		if (rss_config_get_str(cfg, "audio", "bitrate", NULL))
 			RSS_WARN("aac: bitrate %d exceeds AAC-LC's %d at %d Hz, held there",
@@ -81,7 +86,11 @@ static int aac_init(rad_codec_ctx_t *ctx, rss_config_t *cfg, int sample_rate)
 	}
 
 	faac_params params;
+#if defined(FAAC_VERSION_MAJOR) && FAAC_VERSION_MAJOR >= 2
+	faac_status status = faac_params_init(&params, sizeof(params));
+#else
 	faac_status status = faac_params_init(&params);
+#endif
 	if (status != FAAC_OK) {
 		free(st);
 		return -1;
@@ -96,6 +105,13 @@ static int aac_init(rad_codec_ctx_t *ctx, rss_config_t *cfg, int sample_rate)
 	params.bandwidth = 0;		     /* derive cutoff from bit_rate */
 	params.output_format = FAAC_STREAM_RAW;
 	params.input_format = FAAC_INPUT_16BIT;
+#if defined(FAAC_VERSION_MAJOR) && FAAC_VERSION_MAJOR >= 2
+	/* Bound every frame, not just the average: the CBR reservoir stuffs
+	 * a frame that would overflow the decoder buffer, and max_bit_rate
+	 * (whole-stream) is the per-frame ceiling it may never cross. */
+	params.rate_control = FAAC_RC_CBR;
+	params.max_bit_rate = (uint32_t)rss_aac_lc_max_bitrate(core_rate) * params.num_channels;
+#endif
 
 	status = faac_encoder_open(&params, &st->handle);
 	if (status != FAAC_OK) {
