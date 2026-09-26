@@ -607,6 +607,8 @@ static void load_sensor_from_section(rss_config_t *cfg, const char *section,
 	if (sensor->default_boot < 0)
 		sensor->default_boot = 0;
 
+	sensor->mode = rss_config_get_int(cfg, section, "mode", -1);
+
 	/* vin_type/mclk are enum-typed (unsigned on MIPS): resolve in a
 	 * signed local so the <0 "unset" checks actually work */
 	int mclk = rss_config_get_int(cfg, section, "mclk", -1);
